@@ -2,7 +2,8 @@
 //! les 6 heures, téléchargement et remplacement de l'exécutable sur demande (bouton).
 //! Chaque binaire publié a son empreinte SHA-256, vérifiée avant installation.
 
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use eframe::egui;
@@ -136,9 +137,26 @@ impl Updater {
     }
 }
 
+/// Chemin de l'exécutable, relevé au lancement : une fois le fichier remplacé, Linux ne le
+/// donne plus (« poe2-tracker (deleted) »).
+static EXE: OnceLock<PathBuf> = OnceLock::new();
+
+/// À appeler au tout début du programme.
+pub fn remember_exe() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = EXE.set(exe);
+    }
+}
+
 /// Relance l'exécutable (la nouvelle version) ; l'appelant ferme ensuite la fenêtre.
 pub fn restart() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = match EXE.get() {
+        Some(p) => p.clone(),
+        None => {
+            let p = std::env::current_exe().map_err(|e| e.to_string())?;
+            PathBuf::from(p.to_string_lossy().trim_end_matches(" (deleted)"))
+        }
+    };
     std::process::Command::new(exe).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 

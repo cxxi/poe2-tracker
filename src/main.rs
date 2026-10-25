@@ -1554,6 +1554,7 @@ fn style(ctx: &egui::Context) {
 }
 
 fn main() -> eframe::Result {
+    updater::remember_exe();
     let dirs = ProjectDirs::from("", "", "poe2-tracker").expect("dossier personnel introuvable");
     let stored = Config::load(&dirs);
     let config = stored.resolved();
