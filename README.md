@@ -104,3 +104,8 @@ objet copié dans un fichier), `--compare <fichier>`, `--assets <filtre>` et
 Publier une version : mettre à jour `version` dans `Cargo.toml`, puis pousser un tag
 `vX.Y.Z`. Le workflow `release.yml` compile et teste sous Linux et Windows, puis publie les
 binaires, leurs empreintes et l'archive Windows.
+
+## Licence
+
+Code sous licence [MIT](LICENSE). Les images et données du jeu restent la propriété de
+Grinding Gear Games.

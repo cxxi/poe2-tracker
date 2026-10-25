@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "poe2-tracker"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arboard",
  "bcdec_rs",
