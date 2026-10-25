@@ -44,6 +44,10 @@ fn get(url: &str) -> Result<ureq::Response, String> {
 }
 
 fn check() -> Result<State, String> {
+    check_against(VERSION)
+}
+
+fn check_against(current: &str) -> Result<State, String> {
     #[derive(Deserialize)]
     struct Asset {
         name: String,
@@ -55,7 +59,7 @@ fn check() -> Result<State, String> {
         assets: Vec<Asset>,
     }
     let r: Release = get(LATEST)?.into_json().map_err(|e| e.to_string())?;
-    if !newer(&r.tag_name, VERSION) {
+    if !newer(&r.tag_name, current) {
         return Ok(State::UpToDate);
     }
     let find = |name: &str| r.assets.iter().find(|a| a.name == name).map(|a| a.browser_download_url.clone());
@@ -70,15 +74,21 @@ fn download(url: &str) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-/// Télécharge, vérifie l'empreinte et remplace l'exécutable en cours (possible même pendant
-/// qu'il tourne, sous Windows comme sous Linux).
-fn install(url: &str, sha_url: &str) -> Result<(), String> {
+/// Binaire téléchargé, seulement si son empreinte correspond à celle publiée.
+fn download_verified(url: &str, sha_url: &str) -> Result<Vec<u8>, String> {
     let data = download(url)?;
     let expected = String::from_utf8_lossy(&download(sha_url)?).split_whitespace().next().unwrap_or_default().to_lowercase();
     let actual: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
     if expected != actual {
         return Err("empreinte incorrecte : téléchargement corrompu, rien n'a été remplacé".into());
     }
+    Ok(data)
+}
+
+/// Télécharge, vérifie l'empreinte et remplace l'exécutable en cours (possible même pendant
+/// qu'il tourne, sous Windows comme sous Linux).
+fn install(url: &str, sha_url: &str) -> Result<(), String> {
+    let data = download_verified(url, sha_url)?;
     let tmp = std::env::temp_dir().join(format!("poe2-tracker-update-{}", std::process::id()));
     std::fs::write(&tmp, &data).map_err(|e| e.to_string())?;
     let result = self_replace::self_replace(&tmp).map_err(|e| format!("remplacement impossible : {e}"));
@@ -135,6 +145,16 @@ pub fn restart() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Réseau : la dernière version publiée est trouvée, téléchargée et son empreinte vérifiée.
+    #[test]
+    #[ignore]
+    fn published_release_downloads_and_verifies() {
+        let State::Available { version, url, sha_url } = check_against("0.0.1").unwrap() else { panic!("aucune version publiée") };
+        let data = download_verified(&url, &sha_url).unwrap();
+        eprintln!("version {version} : {} octets vérifiés", data.len());
+        assert!(data.len() > 1_000_000);
+    }
 
     #[test]
     fn version_order() {
