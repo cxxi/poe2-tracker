@@ -1,0 +1,493 @@
+//! Onglets du build : sorts, talents (arbre) et ascendances, pour une étape du guide.
+
+use std::collections::{HashMap, HashSet};
+
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+
+use crate::art::Assets;
+use crate::guide::{Catalog, Step};
+use crate::ui::{GOLD, GOLD_DIM};
+
+const GREEN: Color32 = Color32::from_rgb(110, 210, 110);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Equipment,
+    Skills,
+    Passives,
+    Ascendancy,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::Equipment, Tab::Skills, Tab::Passives, Tab::Ascendancy];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Equipment => "Équipement",
+            Tab::Skills => "Sorts",
+            Tab::Passives => "Talents",
+            Tab::Ascendancy => "Ascendances",
+        }
+    }
+}
+
+/// Choix de l'étape affichée ; `None` = étape actuelle du personnage.
+pub fn step_selector(ui: &mut egui::Ui, steps: &[Step], selected: &mut Option<usize>, current: Option<usize>) -> usize {
+    let shown = selected.or(current).unwrap_or(0).min(steps.len().saturating_sub(1));
+    let label = |i: usize| {
+        let s = &steps[i].label;
+        if Some(i) == current { format!("{s} (actuelle)") } else { s.clone() }
+    };
+    egui::ComboBox::from_id_salt("view_step").selected_text(RichText::new(label(shown)).color(GOLD)).show_ui(ui, |ui| {
+        for i in 0..steps.len() {
+            if ui.selectable_label(i == shown, label(i)).clicked() {
+                *selected = if Some(i) == current { None } else { Some(i) };
+            }
+        }
+    });
+    shown
+}
+
+// --- Sorts ----------------------------------------------------------------------------
+
+pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, assets: &mut Assets) {
+    let before: HashSet<&str> = prev.map(|p| p.skills.iter().map(|s| s.name.as_str()).collect()).unwrap_or_default();
+    for skill in &step.skills {
+        egui::Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(10, 9, 8, 210))
+            .stroke(Stroke::new(1.0_f32, GOLD_DIM))
+            .corner_radius(4)
+            .inner_margin(8)
+            .outer_margin(egui::Margin::symmetric(0, 3))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    icon(ui, assets, &skill.name, 44.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&skill.name).color(GOLD).size(16.0).strong());
+                            if prev.is_some() && !before.contains(skill.name.as_str()) {
+                                ui.label(RichText::new("nouveau").color(GREEN).small().strong());
+                            }
+                        });
+                        let (txt, col) = if skill.from_level > level {
+                            (format!("à partir du niveau {} (tu es niveau {level})", skill.from_level), Color32::from_rgb(220, 150, 90))
+                        } else {
+                            (format!("dès le niveau {}", skill.from_level), Color32::GRAY)
+                        };
+                        ui.label(RichText::new(txt).color(col).small());
+                        ui.horizontal_wrapped(|ui| {
+                            for (name, lvl) in &skill.supports {
+                                ui.horizontal(|ui| {
+                                    icon(ui, assets, name, 22.0);
+                                    let mut t = RichText::new(name).color(Color32::LIGHT_GRAY);
+                                    if *lvl > level {
+                                        t = t.color(Color32::GRAY).italics();
+                                    }
+                                    ui.label(t).on_hover_text(format!("support dès le niveau {lvl}"));
+                                });
+                                ui.add_space(6.0);
+                            }
+                        });
+                    });
+                });
+            });
+    }
+    if let Some(prev) = prev {
+        let now: HashSet<&str> = step.skills.iter().map(|s| s.name.as_str()).collect();
+        let dropped: Vec<&str> = prev.skills.iter().map(|s| s.name.as_str()).filter(|n| !now.contains(n)).collect();
+        if !dropped.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("Abandonnés à cette étape : {}", dropped.join(", "))).color(Color32::GRAY));
+        }
+    }
+}
+
+fn icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32) {
+    match assets.texture_by_name(name) {
+        Some(tex) => {
+            let s = tex.size_vec2();
+            let k = (size / s.x).min(size / s.y);
+            ui.add_sized([size, size], egui::Image::new((tex.id(), s * k)));
+        }
+        None => {
+            ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+        }
+    }
+}
+
+// --- Ascendances ----------------------------------------------------------------------
+
+pub fn ascendancy(ui: &mut egui::Ui, steps: &[Step], current: Option<usize>, catalog: &Catalog) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut any = false;
+    for (i, step) in steps.iter().enumerate() {
+        let fresh: Vec<&crate::guide::Passive> = step
+            .passives
+            .iter()
+            .filter(|id| seen.insert(id.as_str()))
+            .filter_map(|id| catalog.passives.get(id))
+            .filter(|p| p.ascendancy && p.notable)
+            .collect();
+        if fresh.is_empty() {
+            continue;
+        }
+        any = true;
+        let reached = current.is_some_and(|c| i <= c);
+        ui.add_space(6.0);
+        ui.label(RichText::new(&step.label).color(if reached { GOLD } else { GOLD_DIM }).size(13.0).strong());
+        for p in fresh {
+            egui::Frame::new()
+                .fill(Color32::from_rgba_unmultiplied(10, 9, 8, 210))
+                .stroke(Stroke::new(1.0_f32, if reached { GOLD } else { GOLD_DIM }))
+                .corner_radius(4)
+                .inner_margin(8)
+                .outer_margin(egui::Margin::symmetric(0, 3))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(&p.name).color(GOLD).size(15.0).strong());
+                    for s in &p.stats {
+                        ui.label(RichText::new(s).color(Color32::from_rgb(136, 136, 255)));
+                    }
+                });
+        }
+    }
+    if !any {
+        ui.label(RichText::new("Ce build ne précise pas d'ascendance.").color(Color32::GRAY));
+    }
+}
+
+// --- Talents (arbre) -----------------------------------------------------------------
+
+struct Node {
+    id: String,
+    pos: Pos2,
+    kind: u8, // 0 petit, 1 notable, 2 keystone, 3 joyau, 4 départ de classe
+    /// Nœuds reliés, avec le rayon d'arc signé de la liaison (0 = droite).
+    links: Vec<(usize, f32)>,
+    icon: String,
+    group: Pos2,
+    orbit: u8,
+    attribute: bool,
+}
+
+/// Les trois attributs : nom, couleur, icône « + » du jeu.
+const ATTRIBUTES: [(&str, Color32, &str); 3] = [
+    ("Force", Color32::from_rgb(205, 75, 60), "Art/2DArt/SkillIcons/passives/plusstrength.dds"),
+    ("Dextérité", Color32::from_rgb(95, 185, 85), "Art/2DArt/SkillIcons/passives/plusdexterity.dds"),
+    ("Intelligence", Color32::from_rgb(85, 135, 235), "Art/2DArt/SkillIcons/passives/plusintelligence.dds"),
+];
+
+/// Points d'un arc de cercle de `a` à `b` autour de `center`, par le plus court chemin.
+fn arc(a: Pos2, b: Pos2, center: Pos2, segments: usize) -> Vec<Pos2> {
+    let (ra, rb) = ((a - center).angle(), (b - center).angle());
+    let mut d = rb - ra;
+    while d > std::f32::consts::PI {
+        d -= std::f32::consts::TAU;
+    }
+    while d < -std::f32::consts::PI {
+        d += std::f32::consts::TAU;
+    }
+    let r = (a - center).length();
+    (0..=segments).map(|i| center + Vec2::angled(ra + d * i as f32 / segments as f32) * r).collect()
+}
+
+/// Tracé d'une liaison (coordonnées de l'arbre) : arc de rayon donné, arc du groupe, ou droite.
+fn link_path(a: &Node, b: &Node, radius: f32) -> Vec<Pos2> {
+    let (pa, pb) = (a.pos, b.pos);
+    if radius != 0.0 {
+        let half = (pb - pa).length() / 2.0;
+        let r = radius.abs();
+        if r > half && half > 0.0 {
+            let mid = pa + (pb - pa) / 2.0;
+            let normal = Vec2::new(-(pb - pa).y, (pb - pa).x) / (2.0 * half);
+            // Convention vérifiée sur le rendu : côté opposé au signe de la liaison.
+            let center = mid - normal * (r * r - half * half).sqrt() * radius.signum();
+            return arc(pa, pb, center, 16);
+        }
+    }
+    if a.group == b.group && a.orbit == b.orbit && a.orbit > 0 {
+        return arc(pa, pb, a.group, 16);
+    }
+    vec![pa, pb]
+}
+
+const CENTER_CIRCLE: &str = "art/textures/interface/2d/2dart/uiimages/ingame/passivetree/passivetreemaincircle.dds";
+const ACTIVE_START: &str = "art/textures/interface/2d/2dart/uiimages/ingame/passivetree/passivetreemaincircleactive.dds";
+/// Distance des départs rapportée à la demi-largeur du médaillon : la croix tombe dans son trèfle.
+const RING_FRACTION: f32 = 0.784;
+/// Agrandissement du médaillon (et de la croix, repoussée d'autant) pour que les premiers
+/// nœuds, posés à leur vraie position, tombent dans les alvéoles de l'ornement comme en jeu.
+const MEDALLION_SCALE: f32 = 1.055;
+/// Largeur de l'image du départ actif rapportée à celle du médaillon (364 px sur 4008 px).
+const START_FRACTION: f32 = 364.0 / 4008.0;
+/// Position de la croix dans l'image du départ actif (mesurée) : elle n'est pas centrée.
+const START_ANCHOR: Vec2 = Vec2::new(0.494, 0.603);
+
+/// Rayon d'un nœud en unités de l'arbre (PoB), selon son type.
+fn world_radius(kind: u8) -> f32 {
+    match kind {
+        2 => 95.0,
+        1 => 70.0,
+        3 => 60.0,
+        4 => 80.0,
+        _ => 45.0,
+    }
+}
+
+#[derive(Default)]
+pub struct TreeView {
+    nodes: Vec<Node>,
+    index: HashMap<String, usize>,
+    center: Pos2,
+    zoom: f32,
+    pan: Vec2,
+    fitted_for: Option<String>,
+    /// Attribut choisi à la main pour un nœud d'attribut (0 Force, 1 Dextérité, 2 Intelligence),
+    /// mémorisé par build dans `overrides_file`.
+    overrides: HashMap<String, usize>,
+    overrides_file: Option<std::path::PathBuf>,
+}
+
+impl TreeView {
+    fn build(&mut self, catalog: &Catalog) {
+        if !self.nodes.is_empty() || catalog.passives.is_empty() {
+            return;
+        }
+        let main: Vec<(&String, &crate::guide::Passive)> =
+            catalog.passives.iter().filter(|(_, p)| !p.ascendancy && !p.hidden && (p.x != 0.0 || p.y != 0.0)).collect();
+        let by_skill: HashMap<u32, usize> = main.iter().enumerate().map(|(i, (_, p))| (p.skill, i)).collect();
+        self.nodes = main
+            .iter()
+            .map(|(id, p)| Node {
+                id: (*id).clone(),
+                pos: Pos2::new(p.x, p.y),
+                kind: if p.class_start { 4 } else if p.keystone { 2 } else if p.jewel { 3 } else if p.notable { 1 } else { 0 },
+                links: p
+                    .links
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, s)| by_skill.get(s).map(|j| (*j, p.link_arcs.get(k).copied().unwrap_or(0.0))))
+                    .collect(),
+                icon: p.icon.clone(),
+                group: Pos2::new(p.gx, p.gy),
+                orbit: p.orbit,
+                attribute: p.attribute,
+            })
+            .collect();
+        self.index = self.nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), i)).collect();
+    }
+
+    /// Fichier des choix d'attributs du build affiché (rechargé quand le build change).
+    pub fn use_overrides_file(&mut self, path: std::path::PathBuf) {
+        if self.overrides_file.as_ref() == Some(&path) {
+            return;
+        }
+        self.overrides = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        self.overrides_file = Some(path);
+    }
+
+    fn save_overrides(&self) {
+        if let Some(path) = &self.overrides_file {
+            let _ = std::fs::write(path, serde_json::to_string_pretty(&self.overrides).unwrap_or_default());
+        }
+    }
+
+    /// Cadre la vue sur les nœuds du build (ou tout l'arbre), avec un minimum de contexte.
+    fn fit(&mut self, rect: Rect, ids: &HashSet<usize>) {
+        let pts: Vec<Pos2> = if ids.is_empty() { self.nodes.iter().map(|n| n.pos).collect() } else { ids.iter().map(|i| self.nodes[*i].pos).collect() };
+        if pts.is_empty() {
+            return;
+        }
+        let bb = Rect::from_points(&pts).expand(600.0);
+        let size = bb.size().max(Vec2::splat(5000.0));
+        self.center = bb.center();
+        self.zoom = (rect.width() / size.x).min(rect.height() / size.y) * 0.95;
+        self.pan = Vec2::ZERO;
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        step: &Step,
+        prev: Option<&Step>,
+        catalog: &Catalog,
+        icons: &mut crate::passive_icons::PassiveIcons,
+        key: String,
+    ) {
+        self.build(catalog);
+        if self.nodes.is_empty() {
+            ui.put(rect, egui::Label::new(RichText::new("Arbre en cours de chargement…").color(Color32::GRAY)));
+            return;
+        }
+        let mut taken: HashSet<usize> = step.passives.iter().filter_map(|id| self.index.get(id).copied()).collect();
+        let before: HashSet<usize> = prev.map(|p| p.passives.iter().filter_map(|id| self.index.get(id).copied()).collect()).unwrap_or_default();
+        let counted = taken.len();
+        let fresh_count = if prev.is_some() { taken.difference(&before).count() } else { 0 };
+        // Le départ de la classe est pris d'office : on le relie au chemin du build.
+        let starts: Vec<usize> = (0..self.nodes.len())
+            .filter(|i| self.nodes[*i].kind == 4 && self.nodes[*i].links.iter().any(|(j, _)| taken.contains(j)))
+            .collect();
+        taken.extend(starts);
+        if self.fitted_for.as_ref() != Some(&key) {
+            self.fit(rect, &taken);
+            self.fitted_for = Some(key);
+        }
+
+        // Déplacement à la souris, zoom à la molette autour du curseur.
+        let resp = ui.interact(rect, ui.id().with("tree"), Sense::click_and_drag());
+        if resp.dragged() {
+            self.pan += resp.drag_delta();
+        }
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                let factor = (1.0 + scroll * 0.0015).clamp(0.5, 2.0);
+                let new_zoom = (self.zoom * factor).clamp(0.01, 1.5);
+                let factor = new_zoom / self.zoom;
+                if let Some(cursor) = resp.hover_pos() {
+                    let anchor = cursor - rect.center() - self.pan;
+                    self.pan -= anchor * (factor - 1.0);
+                }
+                self.zoom = new_zoom;
+            }
+        }
+        if resp.double_clicked() {
+            self.fit(rect, &taken);
+        }
+        let main_attr = catalog.main_attribute(step);
+        let overrides = &self.overrides;
+        let attr_of = |n: &Node| overrides.get(&n.id).copied().unwrap_or(main_attr);
+        let to_screen = |p: Pos2| rect.center() + self.pan + (p - self.center) * self.zoom;
+        let is_fresh = |i: usize| prev.is_some() && taken.contains(&i) && !before.contains(&i) && self.nodes[i].kind != 4;
+
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(6, 6, 6, 235));
+        // Médaillon central du jeu : son anneau passe par les six départs de classe.
+        let start_ring = self
+            .nodes
+            .iter()
+            .filter(|n| n.kind == 4)
+            .map(|n| n.pos.to_vec2().length())
+            .fold(0.0_f32, f32::max)
+            .max(1000.0);
+        painter.circle_filled(to_screen(Pos2::ZERO), start_ring * self.zoom, Color32::from_rgb(12, 10, 14));
+        if let Some(tex) = icons.get(CENTER_CIRCLE).cloned() {
+            let half = start_ring / RING_FRACTION * MEDALLION_SCALE;
+            let r = Rect::from_center_size(to_screen(Pos2::ZERO), Vec2::splat(2.0 * half * self.zoom));
+            painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        let dim = Color32::from_rgb(52, 49, 44);
+        // Certaines liaisons ne sont listées que d'un côté : on les trace toutes, une seule fois.
+        let mut drawn: HashSet<(usize, usize)> = HashSet::new();
+        for (i, n) in self.nodes.iter().enumerate() {
+            for &(j, radius) in &n.links {
+                // Les premiers nœuds sont sertis dans le médaillon : pas de trait vers le départ.
+                if n.kind == 4 || self.nodes[j].kind == 4 || !drawn.insert((i.min(j), i.max(j))) {
+                    continue;
+                }
+                let (a, b) = (to_screen(n.pos), to_screen(self.nodes[j].pos));
+                // On écarte vite les liaisons hors champ (marge pour la courbure des arcs).
+                if !rect.expand(radius.abs() * self.zoom).intersects(Rect::from_two_pos(a, b)) {
+                    continue;
+                }
+                let both = taken.contains(&i) && taken.contains(&j);
+                let color = if both && (is_fresh(i) || is_fresh(j)) { GREEN } else if both { GOLD } else { dim };
+                let points: Vec<Pos2> = link_path(n, &self.nodes[j], radius).into_iter().map(to_screen).collect();
+                painter.add(egui::Shape::line(points, Stroke::new(if both { 3.0_f32 } else { 1.5 }, color)));
+            }
+        }
+        let mut hovered: Option<usize> = None;
+        let cursor = resp.hover_pos();
+        for (i, n) in self.nodes.iter().enumerate() {
+            let p = to_screen(n.pos);
+            if n.kind == 4 {
+                // Départ de classe : ornement du médaillon ; croix dorée sur celui du build.
+                if taken.contains(&i) {
+                    if let Some(tex) = icons.get(ACTIVE_START).cloned() {
+                        // Même échelle que le médaillon ; croix dans son trèfle, arcs vers l'extérieur.
+                        let p = to_screen(n.pos * MEDALLION_SCALE);
+                        let size = 2.0 * start_ring / RING_FRACTION * MEDALLION_SCALE * START_FRACTION * self.zoom;
+                        let rect = Rect::from_min_size(p - START_ANCHOR * size, Vec2::splat(size));
+                        let mut mesh = egui::Mesh::with_texture(tex.id());
+                        mesh.add_rect_with_uv(rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                        mesh.rotate(egui::emath::Rot2::from_angle(n.pos.x.atan2(-n.pos.y)), p);
+                        painter.add(egui::Shape::mesh(mesh));
+                    }
+                }
+                continue;
+            }
+            let r = (world_radius(n.kind) * self.zoom).clamp(1.5, 40.0);
+            if !rect.expand(r).contains(p) {
+                continue;
+            }
+            let on = taken.contains(&i);
+            let mut color = if is_fresh(i) { GREEN } else if on { GOLD } else { Color32::from_rgb(90, 86, 78) };
+            // Nœud d'attribut pris : couleur et icône de l'attribut choisi.
+            let mut icon = n.icon.as_str();
+            if n.attribute && on {
+                let (_, c, ic) = ATTRIBUTES[attr_of(n)];
+                icon = ic;
+                if !is_fresh(i) {
+                    color = c;
+                }
+            }
+            // Icône du jeu dès que le nœud est assez grand à l'écran.
+            let tex = if r >= 7.0 { icons.get(icon).cloned() } else { None };
+            match tex {
+                Some(tex) => {
+                    painter.circle_filled(p, r, Color32::BLACK);
+                    let tint = if on { Color32::WHITE } else { Color32::from_gray(95) };
+                    painter.image(tex.id(), Rect::from_center_size(p, Vec2::splat(r * 1.6)), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
+                    painter.circle_stroke(p, r, Stroke::new(if on { 2.5_f32 } else { 1.5 }, color));
+                }
+                None => {
+                    painter.circle_filled(p, r, color);
+                }
+            }
+            if cursor.is_some_and(|c| c.distance(p) <= r + 3.0) {
+                hovered = Some(i);
+            }
+        }
+        let mut cycle: Option<String> = None;
+        if let Some(i) = hovered {
+            let n = &self.nodes[i];
+            let r = (world_radius(n.kind) * self.zoom).clamp(1.5, 40.0);
+            painter.circle_stroke(to_screen(n.pos), r + 4.0, Stroke::new(1.5_f32, Color32::WHITE));
+            if n.attribute && taken.contains(&i) {
+                if resp.secondary_clicked() {
+                    cycle = Some(n.id.clone());
+                }
+                let (name, c, _) = ATTRIBUTES[attr_of(n)];
+                let chosen = overrides.contains_key(&n.id);
+                resp.on_hover_ui_at_pointer(|ui| {
+                    ui.label(RichText::new(format!("+5 {name}")).color(c).strong());
+                    let why = if chosen { "ton choix" } else { "choix supposé d'après les gemmes du build" };
+                    ui.label(RichText::new(format!("{why} — clic droit pour changer")).color(Color32::GRAY).small());
+                });
+            } else if let Some(p) = catalog.passives.get(&n.id) {
+                resp.on_hover_ui_at_pointer(|ui| {
+                    ui.label(RichText::new(&p.name).color(GOLD).strong());
+                    for s in &p.stats {
+                        ui.label(RichText::new(s).color(Color32::from_rgb(136, 136, 255)));
+                    }
+                });
+            }
+        }
+        if let Some(id) = cycle {
+            let next = (self.overrides.get(&id).copied().unwrap_or(main_attr) + 1) % 3;
+            self.overrides.insert(id, next);
+            self.save_overrides();
+        }
+        // Légende sur fond, pour rester lisible au-dessus des nœuds.
+        let legend = format!(
+            "{counted} nœuds à cette étape{} · glisser : déplacer · molette : zoom · double-clic : recadrer",
+            if prev.is_some() { format!(", dont {fresh_count} nouveaux en vert") } else { String::new() }
+        );
+        let galley = painter.layout_no_wrap(legend, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);
+        let pos = rect.left_top() + Vec2::new(8.0, 8.0);
+        painter.rect_filled(Rect::from_min_size(pos, galley.size()).expand(5.0), 3.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
+        painter.galley(pos, galley, Color32::LIGHT_GRAY);
+    }
+}

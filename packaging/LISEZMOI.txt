@@ -1,0 +1,21 @@
+poe2-tracker - compagnon pour Path of Exile 2
+=============================================
+
+Installation : aucune. Range poe2-tracker.exe dans un dossier fixe
+(par exemple Documents\poe2-tracker) et lance-le.
+
+Premier lancement :
+- Windows peut afficher "Windows a protégé votre ordinateur" (programme non signé) :
+  clique sur "Informations complémentaires" puis "Exécuter quand même".
+- L'écran d'accueil cherche le jeu tout seul. Sinon, indique le dossier
+  d'installation de Path of Exile 2 avec "Parcourir...".
+- Choisis la ligue de ton personnage dans la barre du haut (pour les prix).
+
+En jeu (le jeu doit être en anglais) :
+- Ctrl+C sur un objet : diagnostic (comparaison, valeur au marché, verdict).
+- Ctrl+Alt+C sur une pièce portée : elle rejoint l'équipement suivi.
+- En bas : la route de leveling (points de passif, résistances...),
+  cochée toute seule au fil de la campagne.
+
+L'outil ne touche jamais au jeu : il lit seulement son journal (logs\Client.txt)
+et ce que tu copies avec Ctrl+C.

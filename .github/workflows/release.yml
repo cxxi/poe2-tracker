@@ -1,0 +1,64 @@
+# Publie une version à chaque tag vX.Y.Z : binaires Linux et Windows, empreintes SHA-256
+# (vérifiées par la mise à jour intégrée) et archive Windows prête à envoyer.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            bin: poe2-tracker
+            asset: poe2-tracker-linux-x86_64
+          - os: windows-latest
+            bin: poe2-tracker.exe
+            asset: poe2-tracker-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dépendances Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev
+      - name: Tests
+        run: cargo test --release
+      - name: Compilation
+        # Windows : runtime C intégré, l'exe ne dépend que de DLL système.
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --release
+      - name: Paquet
+        shell: bash
+        run: |
+          mkdir dist
+          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+          cd dist
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            mkdir zip && cp "${{ matrix.asset }}" zip/poe2-tracker.exe && cp ../packaging/LISEZMOI.txt zip/
+            (cd zip && 7z a ../poe2-tracker-windows.zip poe2-tracker.exe LISEZMOI.txt) && rm -r zip
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
