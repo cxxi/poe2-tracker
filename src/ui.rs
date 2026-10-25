@@ -177,6 +177,21 @@ pub fn slot(
         }
     }
 
+    // Le temps que la fiche s'ouvre, un petit indicateur dans le coin montre que ça vient.
+    let since_id = id.with("hover_since");
+    if item.is_some() && resp.hovered() {
+        let now = ui.input(|i| i.time);
+        let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(since_id, || now));
+        if now - since < ui.style().interaction.tooltip_delay as f64 {
+            let size = (rect.width().min(rect.height()) * 0.25).clamp(10.0, 18.0);
+            let corner = rect.right_top() + egui::vec2(-size * 0.5 - 4.0, size * 0.5 + 4.0);
+            egui::Spinner::new().size(size).color(GOLD).paint_at(ui, Rect::from_center_size(corner, egui::vec2(size, size)));
+            ui.ctx().request_repaint();
+        }
+    } else {
+        ui.data_mut(|d| d.remove::<f64>(since_id));
+    }
+
     let mut action = SlotAction::None;
     if let Some(it) = item {
         resp.clone().on_hover_ui(|ui| item_card(ui, it));

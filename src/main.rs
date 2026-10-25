@@ -1545,6 +1545,11 @@ fn style(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+    // Fiches au survol : un peu plus vite, et même si la souris bouge encore un peu.
+    ctx.style_mut_of(egui::Theme::Dark, |s| {
+        s.interaction.tooltip_delay = 0.35;
+        s.interaction.show_tooltips_only_when_still = false;
+    });
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = Color32::from_rgb(12, 11, 10);
     visuals.window_fill = Color32::from_rgb(8, 8, 8);
