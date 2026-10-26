@@ -132,13 +132,15 @@ fn delta(text: String, sign: i8) -> Delta {
     Delta { text, sign }
 }
 
+/// Fioles : comme les dégâts pour une arme, la quantité rendue par gorgée passe avant tout.
+/// Durée, utilisations et mods ne départagent que deux fioles qui rendent autant.
 fn compare_flask(it: &Item, worn: &Item) -> (Verdict, Vec<Delta>) {
     let get = |i: &Item, k: &str| i.props.get(k).copied().unwrap_or(0.0);
-    let mut d = Vec::new();
-    let rec = get(it, "recover") - get(worn, "recover");
-    if rec != 0.0 {
-        d.push(delta(format!("{}{} récupéré", if rec > 0.0 { "+" } else { "−" }, fmt_num(rec.abs())), rec.signum() as i8));
-    }
+    let (r_new, r_old) = (get(it, "recover"), get(worn, "recover"));
+    let mut d = vec![delta(
+        format!("rend {} au lieu de {}{}", fmt_num(r_new), fmt_num(r_old), pct(r_new, r_old)),
+        (r_new - r_old).signum() as i8,
+    )];
     let (t_new, t_old) = (get(it, "recover_time"), get(worn, "recover_time"));
     if t_new != t_old {
         d.push(delta(format!("en {} s au lieu de {} s", fmt_num(t_new), fmt_num(t_old)), (t_old - t_new).signum() as i8));
@@ -147,8 +149,20 @@ fn compare_flask(it: &Item, worn: &Item) -> (Verdict, Vec<Delta>) {
     if u_new != u_old {
         d.push(delta(format!("{u_new} utilisations au lieu de {u_old}"), (u_new - u_old).signum() as i8));
     }
-    let score = |i: &Item| get(i, "recover") * uses(i).min(6.0).sqrt() / get(i, "recover_time").max(0.5).powf(0.25);
-    (ratio_verdict(score(it), score(worn)), d)
+    for m in it.mods.iter().filter(|m| !worn.mods.contains(m)) {
+        d.push(delta(format!("en plus : {m}"), 0));
+    }
+    for m in worn.mods.iter().filter(|m| !it.mods.contains(m)) {
+        d.push(delta(format!("en moins : {m}"), 0));
+    }
+    let verdict = match ratio_verdict(r_new, r_old) {
+        Verdict::Equal => {
+            let rest = |i: &Item| uses(i).min(6.0).sqrt() / get(i, "recover_time").max(0.5).powf(0.25);
+            ratio_verdict(rest(it), rest(worn))
+        }
+        v => v,
+    };
+    (verdict, d)
 }
 
 fn compare_charm(it: &Item, worn: &Item) -> (Verdict, Vec<Delta>) {
@@ -551,6 +565,13 @@ mod tests {
         let longer = STONE_CHARM.replace("Lasts 3", "Lasts 5");
         let c = compare(&item::parse(&longer).unwrap(), &g, None).unwrap();
         assert_eq!((c.verdict, c.against.clone()), (Verdict::Better, vec![Slot::Charm1]));
+        // La quantité rendue l'emporte sur les charges ; à quantité égale, les charges départagent.
+        let bigger_fewer = MANA_FLASK.replace("Recovers 90 Mana", "Recovers 130 Mana").replace("10 of 70", "20 of 40");
+        let c = compare(&item::parse(&bigger_fewer).unwrap(), &g, None).unwrap();
+        assert_eq!(c.verdict, Verdict::Better);
+        assert!(c.deltas[0].text.starts_with("rend 130 au lieu de 90"));
+        let fewer = MANA_FLASK.replace("10 of 70", "20 of 40");
+        assert_eq!(compare(&item::parse(&fewer).unwrap(), &g, None).unwrap().verdict, Verdict::Worse);
         let other = STONE_CHARM.replace("Stone Charm", "Thawing Charm");
         assert_eq!(compare(&item::parse(&other).unwrap(), &g, None).unwrap().verdict, Verdict::Unknown);
     }
