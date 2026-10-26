@@ -47,6 +47,16 @@ impl PriceData {
         self.uniques.get(&format!("{name}|{base}")).copied()
     }
 
+    /// Unique par son seul nom : type de base, valeur en divines et nombre d'annonces de sa
+    /// variante la plus échangée.
+    pub fn unique_by_name(&self, name: &str) -> Option<(&str, f64, u32)> {
+        let prefix = format!("{name}|");
+        self.uniques
+            .iter()
+            .filter_map(|(k, (v, n))| Some((k.strip_prefix(&prefix)?, *v, *n)))
+            .max_by_key(|(_, _, n)| *n)
+    }
+
     /// Valeur en exalts d'un prix d'annonce ("3 divine", "40 exalted"…).
     pub fn listing_to_ex(&self, amount: f64, currency_id: &str) -> Option<f64> {
         let unit = match currency_id {

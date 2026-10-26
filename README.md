@@ -31,11 +31,18 @@ redémarrer. Rien ne s'installe sans clic. `POE2_TRACKER_NO_UPDATE=1` désactive
 - **Ctrl+C** sur un objet : diagnostic.
   - Comparaison avec la pièce suivie au même emplacement (▲ MIEUX / ▼ MOINS BIEN /
     = ÉQUIVALENT), écarts de stats, case comparée allumée dans la grille. Pour les armes
-    d'attaque, les **DPS de l'arme** passent avant tout le reste.
-  - Valeur marchande : poe.ninja pour devises et uniques ; pour les rares et magiques,
-    **annonces comparables** via l'API de trade officielle (même catégorie, mods proches,
-    entre 85 % et 150 % des DPS ou de la défense de base). La valeur estimée est le prix
-    médian des 5 annonces comparables les moins chères.
+    d'attaque, les **DPS de l'arme** passent avant tout le reste. Avec un build, une pièce
+    dont la **base** ne lui convient pas (armure pour un build bouclier d'énergie, autre
+    classe d'arme, bâton d'un autre élément) n'est jamais recommandée.
+  - Conseil (garder, marché, PNJ), prix et confiance : poe.ninja pour devises et uniques ;
+    pour les rares et magiques, **annonces comparables** en achat immédiat via l'API de trade
+    officielle (même catégorie, tous les mods de l'objet entre 85 % et 150 % de leur valeur,
+    au moins autant de mods, entre 85 % et 150 % des DPS ou de la défense de base). Deux
+    recherches au plus : s'il y a trop peu d'annonces, les mods les plus faibles sont
+    lâchés, leur place restant exigée. La valeur estimée est le prix médian des 5 annonces
+    les moins chères, prix aberrants écartés ; les estimations sont gardées 24 h.
+- **Regex marchands** (barre du bas) : copie une recherche faite d'après les mods que vise le
+  build ; collée dans la recherche d'un marchand en jeu, elle allume les objets utiles.
 - **Ctrl+Alt+C** sur une pièce portée : elle rejoint l'équipement suivi, disposé comme l'écran
   de personnage du jeu (survol = fiche, clic droit = ne plus suivre).
 - **Route de leveling** (en bas) : contenus facultatifs de la campagne à ne pas rater
@@ -56,8 +63,10 @@ il joue : elle se choisit par personnage (par défaut, la première ligue en cou
 
 ## Builds
 
-⚙ Paramètres → Gestionnaire de builds : lien Kami-labs, lien direct vers un `.build` / `.zip`,
-ou fichiers glissés dans la fenêtre (Mobalytics, Maxroll : bouton « Download Build File »).
+⚙ Menu → Gestionnaire de builds : colle le lien de la page du build, sur **Mobalytics** ou
+**Kami-labs**. Le tracker récupère d'abord les fichiers `.build` (une étape par variante),
+puis ce que le site donne en plus (runes recommandées) : si cette partie cesse de marcher,
+les étapes restent. « Mettre à jour » relit la page (les guides évoluent).
 Étapes reconnues : par acte (`Act 1`… `Endgame Step N`), par tranche de niveaux
 (`1 - 21 - …`, `22 - End of Campaign - …`) et variantes d'endgame nommées (`BUDGET - …`),
 au choix une fois la campagne finie. Avec un build, les verdicts suivent les objectifs de
@@ -98,7 +107,9 @@ cargo build --release
 ```
 
 Outils en ligne de commande : `--status` (état du guide), `--price <fichier>` (estimation d'un
-objet copié dans un fichier), `--compare <fichier>`, `--assets <filtre>` et
+objet copié dans un fichier), `--price-all <history.json>` (tout un historique, au rythme de
+l'API), `--compare <fichier>`, `--vendor-regex` (regex marchands de chaque étape),
+`--assets <filtre>` et
 `--extract <chemin.dds> sortie.png` (archives du jeu).
 
 Publier une version : mettre à jour `version` dans `Cargo.toml`, puis pousser un tag

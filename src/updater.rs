@@ -35,7 +35,7 @@ pub enum State {
 pub struct Updater(Arc<Mutex<State>>);
 
 /// "0.10.2" > "0.9.7" : comparaison numérique, partie par partie.
-fn newer(candidate: &str, current: &str) -> bool {
+pub fn newer(candidate: &str, current: &str) -> bool {
     let parts = |v: &str| v.trim_start_matches('v').split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
     parts(candidate) > parts(current)
 }

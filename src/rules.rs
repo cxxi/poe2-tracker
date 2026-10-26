@@ -28,6 +28,16 @@ impl Label {
             Label::Vendor => "PNJ",
         }
     }
+
+    /// Le conseil en clair (« à vendre au PNJ »).
+    pub fn advice(self) -> &'static str {
+        match self {
+            Label::Keep => "à garder",
+            Label::Market => "à mettre en vente au marché",
+            Label::Check => "à vérifier",
+            Label::Vendor => "à vendre au PNJ",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -42,6 +42,49 @@ pub struct ArtIndex {
     by_length: Vec<String>,
 }
 
+/// Icône d'unique en pleine résolution : poe.ninja donne celle du site du jeu, réduite
+/// (47 px par case d'inventaire, floue une fois agrandie) ; son chemin, encodé dans l'adresse
+/// (« …/gen/image/<base64 de [25,14,{"f":"2DItems/…"}]>/… »), sert à prendre celle de RePoE.
+fn hd_unique(url: &str) -> String {
+    let path = url
+        .split("/gen/image/")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .and_then(base64_url)
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|v| v.as_array()?.iter().find_map(|x| x["f"].as_str().map(str::to_string)));
+    match path {
+        Some(f) => format!("{REPOE_ART}Art/{f}.png"),
+        None => url.to_string(),
+    }
+}
+
+/// Base64 « URL » (sans remplissage), assez pour les adresses d'images du jeu.
+fn base64_url(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in text.bytes().filter(|c| *c != b'=') {
+        acc = (acc << 6) | value(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 impl ArtIndex {
     fn finish(mut self) -> Self {
         self.by_length = self.bases.keys().cloned().collect();
@@ -60,7 +103,7 @@ impl ArtIndex {
     pub fn url_for(&self, it: &Item) -> Option<String> {
         if it.rarity == Rarity::Unique {
             if let Some(url) = self.uniques.get(&it.name) {
-                return Some(url.clone());
+                return Some(hd_unique(url));
             }
         }
         let base = self.base_of(it)?;
@@ -174,6 +217,17 @@ fn fetch_image(cache: &Path, url: &str) -> Option<ColorImage> {
     Some(ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }
 
+const GRAY: &str = "gray:";
+
+fn grayscale(mut img: ColorImage) -> ColorImage {
+    for p in img.pixels.iter_mut() {
+        let [r, g, b, a] = p.to_srgba_unmultiplied();
+        let l = (0.3 * r as f32 + 0.59 * g as f32 + 0.11 * b as f32) as u8;
+        *p = egui::Color32::from_rgba_unmultiplied(l, l, l, a);
+    }
+    img
+}
+
 /// Illustrations prêtes à afficher, chargées à la demande.
 pub struct Assets {
     pub index: Arc<Mutex<Option<ArtIndex>>>,
@@ -201,7 +255,11 @@ impl Assets {
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 for url in req_rx {
-                    let img = fetch_image(&cache, &url);
+                    // « gray:<url> » : même image, en niveaux de gris.
+                    let img = match url.strip_prefix(GRAY) {
+                        Some(u) => fetch_image(&cache, u).map(grayscale),
+                        None => fetch_image(&cache, &url),
+                    };
                     if res_tx.send((url, img)).is_err() {
                         break;
                     }
@@ -235,10 +293,6 @@ impl Assets {
         }
     }
 
-    pub fn ready(&self) -> bool {
-        self.index.lock().unwrap().is_some()
-    }
-
     /// Illustration d'un type de base par son nom (gemmes : « Ice Nova », « Zenith I »…).
     pub fn texture_by_name(&mut self, name: &str) -> Option<TextureHandle> {
         let url = {
@@ -249,7 +303,46 @@ impl Assets {
         self.texture_url(url)
     }
 
+    /// Icône d'un unique par son nom (poe.ninja).
+    pub fn texture_unique(&mut self, name: &str) -> Option<TextureHandle> {
+        let url = self.index.lock().unwrap().as_ref()?.uniques.get(name)?.clone();
+        self.texture_hd(url)
+    }
+
+    /// Icône d'un unique en noir et blanc (pièce recommandée sur une case vide).
+    pub fn texture_unique_gray(&mut self, name: &str) -> Option<TextureHandle> {
+        let url = self.index.lock().unwrap().as_ref()?.uniques.get(name)?.clone();
+        let hd = format!("{GRAY}{}", hd_unique(&url));
+        if self.missing.contains(&hd) {
+            return self.texture_url(format!("{GRAY}{url}"));
+        }
+        self.texture_url(hd)
+    }
+
+    /// Icône d'unique en pleine résolution, ou celle de poe.ninja si RePoE ne l'a pas.
+    fn texture_hd(&mut self, url: String) -> Option<TextureHandle> {
+        let hd = hd_unique(&url);
+        if self.missing.contains(&hd) {
+            return self.texture_url(url);
+        }
+        self.texture_url(hd)
+    }
+
+    /// Même illustration qu'à `texture_by_name`, en niveaux de gris.
+    pub fn texture_by_name_gray(&mut self, name: &str) -> Option<TextureHandle> {
+        let url = {
+            let idx = self.index.lock().unwrap();
+            let base = idx.as_ref()?.bases.get(name)?;
+            format!("{GRAY}{REPOE_ART}{}", base.art.replace(".dds", ".png"))
+        };
+        self.texture_url(url)
+    }
+
     pub fn texture(&mut self, it: &Item) -> Option<TextureHandle> {
+        let unique = (it.rarity == Rarity::Unique).then(|| self.index.lock().unwrap().as_ref()?.uniques.get(&it.name).cloned()).flatten();
+        if let Some(url) = unique {
+            return self.texture_hd(url);
+        }
         let url = self.index.lock().unwrap().as_ref()?.url_for(it)?;
         self.texture_url(url)
     }
@@ -269,6 +362,13 @@ impl Assets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_icons_use_full_resolution_art() {
+        let ninja = "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvT2ZmaGFuZC9TaGllbGRzL1VuaXF1ZXMvU3ZhbGlubiIsInciOjIsImgiOjQsInNjYWxlIjoxLCJyZWFsbSI6InBvZTIifV0/9725b3d511/Svalinn.png";
+        assert_eq!(hd_unique(ninja), format!("{REPOE_ART}Art/2DItems/Offhand/Shields/Uniques/Svalinn.png"));
+        assert_eq!(hd_unique("https://example.org/x.png"), "https://example.org/x.png");
+    }
     use crate::item::{self, tests::MANA_FLASK};
 
     #[test]

@@ -1,12 +1,15 @@
-//! Onglets du build : sorts, talents (arbre) et ascendances, pour une étape du guide.
+//! Onglets du build : sorts, talents (arbre), ascendances et uniques, pour une étape du guide.
 
 use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::art::Assets;
+use crate::gem_info::GemInfo;
 use crate::guide::{Catalog, Step};
+use crate::prices::PriceData;
 use crate::ui::{GOLD, GOLD_DIM};
+use crate::uniques;
 
 const GREEN: Color32 = Color32::from_rgb(110, 210, 110);
 
@@ -16,10 +19,11 @@ pub enum Tab {
     Skills,
     Passives,
     Ascendancy,
+    Uniques,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Equipment, Tab::Skills, Tab::Passives, Tab::Ascendancy];
+    pub const ALL: [Tab; 5] = [Tab::Equipment, Tab::Skills, Tab::Passives, Tab::Ascendancy, Tab::Uniques];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -27,6 +31,7 @@ impl Tab {
             Tab::Skills => "Sorts",
             Tab::Passives => "Talents",
             Tab::Ascendancy => "Ascendances",
+            Tab::Uniques => "Uniques",
         }
     }
 }
@@ -50,8 +55,57 @@ pub fn step_selector(ui: &mut egui::Ui, steps: &[Step], selected: &mut Option<us
 
 // --- Sorts ----------------------------------------------------------------------------
 
-pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, assets: &mut Assets) {
+/// Infobulle d'une gemme : description et effets (RePoE), quand on les connaît.
+/// Gemmes qui ne se taillent pas (lignée…) : couleur des objets uniques.
+const SPECIAL_GEM: Color32 = Color32::from_rgb(210, 125, 60);
+
+/// « Uncut Skill Gem · niv. 9 » : la gemme non taillée dont on tire cette gemme.
+fn uncut_text(info: &GemInfo) -> String {
+    match info.uncut_level {
+        0 => format!("Uncut {} Gem", info.uncut),
+        n => format!("Uncut {} Gem · niv. {n}", info.uncut),
+    }
+}
+
+fn gem_tooltip(ui: &mut egui::Ui, name: &str, note: &str, info: Option<&GemInfo>) {
+    ui.set_max_width(380.0);
+    ui.label(RichText::new(name).color(GOLD).strong());
+    if !note.is_empty() {
+        ui.label(RichText::new(note).color(Color32::GRAY).small());
+    }
+    if let Some(i) = info {
+        let origin = match (i.lineage, i.special()) {
+            (true, _) => "Gemme de lignée : se trouve telle quelle, ne se taille pas".to_string(),
+            (false, true) => "Gemme spéciale : ne se taille pas dans une Uncut Support Gem".to_string(),
+            _ => format!("À tailler dans : {}", uncut_text(i)),
+        };
+        ui.label(RichText::new(origin).color(if i.special() { SPECIAL_GEM } else { Color32::GRAY }).small());
+        if !i.description.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(&i.description).color(Color32::LIGHT_GRAY));
+        }
+        if !i.effects.is_empty() {
+            ui.add_space(4.0);
+            for e in &i.effects {
+                ui.label(RichText::new(e).color(Color32::from_rgb(136, 136, 255)));
+            }
+        }
+    }
+}
+
+pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, assets: &mut Assets, infos: Option<&HashMap<String, GemInfo>>) {
     let before: HashSet<&str> = prev.map(|p| p.skills.iter().map(|s| s.name.as_str()).collect()).unwrap_or_default();
+    // Supports sur une ligne si ceux de chaque sort tiennent dans la largeur, sinon les uns sous
+    // les autres pour tous les sorts : jamais un mélange des deux.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let spacing = ui.spacing().item_spacing.x;
+    let row_width = |supports: &[(String, u32)]| -> f32 {
+        // Icône, nom, étiquette « niv. N » (environ 40 px) et espacements.
+        supports.iter().map(|(n, _)| 22.0 + 6.0 + ui.fonts(|f| f.layout_no_wrap(n.clone(), font.clone(), Color32::WHITE).size().x) + 40.0 + 3.0 * spacing).sum()
+    };
+    // Largeur des supports dans une carte : moins les marges du cadre et l'icône du sort.
+    let room = ui.available_width() - 16.0 - 44.0 - 3.0 * spacing;
+    let horizontal = step.skills.iter().all(|s| row_width(&s.supports) <= room);
     for skill in &step.skills {
         egui::Frame::new()
             .fill(Color32::from_rgba_unmultiplied(10, 9, 8, 210))
@@ -61,11 +115,12 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
             .outer_margin(egui::Margin::symmetric(0, 3))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                let info = infos.and_then(|m| m.get(&skill.name));
                 ui.horizontal(|ui| {
-                    icon(ui, assets, &skill.name, 44.0);
+                    icon(ui, assets, &skill.name, 44.0).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&skill.name).color(GOLD).size(16.0).strong());
+                            ui.label(RichText::new(&skill.name).color(GOLD).size(16.0).strong()).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
                             if prev.is_some() && !before.contains(skill.name.as_str()) {
                                 ui.label(RichText::new("nouveau").color(GREEN).small().strong());
                             }
@@ -75,18 +130,33 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
                         } else {
                             (format!("dès le niveau {}", skill.from_level), Color32::GRAY)
                         };
-                        ui.label(RichText::new(txt).color(col).small());
-                        ui.horizontal_wrapped(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(txt).color(col).small());
+                            if let Some(i) = info {
+                                ui.label(RichText::new(format!("· {}", uncut_text(i))).color(Color32::GRAY).small());
+                            }
+                        });
+                        let layout = if horizontal { egui::Layout::left_to_right(egui::Align::Center) } else { egui::Layout::top_down(egui::Align::Min) };
+                        ui.with_layout(layout, |ui| {
                             for (name, lvl) in &skill.supports {
+                                let info = infos.and_then(|m| m.get(name));
+                                let note = format!("support dès le niveau {lvl}");
                                 ui.horizontal(|ui| {
-                                    icon(ui, assets, name, 22.0);
-                                    let mut t = RichText::new(name).color(Color32::LIGHT_GRAY);
+                                    icon(ui, assets, name, 22.0).on_hover_ui(|ui| gem_tooltip(ui, name, &note, info));
+                                    // Gemme spéciale (lignée…) : en couleur, pour la repérer.
+                                    let special = info.is_some_and(|i| i.special());
+                                    let mut t = RichText::new(name).color(if special { SPECIAL_GEM } else { Color32::LIGHT_GRAY });
                                     if *lvl > level {
                                         t = t.color(Color32::GRAY).italics();
                                     }
-                                    ui.label(t).on_hover_text(format!("support dès le niveau {lvl}"));
+                                    ui.label(t).on_hover_ui(|ui| gem_tooltip(ui, name, &note, info));
+                                    // Niveau de l'Uncut Support Gem à tailler.
+                                    if let Some(n) = info.map(|i| i.uncut_level).filter(|n| *n > 0) {
+                                        ui.label(RichText::new(format!("niv. {n}")).color(Color32::GRAY).small())
+                                            .on_hover_text(format!("Uncut Support Gem de niveau {n} minimum"));
+                                    }
+                                    ui.add_space(6.0);
                                 });
-                                ui.add_space(6.0);
                             }
                         });
                     });
@@ -103,8 +173,107 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
     }
 }
 
-fn icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32) {
+fn icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32) -> egui::Response {
     match assets.texture_by_name(name) {
+        Some(tex) => {
+            let s = tex.size_vec2();
+            let k = (size / s.x).min(size / s.y);
+            ui.add_sized([size, size], egui::Image::new((tex.id(), s * k)).sense(Sense::hover()))
+        }
+        None => ui.allocate_exact_size(Vec2::splat(size), Sense::hover()).1,
+    }
+}
+
+// --- Uniques -------------------------------------------------------------------------
+
+const UNIQUE: Color32 = Color32::from_rgb(175, 96, 37);
+
+/// Uniques de l'étape affichée (en cartes), puis tous ceux du build, les plus partagés
+/// entre étapes d'abord.
+pub fn uniques(ui: &mut egui::Ui, steps: &[Step], shown: usize, worn: &HashSet<String>, prices: Option<&PriceData>, league: &str, assets: &mut Assets) {
+    let summary = uniques::summary(steps);
+    let step = &steps[shown];
+    let price = |name: &str| -> (Option<String>, String) {
+        let Some((base, div, listings)) = prices.and_then(|p| p.unique_by_name(name)) else { return (None, "prix ?".into()) };
+        let p = prices.unwrap();
+        let text = if listings < crate::prices::MIN_LISTINGS { format!("~{} (peu d'annonces)", p.fmt(div)) } else { format!("≈ {}", p.fmt(div)) };
+        (Some(base.to_string()), text)
+    };
+    let here = uniques::of_step(step);
+    if here.is_empty() {
+        ui.label(RichText::new(format!("Aucun unique recommandé à l'étape {}.", step.label)).color(Color32::GRAY));
+    }
+    for (w, count) in here {
+        let (base, price_text) = price(&w.name);
+        let others: Vec<&str> = summary
+            .iter()
+            .find(|s| s.name == w.name)
+            .map(|s| s.steps.iter().map(String::as_str).filter(|l| *l != step.label).collect())
+            .unwrap_or_default();
+        let have = worn.contains(&w.name);
+        egui::Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(10, 9, 8, 210))
+            .stroke(Stroke::new(1.0_f32, if have { GREEN.gamma_multiply(0.6) } else { GOLD_DIM }))
+            .corner_radius(4)
+            .inner_margin(8)
+            .outer_margin(egui::Margin::symmetric(0, 3))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    unique_icon(ui, assets, &w.name, 44.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            let title = if count > 1 { format!("{} ×{count}", w.name) } else { w.name.clone() };
+                            ui.label(RichText::new(title).color(UNIQUE).size(16.0).strong());
+                            if have {
+                                ui.label(RichText::new("✓ porté").color(GREEN).strong());
+                            }
+                        });
+                        let slot = uniques::slot_label(uniques::slot(w.slot, base.as_deref()));
+                        let what = match &base {
+                            Some(b) => format!("{slot} · {b}"),
+                            None => slot.to_string(),
+                        };
+                        ui.label(RichText::new(what).color(Color32::GRAY).small());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&price_text).color(GOLD));
+                            ui.hyperlink_to("chercher sur le trade ↗", uniques::trade_url(league, &w.name, base.as_deref()));
+                        });
+                        if !others.is_empty() {
+                            ui.label(RichText::new(format!("aussi dans : {}", others.join(", "))).color(Color32::GRAY).small());
+                        }
+                    });
+                });
+            });
+    }
+    if summary.is_empty() {
+        return;
+    }
+    ui.add_space(10.0);
+    ui.label(RichText::new("TOUT LE BUILD").color(GOLD_DIM).strong());
+    ui.label(RichText::new("du plus utilisé entre étapes au moins utilisé").color(Color32::DARK_GRAY).small());
+    ui.add_space(4.0);
+    egui::Grid::new("all_uniques").num_columns(4).spacing([14.0, 4.0]).striped(true).show(ui, |ui| {
+        for s in &summary {
+            let (base, price_text) = price(&s.name);
+            let have = worn.contains(&s.name);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(if have { "✓" } else { "★" }).color(if have { GREEN } else { UNIQUE }));
+                ui.hyperlink_to(RichText::new(&s.name).color(UNIQUE), uniques::trade_url(league, &s.name, base.as_deref()))
+                    .on_hover_text("chercher sur le trade");
+            });
+            ui.label(RichText::new(uniques::slot_label(uniques::slot(s.slot, base.as_deref()))).color(Color32::GRAY));
+            let n = s.steps.len();
+            ui.label(RichText::new(if n > 1 { format!("{n} étapes") } else { s.steps[0].clone() }).color(Color32::LIGHT_GRAY))
+                .on_hover_text(s.steps.join(", "));
+            ui.label(RichText::new(price_text).color(GOLD));
+            ui.end_row();
+        }
+    });
+}
+
+fn unique_icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32) {
+    match assets.texture_unique(name) {
         Some(tex) => {
             let s = tex.size_vec2();
             let k = (size / s.x).min(size / s.y);
@@ -315,14 +484,26 @@ impl TreeView {
         catalog: &Catalog,
         icons: &mut crate::passive_icons::PassiveIcons,
         key: String,
+        set: u8,
     ) {
         self.build(catalog);
         if self.nodes.is_empty() {
             ui.put(rect, egui::Label::new(RichText::new("Arbre en cours de chargement…").color(Color32::GRAY)));
             return;
         }
-        let mut taken: HashSet<usize> = step.passives.iter().filter_map(|id| self.index.get(id).copied()).collect();
-        let before: HashSet<usize> = prev.map(|p| p.passives.iter().filter_map(|id| self.index.get(id).copied()).collect()).unwrap_or_default();
+        // Passifs d'un set d'armes : ceux du set affiché comptent comme pris, ceux de l'autre
+        // set restent éteints, juste entourés de leur couleur.
+        let taken_in = |s: &Step| -> HashSet<usize> {
+            s.passives
+                .iter()
+                .filter(|id| s.passive_sets.get(*id).is_none_or(|n| *n == set))
+                .filter_map(|id| self.index.get(id).copied())
+                .collect()
+        };
+        let mut taken = taken_in(step);
+        let before: HashSet<usize> = prev.map(taken_in).unwrap_or_default();
+        let set_of: HashMap<usize, u8> = step.passive_sets.iter().filter_map(|(id, n)| Some((*self.index.get(id)?, *n))).collect();
+        let per_set = [1u8, 2].map(|n| set_of.values().filter(|v| **v == n).count());
         let counted = taken.len();
         let fresh_count = if prev.is_some() { taken.difference(&before).count() } else { 0 };
         // Le départ de la classe est pris d'office : on le relie au chemin du build.
@@ -446,6 +627,14 @@ impl TreeView {
                     painter.circle_filled(p, r, color);
                 }
             }
+            if let Some(&n) = set_of.get(&i) {
+                let c = crate::ui::SET_COLORS[n as usize - 1];
+                if n == set {
+                    painter.circle_stroke(p, r + 3.0, Stroke::new(2.0_f32, c));
+                } else {
+                    painter.circle_stroke(p, r + 2.0, Stroke::new(1.5_f32, c.gamma_multiply(0.45)));
+                }
+            }
             if cursor.is_some_and(|c| c.distance(p) <= r + 3.0) {
                 hovered = Some(i);
             }
@@ -481,8 +670,14 @@ impl TreeView {
             self.save_overrides();
         }
         // Légende sur fond, pour rester lisible au-dessus des nœuds.
+        let nodes = if per_set == [0, 0] {
+            format!("{counted} nœuds à cette étape")
+        } else {
+            let common = step.passives.len() - per_set[0] - per_set[1];
+            format!("{common} communs + {} set I + {} set II (set {} affiché)", per_set[0], per_set[1], if set == 2 { "II" } else { "I" })
+        };
         let legend = format!(
-            "{counted} nœuds à cette étape{} · glisser : déplacer · molette : zoom · double-clic : recadrer",
+            "{nodes}{} · glisser : déplacer · molette : zoom · double-clic : recadrer",
             if prev.is_some() { format!(", dont {fresh_count} nouveaux en vert") } else { String::new() }
         );
         let galley = painter.layout_no_wrap(legend, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);

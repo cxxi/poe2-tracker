@@ -29,6 +29,9 @@ pub enum Slot {
     Charm1,
     Charm2,
     Charm3,
+    /// Second jeu d'armes (set II).
+    Weapon2,
+    Offhand2,
 }
 
 pub const RINGS: [Slot; 2] = [Slot::RingLeft, Slot::RingRight];
@@ -41,8 +44,23 @@ impl Slot {
         Slot::ManaFlask, Slot::Charm1, Slot::Charm2, Slot::Charm3,
     ];
 
+    /// Emplacements d'armes du set II, à part : beaucoup de builds ne s'en servent pas.
+    pub const SET2: [Slot; 2] = [Slot::Weapon2, Slot::Offhand2];
+
+    /// Cet emplacement dans le set d'armes `set` (1 ou 2) : seules l'arme et la main gauche
+    /// changent d'un set à l'autre.
+    pub fn in_set(self, set: u8) -> Slot {
+        match (self, set) {
+            (Slot::Weapon, 2) => Slot::Weapon2,
+            (Slot::Offhand, 2) => Slot::Offhand2,
+            (s, _) => s,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
+            Slot::Weapon2 => "Arme (set II)",
+            Slot::Offhand2 => "Main gauche (set II)",
             Slot::Weapon => "Arme",
             Slot::Offhand => "Main gauche",
             Slot::Helmet => "Casque",
@@ -104,6 +122,10 @@ pub struct Gear {
     pub slots: BTreeMap<Slot, String>,
     #[serde(skip)]
     path: PathBuf,
+    /// Set d'armes affiché (1 ou 2) : Ctrl+Alt+C y range les armes, Ctrl+C les y compare.
+    /// Le texte copié en jeu ne dit pas de quel set vient une arme.
+    #[serde(skip)]
+    pub set: u8,
 }
 
 impl Gear {
@@ -113,6 +135,7 @@ impl Gear {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         gear.path = path.to_path_buf();
+        gear.set = 1;
         gear
     }
 
@@ -127,9 +150,13 @@ impl Gear {
         self.slots.get(&slot).and_then(|t| item::parse(t))
     }
 
-    /// L'arme suivie se tient à deux mains (la main gauche est alors prise).
+    /// L'arme suivie du set affiché se tient à deux mains (la main gauche est alors prise).
     pub fn two_handed(&self) -> bool {
-        self.item(Slot::Weapon).is_some_and(|w| kind_of(&w.item_class) == Some(Kind::TwoHanded))
+        self.two_handed_in(self.set)
+    }
+
+    pub fn two_handed_in(&self, set: u8) -> bool {
+        self.item(Slot::Weapon.in_set(set)).is_some_and(|w| kind_of(&w.item_class) == Some(Kind::TwoHanded))
     }
 
     /// Emplacements de charme ouverts par la ceinture suivie ("Has 1 Charm Slot").
@@ -145,13 +172,14 @@ impl Gear {
         )
     }
 
-    /// Emplacements qu'on s'attend à voir remplis mais qui ne sont pas suivis.
+    /// Emplacements qu'on s'attend à voir remplis mais qui ne sont pas suivis (le set II
+    /// d'armes n'est pas attendu).
     pub fn untracked(&self) -> Vec<Slot> {
         let charms = self.charm_slots().unwrap_or(0);
         Slot::ALL
             .into_iter()
             .filter(|s| !self.slots.contains_key(s))
-            .filter(|s| !(*s == Slot::Offhand && self.two_handed()))
+            .filter(|s| !(*s == Slot::Offhand && self.two_handed_in(1)))
             .filter(|s| CHARMS.iter().position(|c| c == s).is_none_or(|i| i < charms))
             .collect()
     }
@@ -168,10 +196,10 @@ impl Gear {
             return Equipped::AlreadyThere(slot);
         }
         let slot = match kind {
-            Kind::Single(s) => s,
+            Kind::Single(s) => s.in_set(self.set),
             Kind::TwoHanded => {
-                self.slots.remove(&Slot::Offhand);
-                Slot::Weapon
+                self.slots.remove(&Slot::Offhand.in_set(self.set));
+                Slot::Weapon.in_set(self.set)
             }
             Kind::Ring => {
                 // Case libre d'abord ; sinon on suppose que tu as remplacé le moins bon anneau.
@@ -212,7 +240,7 @@ impl Gear {
         if !untracked.is_empty() {
             out.push_str(&format!("- Emplacements non renseignés : {}\n", untracked.join(", ")));
         }
-        for slot in Slot::ALL {
+        for slot in Slot::ALL.into_iter().chain(Slot::SET2) {
             if let Some(raw) = self.slots.get(&slot) {
                 out.push_str(&format!("\n## {}\n\n```\n{}\n```\n", export_label(slot), raw.trim()));
             }
@@ -249,7 +277,7 @@ mod tests {
     }
 
     fn gear() -> Gear {
-        Gear { slots: BTreeMap::new(), path: PathBuf::new() }
+        Gear { slots: BTreeMap::new(), path: PathBuf::new(), set: 1 }
     }
 
     #[test]
@@ -303,6 +331,19 @@ mod tests {
         assert!(text.contains("## Anneau droit"));
         assert!(text.contains("Emplacements non renseignés : Arme, Main gauche, Casque"));
         assert!(!item::is_item_text(&text)); // jamais pris pour une copie d'objet
+    }
+
+    #[test]
+    fn weapons_go_to_the_shown_set() {
+        let mut g = gear();
+        g.slots.insert(Slot::Offhand, "x".into());
+        g.set = 2;
+        assert_eq!(g.equip(&item::parse(DUSK_VIGIL).unwrap()), Equipped::Placed { slot: Slot::Weapon2, replaced: None });
+        // Le bâton à deux mains du set II ne libère pas la main gauche du set I.
+        assert!(g.slots.contains_key(&Slot::Offhand));
+        assert!(g.two_handed() && !g.two_handed_in(1));
+        assert!(!g.untracked().contains(&Slot::Offhand2));
+        assert!(g.export("x", &[]).contains("## Arme (set II)"));
     }
 
     #[test]

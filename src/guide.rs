@@ -243,6 +243,18 @@ pub struct Step {
     pub passives: Vec<String>,
     /// Équipement visé : emplacement -> (base visée, mods visés).
     pub targets: Vec<(Slot, String, Vec<Target>)>,
+    /// Uniques recommandés à cette étape.
+    pub uniques: Vec<Wanted>,
+    /// Passifs propres à un set d'armes (1 ou 2) ; les autres sont communs aux deux.
+    pub passive_sets: HashMap<String, u8>,
+}
+
+/// Unique recommandé par le build. Le planificateur range toutes les fioles sous `Flask1` :
+/// une fiole de mana arrive ici en fiole de vie (voir `uniques::slot`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wanted {
+    pub name: String,
+    pub slot: Option<Slot>,
 }
 
 impl Step {
@@ -262,6 +274,8 @@ fn slot_of(inventory_id: &str) -> Option<Slot> {
     Some(match inventory_id {
         "Weapon1" => Slot::Weapon,
         "Offhand1" => Slot::Offhand,
+        "Weapon2" => Slot::Weapon2,
+        "Offhand2" => Slot::Offhand2,
         "Helm1" => Slot::Helmet,
         "BodyArmour1" => Slot::Body,
         "Gloves1" => Slot::Gloves,
@@ -271,6 +285,15 @@ fn slot_of(inventory_id: &str) -> Option<Slot> {
         "Ring1" => Slot::RingLeft,
         "Ring2" => Slot::RingRight,
         _ => return None,
+    })
+}
+
+/// Emplacement d'un unique recommandé ; `None` si l'emplacement est inconnu.
+fn wanted_slot(inventory_id: &str) -> Option<Option<Slot>> {
+    Some(match inventory_id {
+        id if id.starts_with("Flask") => Some(Slot::LifeFlask),
+        id if id.starts_with("Charm") => Some(Slot::Charm1),
+        id => Some(slot_of(id)?),
     })
 }
 
@@ -309,6 +332,8 @@ struct RawSlot {
     inventory_id: String,
     #[serde(default)]
     additional_text: String,
+    #[serde(default)]
+    unique_name: String,
 }
 #[derive(Deserialize)]
 struct RawSkill {
@@ -325,6 +350,8 @@ fn full_range() -> [u32; 2] {
 #[derive(Deserialize)]
 struct RawPassive {
     id: String,
+    #[serde(default)]
+    weapon_set: Option<u8>,
 }
 
 /// Étiquette d'étape et nom du build, depuis le champ `name` d'un fichier .build : par acte
@@ -341,7 +368,9 @@ pub fn split_name(name: &str) -> (Option<String>, String) {
         return (Some(c[1].to_string()), rest);
     }
     match name.split_once(" - ") {
-        Some((label, rest)) if !label.trim().is_empty() => (Some(label.trim().to_string()), rest.trim().to_string()),
+        // « Nonsense Minmax Endgame Step 4 {9} » (Mobalytics) : le numéro d'ordre n'est pas
+        // dans l'étiquette.
+        Some((label, rest)) if !label.trim().is_empty() => (Some(label.split(" {").next().unwrap_or(label).trim().to_string()), rest.trim().to_string()),
         _ => (None, name.trim().to_string()),
     }
 }
@@ -364,6 +393,22 @@ pub fn is_endgame(label: &str) -> bool {
 /// Étapes d'endgame, au choix du joueur une fois la campagne finie.
 pub fn endgame_steps(steps: &[Step]) -> Vec<&Step> {
     steps.iter().filter(|s| is_endgame(&s.label)).collect()
+}
+
+/// Passifs propres à un set d'armes. Un même passif peut être listé plusieurs fois (commun et
+/// set I, ou set I et set II) : il n'est propre à un set que s'il n'est jamais commun et
+/// toujours dans ce même set.
+fn weapon_set_passives(passives: &[RawPassive]) -> HashMap<String, u8> {
+    let mut sets: HashMap<&str, Vec<Option<u8>>> = HashMap::new();
+    for p in passives {
+        sets.entry(p.id.as_str()).or_default().push(p.weapon_set);
+    }
+    sets.into_iter()
+        .filter_map(|(id, s)| {
+            let first = s[0]?;
+            s.iter().all(|w| *w == Some(first)).then(|| (id.to_string(), first))
+        })
+        .collect()
 }
 
 /// Étapes de build lues dans des fichiers .build, dans l'ordre donné.
@@ -391,7 +436,14 @@ pub fn load_steps(files: &[PathBuf], catalog: &Catalog) -> Vec<Step> {
                     Some((slot, base, targets))
                 })
                 .collect();
-            Some(Step { label, skills, passives: b.passives.into_iter().map(|p| p.id).collect(), targets })
+            let uniques = b
+                .inventory_slots
+                .iter()
+                .filter(|s| !s.unique_name.is_empty())
+                .filter_map(|s| Some(Wanted { name: s.unique_name.clone(), slot: wanted_slot(&s.inventory_id)? }))
+                .collect();
+            let passive_sets = weapon_set_passives(&b.passives);
+            Some(Step { label, skills, passives: b.passives.into_iter().map(|p| p.id).collect(), targets, uniques, passive_sets })
         })
         .collect()
 }
@@ -490,7 +542,17 @@ mod tests {
             skills: skills.iter().map(|(n, l)| Skill { name: n.to_string(), from_level: *l, supports: vec![] }).collect(),
             passives: vec![],
             targets: vec![],
+            uniques: vec![],
+            passive_sets: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn passives_listed_twice_are_common() {
+        let p = |id: &str, w: Option<u8>| RawPassive { id: id.into(), weapon_set: w };
+        let sets = weapon_set_passives(&[p("a", None), p("a", Some(1)), p("b", Some(1)), p("b", Some(2)), p("c", Some(2)), p("c", Some(2)), p("d", Some(1))]);
+        assert_eq!(sets.len(), 2);
+        assert_eq!((sets["c"], sets["d"]), (2, 1));
     }
 
     #[test]

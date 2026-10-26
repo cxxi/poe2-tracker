@@ -73,9 +73,37 @@ pub fn match_received<'a>(rewards: &'a [Reward], done: &BTreeSet<String>, area: 
         .or_else(|| rewards.iter().filter(open).find(|r| fallback && Some(r.act) == act))
 }
 
+/// Récompense laissée au choix du joueur (la ligne décrit les options).
+pub fn is_choice(r: &Reward) -> bool {
+    let t = r.reward.to_lowercase();
+    r.kind.contains('|') || t.contains("choix") || t.contains(" ou ") || t.contains("modifiable")
+}
+
+/// Choix du build (Mobalytics) pour une récompense au choix : ceux dont la zone de quête est
+/// une des zones de la ligne (« The Venom Crypts / Ziggurat Encampment »).
+pub fn build_choices<'a>(r: &Reward, choices: &'a [crate::builds::QuestChoice]) -> Vec<&'a crate::builds::QuestChoice> {
+    if !is_choice(r) {
+        return vec![];
+    }
+    let zones: Vec<String> = r.zone.split('/').map(|z| z.trim().to_lowercase()).filter(|z| !z.is_empty()).collect();
+    choices.iter().filter(|c| zones.iter().any(|z| *z == c.area.to_lowercase())).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_choices_follow_the_quest_zone() {
+        let r = load();
+        let choice = |area: &str, reward: &str| crate::builds::QuestChoice { act: String::new(), area: area.into(), quest: String::new(), reward: reward.into() };
+        let picks = [choice("The Venom Crypts", "25% increased Mana Regeneration Rate"), choice("Clearfell", "+10% to Cold Resistance"), choice("Halls of the Dead", "+5 to Intelligence"), choice("Halls of the Dead", "+5% to Fire Resistance")];
+        let venom = r.iter().find(|x| x.id == "a3_venom_choice").unwrap();
+        assert_eq!(build_choices(venom, &picks).len(), 1);
+        assert_eq!(build_choices(r.iter().find(|x| x.id == "a4_tattoos_halls").unwrap(), &picks).len(), 2);
+        // Pas de choix à Clearfell : rien à afficher.
+        assert!(build_choices(r.iter().find(|x| x.id == "a1_res_beira").unwrap(), &picks).is_empty());
+    }
 
     #[test]
     fn data_is_valid() {

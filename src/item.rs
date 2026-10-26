@@ -120,6 +120,8 @@ pub struct Item {
     /// Origine de chaque mod de `mods` (même ordre).
     pub mod_kinds: Vec<ModKind>,
     pub granted_skills: Vec<String>,
+    /// Châsses de l'objet, d'après sa ligne « Sockets: » (corruption comprise).
+    pub sockets: usize,
     pub corrupted: bool,
     pub unidentified: bool,
     pub raw: String,
@@ -193,6 +195,7 @@ pub fn parse(text: &str) -> Option<Item> {
         mods: Vec::new(),
         mod_kinds: Vec::new(),
         granted_skills: Vec::new(),
+        sockets: 0,
         corrupted: false,
         unidentified: false,
         raw: text.to_string(),
@@ -214,6 +217,8 @@ pub fn parse(text: &str) -> Option<Item> {
             } else if let Some(v) = line.strip_prefix("Stack Size:") {
                 let n: String = v.split('/').next().unwrap_or("").chars().filter(char::is_ascii_digit).collect();
                 item.stack = n.parse().unwrap_or(1);
+            } else if let Some(v) = line.strip_prefix("Sockets:") {
+                item.sockets = v.split_whitespace().count();
             } else if let Some(v) = line.strip_prefix("Grants Skill:") {
                 item.granted_skills.push(v.trim().to_string());
             } else if line == "Corrupted" {

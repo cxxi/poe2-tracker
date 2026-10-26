@@ -128,13 +128,13 @@ impl Coach {
 
     /// Pense-bête de la route : celles laissées en arrière, celles de l'acte en cours, puis
     /// celles de l'acte en cours déjà faites. Vide en endgame.
+    /// Route jusqu'à l'acte en cours : ce qui reste à faire d'abord (actes passés, puis acte en
+    /// cours), puis ce qui est fait, coché.
     pub fn reminders(&self) -> (u32, Vec<(&Reward, bool)>) {
         let Some((_, c)) = self.character() else { return (0, vec![]) };
         let act = c.max_act;
-        let behind = self.route.iter().filter(|r| r.act < act && !c.done.contains(&r.id)).map(|r| (r, false));
-        let current = self.route.iter().filter(|r| r.act == act).map(|r| (r, c.done.contains(&r.id)));
-        let (done, todo): (Vec<_>, Vec<_>) = current.partition(|(_, d)| *d);
-        (act, behind.chain(todo).chain(done).collect())
+        let (done, todo): (Vec<_>, Vec<_>) = self.route.iter().filter(|r| r.act <= act).map(|r| (r, c.done.contains(&r.id))).partition(|(_, d)| *d);
+        (act, todo.into_iter().chain(done).collect())
     }
 
     pub fn league(&self) -> Option<String> {
@@ -415,7 +415,7 @@ impl Coach {
     /// Résumé en une ligne pour l'interface.
     pub fn summary(&self) -> String {
         match self.character() {
-            None => "personnage pas encore détecté (il faut une montée de niveau dans le log)".into(),
+            None => "personnage pas encore détecté (il faut une montée de niveau dans le journal)".into(),
             Some((name, c)) => {
                 let zone = self.zone.as_deref().unwrap_or("zone inconnue");
                 let mut s = format!("{name} ({}) niveau {} — {zone}", c.class, c.level);
@@ -437,8 +437,8 @@ mod tests {
     fn coach() -> Coach {
         let skill = |n: &str, l| Skill { name: n.into(), from_level: l, supports: vec![] };
         let steps = vec![
-            Step { label: "Act 1".into(), skills: vec![skill("Contagion", 1), skill("Bonestorm", 15)], passives: vec![], targets: vec![] },
-            Step { label: "Act 2".into(), skills: vec![skill("Ice Nova", 1)], passives: vec![], targets: vec![] },
+            Step { label: "Act 1".into(), skills: vec![skill("Contagion", 1), skill("Bonestorm", 15)], passives: vec![], targets: vec![], uniques: vec![], passive_sets: Default::default() },
+            Step { label: "Act 2".into(), skills: vec![skill("Ice Nova", 1)], passives: vec![], targets: vec![], uniques: vec![], passive_sets: Default::default() },
         ];
         Coach::new(steps, Catalog::default(), PathBuf::from("/nonexistent/state.json"))
     }
