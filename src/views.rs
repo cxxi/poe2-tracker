@@ -124,6 +124,9 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
                             if prev.is_some() && !before.contains(skill.name.as_str()) {
                                 ui.label(RichText::new("nouveau").color(GREEN).small().strong());
                             }
+                            if let Some(set) = skill.weapon_set {
+                                set_badge(ui, set);
+                            }
                         });
                         let (txt, col) = if skill.from_level > level {
                             (format!("à partir du niveau {} (tu es niveau {level})", skill.from_level), Color32::from_rgb(220, 150, 90))
@@ -171,6 +174,24 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
             ui.label(RichText::new(format!("Abandonnés à cette étape : {}", dropped.join(", "))).color(Color32::GRAY));
         }
     }
+}
+
+/// Set d'armes où placer un sort, dans la couleur du set (celle de l'onglet Talents).
+fn set_badge(ui: &mut egui::Ui, set: u8) {
+    let (text, color, hint) = match set {
+        1 | 2 => {
+            let roman = if set == 1 { "I" } else { "II" };
+            (format!("Set {roman}"), crate::ui::SET_COLORS[set as usize - 1], format!("À placer dans le set d'armes {roman} : le sort ne s'utilise qu'avec ce set, et profite de ses talents."))
+        }
+        _ => ("Sets I et II".to_string(), GOLD_DIM, "À placer dans les deux sets d'armes.".to_string()),
+    };
+    egui::Frame::new()
+        .stroke(Stroke::new(1.0_f32, color))
+        .corner_radius(3)
+        .inner_margin(egui::Margin::symmetric(5, 1))
+        .show(ui, |ui| ui.label(RichText::new(text).color(color).small().strong()))
+        .response
+        .on_hover_text(hint);
 }
 
 fn icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32) -> egui::Response {

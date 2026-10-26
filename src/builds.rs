@@ -240,7 +240,9 @@ pub const KAMI_RUNES: &str = "kami-runes.json";
 /// Choix de récompenses de quête recommandés (Mobalytics), à côté des fichiers .build.
 pub const QUEST_CHOICES: &str = "quest-choices.json";
 /// Données enregistrées avec les .build, remplacées à chaque mise à jour.
-const EXTRAS: [&str; 2] = [KAMI_RUNES, QUEST_CHOICES];
+const EXTRAS: [&str; 3] = [KAMI_RUNES, QUEST_CHOICES, SKILL_SETS];
+/// Set d'armes de chaque sort (Mobalytics), à côté des fichiers .build.
+pub const SKILL_SETS: &str = "skill-sets.json";
 
 /// Récompense de quête que le build choisit, là où la campagne laisse le choix.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -263,15 +265,15 @@ const MOBALYTICS_API: &str = "https://mobalytics.gg/api/poe-2/v1/graphql/query";
 static MOBA_PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"mobalytics\.gg/poe-2/builds/([^/?#]+)").unwrap());
 static MOBA_PROFILE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"mobalytics\.gg/poe-2/profile/([^/?#]+)/builds/([^/?#]+)").unwrap());
 
-/// Ce que l'on demande à Mobalytics : titre de chaque variante (« Act 1 {1} ») et runes de
-/// chaque pièce (sets d'armes compris).
+/// Ce que l'on demande à Mobalytics : titre de chaque variante (« Act 1 {1} »), runes de
+/// chaque pièce (sets d'armes compris) et set d'armes de chaque sort.
 const MOBA_DOC: &str = "error data {
     id
     data { name }
     content: contentV2 { ... on NgfDocumentCmWidgetContentVariantsV1 { data { childrenVariants { id title } } } }
     ... on Poe2UserGeneratedDocument { data {
     questRewards { quests { quest { name act area } reward { bakedDescription } } }
-    buildVariants { values { id equipment {
+    buildVariants { values { id skillGems { gems { weaponSet activeSkill { name } } } equipment {
         helmet { runes { slug } } body { runes { slug } } gloves { runes { slug } } boots { runes { slug } }
         mainHand { set1 { runes { slug } } set2 { runes { slug } } }
         offHand { set1 { runes { slug } } set2 { runes { slug } } }
@@ -332,6 +334,9 @@ fn fetch_mobalytics(page_url: &str) -> Res<Vec<BuildFile>> {
     if let Some(steps) = mobalytics_runes(&resp, field) {
         files.push(BuildFile { name: KAMI_RUNES.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())? });
     }
+    if let Some(steps) = mobalytics_skill_sets(&resp, field) {
+        files.push(BuildFile { name: SKILL_SETS.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())? });
+    }
     let quests: Vec<QuestChoice> = doc["data"]["questRewards"]["quests"]
         .as_array()
         .into_iter()
@@ -354,19 +359,13 @@ fn fetch_mobalytics(page_url: &str) -> Res<Vec<BuildFile>> {
 /// à l'affichage).
 fn mobalytics_runes(resp: &serde_json::Value, field: &str) -> Option<Vec<StepRunes>> {
     let doc = &resp["data"]["game"]["documents"][field]["data"];
-    let titles: std::collections::HashMap<&str, &str> = doc["content"]
-        .as_array()?
-        .iter()
-        .flat_map(|c| c["data"]["childrenVariants"].as_array().into_iter().flatten())
-        .filter_map(|v| Some((v["id"].as_str()?, v["title"].as_str()?)))
-        .collect();
+    let titles = variant_titles(doc)?;
     let runes = |v: &serde_json::Value| -> Vec<String> { v["runes"].as_array().into_iter().flatten().filter_map(|r| r["slug"].as_str().map(str::to_string)).collect() };
     let steps = doc["data"]["buildVariants"]["values"]
         .as_array()?
         .iter()
         .filter_map(|v| {
-            let title = titles.get(v["id"].as_str()?)?;
-            let name = title.split(" {").next().unwrap_or(title).trim().to_string();
+            let name = titles.get(v["id"].as_str()?)?.clone();
             let e = &v["equipment"];
             // Mêmes clés que la grille Kami-labs (voir `kami_slot`), plus le set d'armes II.
             let slots = [
@@ -384,6 +383,64 @@ fn mobalytics_runes(resp: &serde_json::Value, field: &str) -> Option<Vec<StepRun
         })
         .collect();
     Some(steps)
+}
+
+/// Étiquette d'étape de chaque variante Mobalytics, par identifiant (« Act 1 {1} » → « Act 1 »).
+fn variant_titles(doc: &serde_json::Value) -> Option<std::collections::HashMap<&str, String>> {
+    Some(
+        doc["content"]
+            .as_array()?
+            .iter()
+            .flat_map(|c| c["data"]["childrenVariants"].as_array().into_iter().flatten())
+            .filter_map(|v| {
+                let title = v["title"].as_str()?;
+                Some((v["id"].as_str()?, title.split(" {").next().unwrap_or(title).trim().to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// Set d'armes de chaque sort par étape dans la réponse de Mobalytics. Les sorts sans set
+/// (esprit, ou non précisé) n'y sont pas.
+fn mobalytics_skill_sets(resp: &serde_json::Value, field: &str) -> Option<Vec<StepSkillSets>> {
+    let doc = &resp["data"]["game"]["documents"][field]["data"];
+    let titles = variant_titles(doc)?;
+    let steps: Vec<StepSkillSets> = doc["data"]["buildVariants"]["values"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| {
+            let name = titles.get(v["id"].as_str()?)?.clone();
+            let sets = v["skillGems"]["gems"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|g| {
+                    let set = match g["weaponSet"].as_str()? {
+                        "set1" => 1,
+                        "set2" => 2,
+                        "all" => 0,
+                        _ => return None,
+                    };
+                    Some((g["activeSkill"]["name"].as_str()?.to_string(), set))
+                })
+                .collect();
+            Some(StepSkillSets { name, sets })
+        })
+        .collect();
+    steps.iter().any(|s| !s.sets.is_empty()).then_some(steps)
+}
+
+/// Set d'armes des sorts d'une étape.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StepSkillSets {
+    pub name: String,
+    /// Nom du sort -> set d'armes (1 ou 2 ; 0 : les deux).
+    pub sets: std::collections::BTreeMap<String, u8>,
+}
+
+/// Sets d'armes des sorts d'un build, si on les connaît.
+pub fn load_skill_sets(dir: &Path) -> Vec<StepSkillSets> {
+    std::fs::read(dir.join(SKILL_SETS)).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
 }
 
 /// Runes d'une pièce recommandées par le build, par étape.
@@ -569,6 +626,23 @@ mod tests {
         assert_eq!(steps[1].items["mainHand2"], ["soulcore-x"]);
     }
 
+    #[test]
+    fn mobalytics_response_skill_sets() {
+        let resp = serde_json::json!({ "data": { "game": { "documents": { "userGeneratedDocumentBySlug": { "error": null, "data": {
+            "content": [ { "data": { "childrenVariants": [ { "id": "a", "title": "Act 3 {3}" } ] } } ],
+            "data": { "buildVariants": { "values": [ { "id": "a", "skillGems": { "gems": [
+                { "weaponSet": "set1", "activeSkill": { "name": "Ice Nova" } },
+                { "weaponSet": "set2", "activeSkill": { "name": "Elemental Weakness" } },
+                { "weaponSet": "all", "activeSkill": { "name": "Sigil of Power" } },
+                { "weaponSet": null, "activeSkill": { "name": "Mana Remnants" } }
+            ] } } ] } }
+        } } } } } });
+        let steps = mobalytics_skill_sets(&resp, "userGeneratedDocumentBySlug").unwrap();
+        assert_eq!(steps[0].name, "Act 3");
+        let sets: Vec<(&str, u8)> = steps[0].sets.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        assert_eq!(sets, [("Elemental Weakness", 2), ("Ice Nova", 1), ("Sigil of Power", 0)]);
+    }
+
     /// Réseau : runes de la page Kami-labs du build d'Ulf.
     /// Réseau : la page Kami-labs du build d'Ulf indique sa source Mobalytics, et ses runes.
     #[test]
@@ -622,6 +696,6 @@ mod tests {
         eprintln!("{names:?}");
         assert!(names.contains(&"Act 1 {1}.build") && names.contains(&KAMI_RUNES));
         let (steps, extras) = read_steps(files).unwrap();
-        assert!(steps.len() >= 8 && extras.iter().any(|(n, _)| n == KAMI_RUNES) && extras.iter().any(|(n, _)| n == QUEST_CHOICES));
+        assert!(steps.len() >= 8 && extras.iter().any(|(n, _)| n == KAMI_RUNES) && extras.iter().any(|(n, _)| n == QUEST_CHOICES) && extras.iter().any(|(n, _)| n == SKILL_SETS));
     }
 }

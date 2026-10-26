@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.2.6
+
+- Onglet Sorts : le set d'armes où placer chaque sort (Set I, Set II ou les deux), dans la couleur du set de l'onglet Talents. Donné par les builds Mobalytics : mets ton build à jour depuis le gestionnaire pour l'avoir.
+- Verdict du diagnostic (mieux, moins bien…) plus gros et plus visible.
+
 ## 0.2.5
 
 - Images des uniques : elles manquaient sur une nouvelle installation (l'index des images était construit avant de connaître la ligue, puis gardé une semaine). Il est maintenant refait dès que la ligue est connue, et par « Mettre à jour les catalogues ».

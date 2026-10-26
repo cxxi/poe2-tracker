@@ -435,7 +435,7 @@ mod tests {
     use crate::guide::Skill;
 
     fn coach() -> Coach {
-        let skill = |n: &str, l| Skill { name: n.into(), from_level: l, supports: vec![] };
+        let skill = |n: &str, l| Skill { name: n.into(), from_level: l, supports: vec![], weapon_set: None };
         let steps = vec![
             Step { label: "Act 1".into(), skills: vec![skill("Contagion", 1), skill("Bonestorm", 15)], passives: vec![], targets: vec![], uniques: vec![], passive_sets: Default::default() },
             Step { label: "Act 2".into(), skills: vec![skill("Ice Nova", 1)], passives: vec![], targets: vec![], uniques: vec![], passive_sets: Default::default() },

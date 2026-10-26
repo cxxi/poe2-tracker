@@ -723,12 +723,12 @@ pub fn zone_title(ui: &mut egui::Ui, title: &str, detail: &str) -> egui::Respons
 pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     // Fond opaque : le badge peut flotter par-dessus du contenu qui défile.
     egui::Frame::new()
-        .fill(ui.visuals().panel_fill.lerp_to_gamma(color, 0.18))
-        .stroke(Stroke::new(1.0_f32, color))
-        .corner_radius(CornerRadius::same(3))
-        .inner_margin(egui::Margin::symmetric(6, 2))
+        .fill(ui.visuals().panel_fill.lerp_to_gamma(color, 0.3))
+        .stroke(Stroke::new(1.5_f32, color))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(10, 4))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).color(color).size(12.0).strong());
+            ui.label(RichText::new(text).color(color.lerp_to_gamma(Color32::WHITE, 0.25)).size(17.0).strong());
         });
 }
 

@@ -216,6 +216,8 @@ pub struct Skill {
     pub name: String,
     pub from_level: u32,
     pub supports: Vec<(String, u32)>,
+    /// Set d'armes où le placer (1 ou 2 ; 0 : les deux), quand le build le dit.
+    pub weapon_set: Option<u8>,
 }
 
 impl Skill {
@@ -413,18 +415,24 @@ fn weapon_set_passives(passives: &[RawPassive]) -> HashMap<String, u8> {
 
 /// Étapes de build lues dans des fichiers .build, dans l'ordre donné.
 pub fn load_steps(files: &[PathBuf], catalog: &Catalog) -> Vec<Step> {
+    let sets = files.first().and_then(|f| f.parent()).map(crate::builds::load_skill_sets).unwrap_or_default();
     files
         .iter()
         .filter_map(|p| serde_json::from_str::<RawBuild>(&std::fs::read_to_string(p).ok()?).ok())
         .filter_map(|b| {
             let label = split_name(&b.name).0?;
+            let step_sets = sets.iter().find(|s| s.name == label);
             let skills = b
                 .skills
                 .iter()
-                .map(|s| Skill {
-                    name: catalog.gem(&s.id),
-                    from_level: s.level_interval[0],
-                    supports: s.support_skills.iter().map(|u| (catalog.gem(&u.id), u.level_interval[0])).collect(),
+                .map(|s| {
+                    let name = catalog.gem(&s.id);
+                    Skill {
+                        weapon_set: step_sets.and_then(|s| s.sets.get(&name).copied()),
+                        name,
+                        from_level: s.level_interval[0],
+                        supports: s.support_skills.iter().map(|u| (catalog.gem(&u.id), u.level_interval[0])).collect(),
+                    }
                 })
                 .collect();
             let targets = b
@@ -539,7 +547,7 @@ mod tests {
     fn step(label: &str, skills: &[(&str, u32)]) -> Step {
         Step {
             label: label.into(),
-            skills: skills.iter().map(|(n, l)| Skill { name: n.to_string(), from_level: *l, supports: vec![] }).collect(),
+            skills: skills.iter().map(|(n, l)| Skill { name: n.to_string(), from_level: *l, supports: vec![], weapon_set: None }).collect(),
             passives: vec![],
             targets: vec![],
             uniques: vec![],
