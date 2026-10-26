@@ -174,18 +174,22 @@ fn build_index(league: &str) -> Result<ArtIndex, Box<dyn std::error::Error>> {
     Ok(index)
 }
 
-/// Charge l'index depuis le cache ou le reconstruit (en arrière-plan).
-fn load_index(cache: &Path, league: &str) -> Option<ArtIndex> {
+/// Charge l'index depuis le cache ou le reconstruit (en arrière-plan). Un index sans icônes
+/// d'uniques (poe.ninja ne connaît pas la ligue, ou ne répondait pas) n'est pas gardé : il
+/// sera refait au prochain chargement.
+fn load_index(cache: &Path, league: &str, force: bool) -> Option<ArtIndex> {
     let path = cache.join("art_index.json");
-    if fresh(&path) {
-        if let Some(idx) = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<ArtIndex>(&s).ok()) {
+    if fresh(&path) && !force {
+        if let Some(idx) = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<ArtIndex>(&s).ok()).filter(|i| !i.uniques.is_empty()) {
             return Some(idx.finish());
         }
     }
     match build_index(league) {
         Ok(idx) => {
-            let _ = std::fs::create_dir_all(cache);
-            let _ = std::fs::write(&path, serde_json::to_string(&idx).unwrap_or_default());
+            if !idx.uniques.is_empty() {
+                let _ = std::fs::create_dir_all(cache);
+                let _ = std::fs::write(&path, serde_json::to_string(&idx).unwrap_or_default());
+            }
             Some(idx.finish())
         }
         Err(e) => {
@@ -231,6 +235,12 @@ fn grayscale(mut img: ColorImage) -> ColorImage {
 /// Illustrations prêtes à afficher, chargées à la demande.
 pub struct Assets {
     pub index: Arc<Mutex<Option<ArtIndex>>>,
+    /// Chargement de l'index en cours le plus récent : un chargement dépassé (autre ligue)
+    /// n'écrase pas le suivant.
+    generation: Arc<std::sync::atomic::AtomicUsize>,
+    league: String,
+    cache: PathBuf,
+    ctx: egui::Context,
     requests: Sender<String>,
     results: Receiver<(String, Option<ColorImage>)>,
     textures: HashMap<String, TextureHandle>,
@@ -241,18 +251,10 @@ pub struct Assets {
 impl Assets {
     pub fn new(ctx: &egui::Context, cache: PathBuf, league: String) -> Assets {
         let index = Arc::new(Mutex::new(None));
-        {
-            let (index, cache, ctx) = (index.clone(), cache.clone(), ctx.clone());
-            std::thread::spawn(move || {
-                let idx = load_index(&cache, &league);
-                *index.lock().unwrap() = idx;
-                ctx.request_repaint();
-            });
-        }
         let (req_tx, req_rx) = channel::<String>();
         let (res_tx, res_rx) = channel();
         {
-            let ctx = ctx.clone();
+            let (ctx, cache) = (ctx.clone(), cache.clone());
             std::thread::spawn(move || {
                 for url in req_rx {
                     // « gray:<url> » : même image, en niveaux de gris.
@@ -267,14 +269,52 @@ impl Assets {
                 }
             });
         }
-        Assets {
+        let assets = Assets {
             index,
+            generation: Arc::default(),
+            league,
+            cache,
+            ctx: ctx.clone(),
             requests: req_tx,
             results: res_rx,
             textures: HashMap::new(),
             pending: HashSet::new(),
             missing: HashSet::new(),
+        };
+        assets.load_index(false);
+        assets
+    }
+
+    /// (Re)charge l'index des illustrations pour la ligue en cours, en arrière-plan.
+    fn load_index(&self, force: bool) {
+        use std::sync::atomic::Ordering;
+        let mine = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (index, generation, cache, league, ctx) = (self.index.clone(), self.generation.clone(), self.cache.clone(), self.league.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let idx = load_index(&cache, &league, force);
+            if generation.load(Ordering::SeqCst) == mine && idx.is_some() {
+                *index.lock().unwrap() = idx;
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// La ligue est connue (ou a changé) : l'index est refait s'il lui manque les uniques.
+    pub fn set_league(&mut self, league: &str) {
+        if league == self.league {
+            return;
         }
+        self.league = league.to_string();
+        let has_uniques = self.index.lock().unwrap().as_ref().is_some_and(|i| !i.uniques.is_empty());
+        if !has_uniques {
+            self.load_index(false);
+        }
+    }
+
+    /// Retélécharge l'index (menu « Mettre à jour les catalogues »).
+    pub fn refresh(&mut self) {
+        self.missing.clear();
+        self.load_index(true);
     }
 
     /// À appeler à chaque image : transforme les téléchargements terminés en textures.

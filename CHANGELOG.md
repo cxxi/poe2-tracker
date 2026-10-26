@@ -1,5 +1,9 @@
 # Nouveautés
 
+## 0.2.5
+
+- Images des uniques : elles manquaient sur une nouvelle installation (l'index des images était construit avant de connaître la ligue, puis gardé une semaine). Il est maintenant refait dès que la ligue est connue, et par « Mettre à jour les catalogues ».
+
 ## 0.2.4
 
 - Builds ajoutés par le lien de leur page, sur Mobalytics ou Kami-labs : les étapes, les runes recommandées et les récompenses de quête choisies. Gestionnaire de builds pour en ajouter, les mettre à jour depuis leur page, les réordonner, choisir celui qui est suivi ou les supprimer. Le glisser-déposer de fichiers disparaît.

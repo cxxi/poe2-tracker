@@ -394,6 +394,7 @@ impl App {
         let cache = self.dirs.cache_dir().to_path_buf();
         self.prices = prices::Prices::start(cache.clone(), want.clone());
         self.trade = trade::Trade::start(ctx.clone(), cache, want.clone(), self.prices.clone());
+        self.assets.set_league(&want);
         self.league = want;
     }
 
@@ -1019,9 +1020,10 @@ impl App {
             if ui::menu_item(ui, "📤", "Exporter l'équipement", export_hint, tracked, false).clicked() {
                 self.export_gear(ui.ctx());
             }
-            if ui::menu_item(ui, "⟳", "Mettre à jour les catalogues", "augments, types de base, gemmes", true, false).clicked() {
+            if ui::menu_item(ui, "⟳", "Mettre à jour les catalogues", "augments, types de base, gemmes, images", true, false).clicked() {
                 self.augments.refresh();
                 self.gem_infos.refresh();
+                self.assets.refresh();
                 self.say("Mise à jour des catalogues en cours (quelques secondes)".into());
             }
             if ui::menu_item(ui, "✨", "Nouveautés", &format!("ce qui a changé jusqu'à la version {}", updater::VERSION), true, false).clicked() {
