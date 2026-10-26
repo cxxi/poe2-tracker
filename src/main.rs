@@ -598,6 +598,41 @@ impl App {
         }
     }
 
+    /// Bouton d'export : tout l'équipement suivi, avec son contexte, copié dans le
+    /// presse-papier pour être collé dans une conversation avec une IA.
+    fn export_button(&mut self, ui: &mut egui::Ui) {
+        ui::gold_widgets(ui);
+        let count = self.gear.slots.len();
+        let button = egui::Button::new(RichText::new("⧉  Exporter l'équipement").color(ui::GOLD));
+        let clicked = ui
+            .add_enabled(count > 0, button)
+            .on_hover_text("Copie tout l'équipement suivi (texte complet de chaque pièce, personnage, build) pour le coller dans un chat avec une IA")
+            .on_disabled_hover_text("Aucune pièce suivie : Ctrl+Alt+C sur une pièce portée pour l'ajouter")
+            .clicked();
+        if !clicked {
+            return;
+        }
+        let character = self.coach.as_ref().and_then(|c| c.character().map(|(n, s)| (n.to_string(), s.class.clone(), s.level)));
+        let title = match &character {
+            Some((name, ..)) => format!("Équipement de {name} (Path of Exile 2)"),
+            None => "Équipement (Path of Exile 2)".to_string(),
+        };
+        let mut context = Vec::new();
+        if let Some((_, class, level)) = &character {
+            context.push(format!("Classe : {class}, niveau {level}"));
+        }
+        if !self.league.is_empty() {
+            context.push(format!("Ligue : {}", self.league));
+        }
+        if let Some(b) = self.builds.active() {
+            let step = self.coach.as_ref().and_then(|c| c.judging_step()).map(|s| format!(" (étape : {})", s.label));
+            context.push(format!("Build suivi : {}{}", b.name, step.unwrap_or_default()));
+        }
+        context.push("Texte des pièces tel que copié en jeu (Ctrl+Alt+C), en anglais".into());
+        ui.ctx().copy_text(self.gear.export(&title, &context));
+        self.say(format!("Équipement copié ({count} pièce(s)) : colle-le dans le chat avec Ctrl+V"));
+    }
+
     /// Bouton « ⚙ Paramètres » de la barre d'état, menu ouvert vers le haut.
     fn settings_menu(&mut self, ui: &mut egui::Ui) {
         ui::gold_widgets(ui);
@@ -1483,6 +1518,7 @@ impl eframe::App for App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.settings_menu(ui);
+                    self.export_button(ui);
                     ui.add_space(8.0);
                     self.update_status(ui);
                     if let Some(e) = &self.ui_art.error {

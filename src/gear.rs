@@ -200,6 +200,37 @@ impl Gear {
         self.slots.insert(slot, it.raw.clone());
         Equipped::Placed { slot, replaced }
     }
+
+    /// Équipement suivi en Markdown, à coller dans une conversation avec une IA : le contexte
+    /// (une ligne par élément), puis chaque pièce telle que le jeu l'a copiée.
+    pub fn export(&self, title: &str, context: &[String]) -> String {
+        let mut out = format!("# {title}\n\n");
+        for line in context {
+            out.push_str(&format!("- {line}\n"));
+        }
+        let untracked: Vec<&str> = self.untracked().into_iter().map(export_label).collect();
+        if !untracked.is_empty() {
+            out.push_str(&format!("- Emplacements non renseignés : {}\n", untracked.join(", ")));
+        }
+        for slot in Slot::ALL {
+            if let Some(raw) = self.slots.get(&slot) {
+                out.push_str(&format!("\n## {}\n\n```\n{}\n```\n", export_label(slot), raw.trim()));
+            }
+        }
+        out
+    }
+}
+
+/// Libellé d'export : les deux anneaux et les trois charmes restent distincts.
+fn export_label(slot: Slot) -> &'static str {
+    match slot {
+        Slot::RingLeft => "Anneau gauche",
+        Slot::RingRight => "Anneau droit",
+        Slot::Charm1 => "Charme 1",
+        Slot::Charm2 => "Charme 2",
+        Slot::Charm3 => "Charme 3",
+        s => s.label(),
+    }
 }
 
 static CHARM_SLOTS: LazyLock<Regex> =
@@ -259,6 +290,19 @@ mod tests {
         assert!(!missing.contains(&Slot::Offhand));
         assert!(missing.contains(&Slot::Charm1));
         assert!(!missing.contains(&Slot::Charm2));
+    }
+
+    #[test]
+    fn export_lists_context_pieces_and_gaps() {
+        let mut g = gear();
+        g.equip(&ring("Ring A", 30));
+        g.equip(&ring("Ring B", 40));
+        let text = g.export("Équipement de Bob", &["Classe : Warrior".into()]);
+        assert!(text.starts_with("# Équipement de Bob\n\n- Classe : Warrior\n"));
+        assert!(text.contains("## Anneau gauche\n\n```\nItem Class: Rings"));
+        assert!(text.contains("## Anneau droit"));
+        assert!(text.contains("Emplacements non renseignés : Arme, Main gauche, Casque"));
+        assert!(!item::is_item_text(&text)); // jamais pris pour une copie d'objet
     }
 
     #[test]
