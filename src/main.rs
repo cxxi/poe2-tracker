@@ -14,6 +14,7 @@ mod capture;
 mod changelog;
 mod coach;
 mod compare;
+mod desktop;
 mod gear;
 mod gem_info;
 mod guide;
@@ -2574,9 +2575,13 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    std::thread::spawn(desktop::install);
+    let mut viewport = egui::ViewportBuilder::default().with_title("poe2-tracker").with_app_id(desktop::APP_ID);
+    if let Some(icon) = desktop::window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("poe2-tracker")
+        viewport: viewport
             .with_inner_size([1280.0, 1000.0])
             .with_min_inner_size([1200.0, 1000.0]),
         ..Default::default()

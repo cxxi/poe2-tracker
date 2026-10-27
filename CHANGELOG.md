@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.2.7
+
+- Icône de l'application, dans la fenêtre, la barre des tâches et le menu des applications (posée par l'application elle-même sous Linux).
+- Mise à jour : une nouvelle version est cherchée toutes les 5 minutes, le bouton apparaît sans relancer.
+
 ## 0.2.6
 
 - Onglet Sorts : le set d'armes où placer chaque sort (Set I, Set II ou les deux), dans la couleur du set de l'onglet Talents. Donné par les builds Mobalytics : mets ton build à jour depuis le gestionnaire pour l'avoir.

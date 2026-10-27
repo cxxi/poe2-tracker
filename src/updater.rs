@@ -1,5 +1,5 @@
 //! Mise à jour depuis les versions publiées sur GitHub : vérification au lancement puis toutes
-//! les 6 heures, téléchargement et remplacement de l'exécutable sur demande (bouton).
+//! les 5 minutes (le bouton apparaît sans relancer), téléchargement et remplacement de l'exécutable sur demande (bouton).
 //! Chaque binaire publié a son empreinte SHA-256, vérifiée avant installation.
 
 use std::path::PathBuf;
@@ -14,7 +14,8 @@ use crate::art::USER_AGENT;
 
 const LATEST: &str = "https://api.github.com/repos/cxxi/poe2-tracker/releases/latest";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-const EVERY: Duration = Duration::from_secs(6 * 3600);
+/// Bien sous la limite de l'API GitHub sans compte (60 requêtes par heure).
+const EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// Binaire publié pour ce système.
 fn asset_name() -> &'static str {
@@ -105,8 +106,9 @@ impl Updater {
         }
         let (shared, ctx) = (updater.clone(), ctx.clone());
         std::thread::spawn(move || loop {
-            // Une vérification ne remplace pas un téléchargement en cours ou déjà fait.
-            if matches!(shared.state(), State::UpToDate | State::Failed(_)) {
+            // Une vérification ne remplace pas un téléchargement en cours ou déjà fait ; une
+            // version proposée peut l'être par une plus récente.
+            if matches!(shared.state(), State::UpToDate | State::Failed(_) | State::Available { .. }) {
                 if let Ok(s) = check() {
                     *shared.0.lock().unwrap() = s;
                     ctx.request_repaint();
