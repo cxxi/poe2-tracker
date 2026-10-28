@@ -1,5 +1,18 @@
 # Nouveautés
 
+## 0.2.8
+
+- Réglages : une page de réglages dans le menu, enregistrés avec « Enregistrer ». Dossier du jeu, estimation sur le trade, lancement de l'estimation au Ctrl+C (automatique par défaut) ou au bouton, ouverture du détail au Ctrl+C ou historique, seuil du marché, recherche automatique des mises à jour.
+- Estimation des rares refaite : chaque mod a un poids selon ce qu'il vaut sur le marché, l'objet et chaque annonce ont une note. Le prix vient de la tendance des 30 annonces lues, chacune pesant d'autant plus que sa note est proche de celle de l'objet et qu'elle est récente. Confiance selon le nombre d'annonces proches et récentes, et l'éparpillement des prix ; fourchette d'abord quand la confiance est faible. Mods lâchés d'abord les moins utiles.
+- Écran d'estimation (bouton « Détails ») : prix, recherche et critères, source, et les annonces lues en cartes (image, prix, ancienneté, note, part dans le prix, mods comparés aux tiens). Réestimer depuis le diagnostic ou le détail, l'ancienne estimation restant affichée jusqu'à la nouvelle.
+- Diagnostic : carte « Estimation » en bas, prix en haut sous le verdict, fil d'Ariane Historique › Diagnostic › Estimation. Prix poe.ninja (uniques, monnaies) présentés de la même façon, avec un lien vers leur page poe.ninja.
+- Onglet Caractéristiques : les bonus de l'équipement porté additionnés, face à ce que vise le build à l'étape choisie (implicites compris), pour le set d'armes choisi. Résistances avec la pénalité de la progression et le plafond de 75 %.
+- Onglet Marché à droite : cours de poe.ninja par catégorie, monnaies dans leur ordre logique, courbe sur 7 jours, recherche, choix de la ligue, rafraîchi toutes les 15 minutes ou à la demande.
+- Historique : bouton « Estimer », prix coloré selon la confiance, type de pièce sur la ligne du nom quand la place le permet, lignes alternées.
+- Barre du haut : lien vers la page du build, ouverte sur l'étape affichée.
+- Fiche au survol d'une pièce : image de la pièce recommandée par le build ; étoile des uniques avec image et prix au marché.
+- Ctrl+C ramène sur l'onglet Diagnostic, Ctrl+Alt+C sur l'onglet Équipement.
+
 ## 0.2.7
 
 - Icône de l'application, dans la fenêtre, la barre des tâches et le menu des applications (posée par l'application elle-même sous Linux).

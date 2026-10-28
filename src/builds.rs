@@ -99,6 +99,22 @@ impl BuildStore {
     }
 
     /// Dossier du build (ses étapes et ses réglages, comme les choix d'attributs).
+    /// Page du build ouverte sur l'étape `label` si le site le permet, sinon la page du build.
+    pub fn step_link(&self, id: &str, label: &str) -> Option<String> {
+        let meta = self.list().iter().find(|b| b.id == id)?;
+        let links: std::collections::BTreeMap<String, String> =
+            std::fs::read(self.dir_of(id).join(STEP_LINKS))
+                .ok()
+                .and_then(|d| serde_json::from_slice(&d).ok())
+                .unwrap_or_default();
+        Some(
+            links
+                .get(label)
+                .cloned()
+                .unwrap_or_else(|| meta.source.clone()),
+        )
+    }
+
     pub fn dir_of(&self, id: &str) -> PathBuf {
         self.dir.join(id)
     }
@@ -240,9 +256,11 @@ pub const KAMI_RUNES: &str = "kami-runes.json";
 /// Choix de récompenses de quête recommandés (Mobalytics), à côté des fichiers .build.
 pub const QUEST_CHOICES: &str = "quest-choices.json";
 /// Données enregistrées avec les .build, remplacées à chaque mise à jour.
-const EXTRAS: [&str; 3] = [KAMI_RUNES, QUEST_CHOICES, SKILL_SETS];
+const EXTRAS: [&str; 4] = [KAMI_RUNES, QUEST_CHOICES, SKILL_SETS, STEP_LINKS];
 /// Set d'armes de chaque sort (Mobalytics), à côté des fichiers .build.
 pub const SKILL_SETS: &str = "skill-sets.json";
+/// Lien de la page du build ouverte sur chaque étape : nom de l'étape -> adresse.
+pub const STEP_LINKS: &str = "step-links.json";
 
 /// Récompense de quête que le build choisit, là où la campagne laisse le choix.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -270,7 +288,7 @@ static MOBA_PROFILE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"mobalytics\
 const MOBA_DOC: &str = "error data {
     id
     data { name }
-    content: contentV2 { ... on NgfDocumentCmWidgetContentVariantsV1 { data { childrenVariants { id title } } } }
+    content: contentV2 { id ... on NgfDocumentCmWidgetContentVariantsV1 { data { childrenVariants { id title } } } }
     ... on Poe2UserGeneratedDocument { data {
     questRewards { quests { quest { name act area } reward { bakedDescription } } }
     buildVariants { values { id skillGems { gems { weaponSet activeSkill { name } } } equipment {
@@ -335,7 +353,14 @@ fn fetch_mobalytics(page_url: &str) -> Res<Vec<BuildFile>> {
         files.push(BuildFile { name: KAMI_RUNES.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())? });
     }
     if let Some(steps) = mobalytics_skill_sets(&resp, field) {
-        files.push(BuildFile { name: SKILL_SETS.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())? });
+        files.push(BuildFile { name: SKILL_SETS.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())?,
+        });
+    }
+    let links = mobalytics_step_links(doc, page_url);
+    if !links.is_empty() {
+        files.push(BuildFile {
+            name: STEP_LINKS.into(),
+            data: serde_json::to_vec(&links).map_err(|e| e.to_string())? });
     }
     let quests: Vec<QuestChoice> = doc["data"]["questRewards"]["quests"]
         .as_array()
@@ -398,6 +423,35 @@ fn variant_titles(doc: &serde_json::Value) -> Option<std::collections::HashMap<&
             })
             .collect(),
     )
+}
+
+/// Lien vers chaque étape : la page garde la variante ouverte dans un paramètre
+/// « ws-ngf5-<bloc des variantes>=activeVariantId,<variante> ».
+fn mobalytics_step_links(
+    doc: &serde_json::Value,
+    page_url: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let base = page_url.split(['?', '#']).next().unwrap_or(page_url);
+    let mut links = std::collections::BTreeMap::new();
+    for widget in doc["content"].as_array().into_iter().flatten() {
+        let Some(wid) = widget["id"].as_str() else {
+            continue;
+        };
+        for v in widget["data"]["childrenVariants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let (Some(vid), Some(title)) = (v["id"].as_str(), v["title"].as_str()) else {
+                continue;
+            };
+            let label = title.split(" {").next().unwrap_or(title).trim().to_string();
+            links
+                .entry(label)
+                .or_insert_with(|| format!("{base}?ws-ngf5-{wid}=activeVariantId%2C{vid}"));
+        }
+    }
+    links
 }
 
 /// Set d'armes de chaque sort par étape dans la réponse de Mobalytics. Les sorts sans set
@@ -696,6 +750,8 @@ mod tests {
         eprintln!("{names:?}");
         assert!(names.contains(&"Act 1 {1}.build") && names.contains(&KAMI_RUNES));
         let (steps, extras) = read_steps(files).unwrap();
-        assert!(steps.len() >= 8 && extras.iter().any(|(n, _)| n == KAMI_RUNES) && extras.iter().any(|(n, _)| n == QUEST_CHOICES) && extras.iter().any(|(n, _)| n == SKILL_SETS));
+        assert!(steps.len() >= 8 && extras.iter().any(|(n, _)| n == KAMI_RUNES) && extras.iter().any(|(n, _)| n == QUEST_CHOICES) && extras.iter().any(|(n, _)| n == SKILL_SETS)
+                && extras.iter().any(|(n, _)| n == STEP_LINKS)
+        );
     }
 }

@@ -472,6 +472,8 @@ pub struct BuildCard {
     pub lines: Vec<(String, crate::compare::Have)>,
     /// Runes recommandées (déjà mises en forme).
     pub runes: Vec<String>,
+    /// Illustration de l'unique ou du type de base recommandé.
+    pub image: Option<TextureHandle>,
 }
 
 impl BuildCard {
@@ -486,12 +488,24 @@ fn build_card(ui: &mut egui::Ui, b: &BuildCard) {
     ui.label(RichText::new("RECOMMANDÉ PAR LE BUILD").color(GOLD_DIM).small().strong());
     ui.label(RichText::new(&b.step).color(Color32::GRAY).small());
     ui.add_space(4.0);
+    // Illustration de la pièce recommandée, à sa taille en jeu au plus.
+    if let Some(tex) = &b.image {
+        let size = tex.size_vec2();
+        let scale = (110.0 / size.y).min(90.0 / size.x).min(1.0);
+        ui.add(egui::Image::new((tex.id(), size * scale)));
+        ui.add_space(4.0);
+    }
     build_card_body(ui, b);
 }
 
 /// Ce que le build recommande (unique, base, lignes visées marquées ✓ ~ ✗, runes), sans titre.
 pub fn build_card_body(ui: &mut egui::Ui, b: &BuildCard) {
-    use crate::compare::Have;
+    build_card_head(ui, b);
+    build_card_lines(ui, b);
+}
+
+/// Haut de la carte : unique, base et ses défenses, implicites.
+pub fn build_card_head(ui: &mut egui::Ui, b: &BuildCard) {
     if let Some(u) = &b.unique {
         ui.label(RichText::new(u).color(rarity_color(Rarity::Unique)).size(15.0).strong());
     }
@@ -510,6 +524,11 @@ pub fn build_card_body(ui: &mut egui::Ui, b: &BuildCard) {
     for line in &b.implicits {
         ui.label(RichText::new(format!("Implicite : {line}")).color(Color32::from_rgb(136, 136, 255)).small());
     }
+}
+
+/// Bas de la carte : lignes visées marquées ✓ ~ ✗, runes.
+pub fn build_card_lines(ui: &mut egui::Ui, b: &BuildCard) {
+    use crate::compare::Have;
     if !b.lines.is_empty() {
         ui.add_space(4.0);
     }
@@ -551,9 +570,19 @@ fn over_star(ui: &egui::Ui, rect: Rect, star: bool) -> bool {
     star && ui.rect_contains_pointer(star_rect(rect))
 }
 
+/// Unique recommandé montré dans l'infobulle de l'étoile.
+pub struct WantedUnique {
+    pub name: String,
+    pub image: Option<TextureHandle>,
+    /// Prix au marché déjà mis en forme.
+    pub price: Option<String>,
+}
+
 /// Étoile dans le coin d'une case : le build recommande ici un unique pas encore porté.
 /// Renvoie vrai au clic (ouvrir l'onglet Uniques).
-pub fn wanted_star(ui: &mut egui::Ui, rect: Rect, slot: Slot, names: &[&str], step: &str) -> bool {
+pub fn wanted_star(ui: &mut egui::Ui, rect: Rect, slot: Slot,
+    uniques: &[WantedUnique], step: &str,
+) -> bool {
     let hit = star_rect(rect);
     let (center, size) = (hit.center(), hit.width() / 1.1);
     let resp = ui.interact(hit, ui.id().with(("wanted", slot)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -565,9 +594,29 @@ pub fn wanted_star(ui: &mut egui::Ui, rect: Rect, slot: Slot, names: &[&str], st
     let clicked = resp.clicked();
     resp.on_hover_ui(|ui| {
         ui.label(RichText::new(format!("Unique recommandé par le build ({step})")).color(Color32::GRAY));
-        for n in names {
-            ui.label(RichText::new(*n).color(unique).strong());
+        for u in uniques {
+            ui.add_space(4.0);
+            // Icône à gauche, nom et prix au marché à droite.
+            ui.horizontal(|ui| {
+                if let Some(tex) = &u.image {
+                    let size = tex.size_vec2();
+                    let scale = (110.0 / size.y).min(90.0 / size.x).min(1.0);
+                    ui.add(egui::Image::new((tex.id(), size * scale)));
+                }
+                ui.vertical(|ui| {
+            ui.label(RichText::new(&u.name).color(unique).size(15.0).strong());
+                    match &u.price {
+                        Some(p) => {
+                            ui.label(RichText::new(p).color(Color32::from_rgb(225, 220, 210)))
+                        }
+                        None => {
+                            ui.label(RichText::new("pas de prix au marché").color(Color32::GRAY))
+                        }
+                    };
+                });
+            });
         }
+        ui.add_space(4.0);
         ui.label(RichText::new("clic : onglet Uniques (prix, recherche sur le trade)").color(Color32::GRAY).small());
     });
     clicked
@@ -802,6 +851,103 @@ pub fn gold_widgets(ui: &mut egui::Ui) {
     ui.style_mut().spacing.button_padding = egui::vec2(8.0, 3.0);
 }
 
+/// Bouton d'action (« 💰  Estimer ») dans le style des boutons de la barre du bas (Menu,
+/// Regex). Le survol est lu sur le pointeur, le bouton pouvant être sous une ligne cliquable.
+pub fn action_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let resp = ui
+        .scope(|ui| {
+            gold_widgets(ui);
+            ui.add(egui::Button::new(RichText::new(text).color(GOLD)))
+        })
+        .inner;
+    if ui.rect_contains_pointer(resp.rect) {
+        ui.painter().rect_stroke(
+            resp.rect,
+            CornerRadius::same(3),
+            Stroke::new(1.0_f32, GOLD),
+            StrokeKind::Inside,
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
+/// Rangée d'onglets dans le style des titres de section : l'actif en doré, souligné, posé sur
+/// un filet doré qui court sous toute la rangée. Renvoie l'onglet cliqué.
+pub fn tab_strip<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    tabs: &[(T, &str)],
+    current: T,
+) -> Option<T> {
+    let line_y = rect.bottom() - 1.0;
+    ui.painter().hline(
+        rect.x_range(),
+        line_y,
+        Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.6)),
+    );
+    let font = FontId::proportional(14.0);
+    let mut x = rect.left() + 6.0;
+    let mut picked = None;
+    for (tab, label) in tabs {
+        let on = current == *tab;
+        let galley = ui
+            .painter()
+            .layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE);
+        let r = Rect::from_min_max(
+            egui::pos2(x, rect.top() + 3.0),
+            egui::pos2(x + galley.size().x + 24.0, line_y),
+        );
+        let resp = ui
+            .interact(r, ui.id().with(("tab", *label)), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let painter = ui.painter();
+        if on {
+            painter.rect_filled(
+                r,
+                CornerRadius {
+                    nw: 3,
+                    ne: 3,
+                    sw: 0,
+                    se: 0,
+                },
+                GOLD.gamma_multiply(0.10),
+            );
+            painter.hline(r.x_range(), line_y - 1.0, Stroke::new(2.0_f32, GOLD));
+        } else if resp.hovered() {
+            painter.rect_filled(
+                r,
+                CornerRadius {
+                    nw: 3,
+                    ne: 3,
+                    sw: 0,
+                    se: 0,
+                },
+                Color32::from_white_alpha(6),
+            );
+        }
+        let color = if on {
+            GOLD
+        } else if resp.hovered() {
+            Color32::LIGHT_GRAY
+        } else {
+            Color32::GRAY
+        };
+        painter.text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            color,
+        );
+        if resp.clicked() {
+            picked = Some(*tab);
+        }
+        x = r.right() + 4.0;
+    }
+    picked
+}
+
 /// Titre de section : petites capitales dorées, compteur, actions discrètes à droite, filet dessous.
 pub fn section_header(ui: &mut egui::Ui, title: &str, count: Option<usize>, actions: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(4.0);
@@ -837,6 +983,33 @@ pub fn section_header_sub(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     let rect = ui.available_rect_before_wrap();
     ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.6)));
     ui.add_space(8.0);
+}
+
+/// Petite courbe de tendance (variations jour par jour).
+pub fn sparkline(ui: &mut egui::Ui, data: &[f64], color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 18.0), Sense::hover());
+    if data.len() < 2 {
+        return;
+    }
+    let (lo, hi) = data
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(*v), hi.max(*v))
+        });
+    let span = (hi - lo).max(1e-9);
+    let points: Vec<Pos2> = data
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let x = rect.left() + rect.width() * i as f32 / (data.len() - 1) as f32;
+            let y = rect.bottom() - rect.height() * ((v - lo) / span) as f32;
+            egui::pos2(x, y)
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(
+        points,
+        Stroke::new(1.2_f32, color.gamma_multiply(0.8)),
+    ));
 }
 
 /// Combinaison de touches dessinée comme sur un clavier : « [Ctrl] + [C] ».

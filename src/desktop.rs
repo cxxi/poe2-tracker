@@ -64,3 +64,14 @@ mod tests {
         assert_eq!((icon.width, icon.height), (256, 256));
     }
 }
+
+/// Ouvre une adresse dans le navigateur par défaut du système.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url).spawn().map(|_| ())
+}

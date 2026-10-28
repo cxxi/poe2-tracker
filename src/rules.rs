@@ -20,15 +20,6 @@ pub enum Label {
 }
 
 impl Label {
-    pub fn text(self) -> &'static str {
-        match self {
-            Label::Keep => "GARDER",
-            Label::Market => "MARCHÉ",
-            Label::Check => "À VÉRIFIER",
-            Label::Vendor => "PNJ",
-        }
-    }
-
     /// Le conseil en clair (« à vendre au PNJ »).
     pub fn advice(self) -> &'static str {
         match self {

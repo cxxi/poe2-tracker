@@ -26,6 +26,7 @@ mod paths;
 mod prices;
 mod route;
 mod rules;
+mod stats;
 mod trade;
 mod ui;
 mod ui_art;
@@ -33,6 +34,7 @@ mod uniques;
 mod updater;
 mod vendor_regex;
 mod views;
+mod weights;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -63,11 +65,24 @@ struct Config {
     welcomed: bool,
     /// Dernière version dont les nouveautés ont été vues.
     seen_version: String,
+    /// Recherche automatique des nouvelles versions sur GitHub.
+    auto_update: bool,
+    /// Estimation du prix des objets copiés sur le site de trade.
+    trade_prices: bool,
+    /// Ctrl+C lance l'estimation sur le trade tout de suite (sinon bouton « Estimer »).
+    auto_estimate: bool,
+    /// Ctrl+C ouvre le détail du diagnostic (sinon l'objet s'ajoute à l'historique).
+    open_on_copy: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { league: String::new(), game_dir: PathBuf::new(), market_min_ex: 10.0, log_path: PathBuf::new(), welcomed: false, seen_version: String::new() }
+        Config { league: String::new(), game_dir: PathBuf::new(), market_min_ex: 10.0, log_path: PathBuf::new(), welcomed: false, seen_version: String::new(),
+            auto_update: true,
+            trade_prices: true,
+            auto_estimate: true,
+            open_on_copy: true,
+        }
     }
 }
 
@@ -180,6 +195,16 @@ struct App {
     /// Hauteur réelle de la barre personnage / build (mesurée à l'affichage).
     bar_h: f32,
     tab: views::Tab,
+    /// Onglet du panneau de droite.
+    side_tab: views::SideTab,
+    /// Détail de l'estimation ouvert, pour l'objet de ce texte (troisième niveau : historique,
+    /// diagnostic, estimation). Sans effet quand un autre objet est diagnostiqué.
+    estimate_open: Option<String>,
+    /// Onglet Marché : catégorie poe.ninja affichée et recherche.
+    market_category: String,
+    market_search: String,
+    /// Ligue regardée dans l'onglet Marché quand ce n'est pas celle du personnage, et ses cours.
+    market_league: Option<(String, prices::Prices)>,
     /// Étape affichée dans les onglets du build (`None` = étape actuelle).
     view_step: Option<usize>,
     tree: views::TreeView,
@@ -193,7 +218,36 @@ struct App {
     /// Ligue utilisée pour les prix (celle du personnage).
     league: String,
     welcome: Welcome,
+    /// Fenêtre des réglages ouverte : ses valeurs en cours de modification.
+    settings: Option<SettingsDraft>,
     updater: updater::Updater,
+}
+
+/// Réglages en cours de modification : appliqués et enregistrés par « Enregistrer », oubliés
+/// par « Annuler ».
+struct SettingsDraft {
+    game_dir: PathBuf,
+    trade_prices: bool,
+    auto_estimate: bool,
+    open_on_copy: bool,
+    auto_update: bool,
+    market_min_ex: f64,
+    /// Choix du dossier du jeu en cours (fenêtre du système).
+    picking: Option<Receiver<Option<PathBuf>>>,
+}
+
+impl SettingsDraft {
+    fn new(stored: &Config, config: &Config) -> SettingsDraft {
+        SettingsDraft {
+            game_dir: config.game_dir.clone(),
+            trade_prices: stored.trade_prices,
+            auto_estimate: stored.auto_estimate,
+            open_on_copy: stored.open_on_copy,
+            auto_update: stored.auto_update,
+            market_min_ex: stored.market_min_ex,
+            picking: None,
+        }
+    }
 }
 
 /// Écran d'accueil du premier lancement, aussi utilisé pour changer le dossier du jeu.
@@ -350,7 +404,18 @@ impl App {
             data_dir: dirs.data_dir().to_path_buf(),
             character: None,
             bar_h: 34.0,
+            // Développement : onglet de droite (POE2_TRACKER_SIDE=market).
+            market_category: "Currency".into(),
+            market_search: String::new(),
+            market_league: None,
+            estimate_open: None,
+            side_tab: if std::env::var("POE2_TRACKER_SIDE").as_deref() == Ok("market") {
+                views::SideTab::Market
+            } else {
+                views::SideTab::Diagnostic
+            },
             tab: match std::env::var("POE2_TRACKER_TAB").as_deref() {
+                Ok("carac") => views::Tab::Stats,
                 Ok("sorts") => views::Tab::Skills,
                 Ok("talents") => views::Tab::Passives,
                 Ok("ascendances") => views::Tab::Ascendancy,
@@ -366,7 +431,11 @@ impl App {
                 path: config.game_dir.display().to_string(),
                 ..Default::default()
             },
-            updater: updater::Updater::start(&cc.egui_ctx),
+            updater: updater::Updater::start(&cc.egui_ctx, config.auto_update),
+            // Développement : réglages ouverts d'office (POE2_TRACKER_SETTINGS=1).
+            settings: std::env::var_os("POE2_TRACKER_SETTINGS")
+                .is_some()
+                .then(|| SettingsDraft::new(&stored, &config)),
             changelog: (!news.is_empty()).then_some(news),
             dirs,
             stored,
@@ -626,7 +695,14 @@ impl App {
         let runes = self.recommended_runes(slot);
         let base_defences = catalog.as_ref().and_then(|c| c.defences.get(&base).copied());
         let implicits = catalog.as_ref().and_then(|c| c.implicits.get(&base).cloned()).unwrap_or_default();
-        let card = ui::BuildCard { step: step.label.clone(), base, base_defences, implicits, unique, lines, runes: self.rune_list(&runes) };
+        let image = match &unique {
+            Some(u) => self.assets.texture_unique(u),
+            None if !base.is_empty() => self.assets.texture_by_name(&base),
+            None => None,
+        };
+        let card = ui::BuildCard { step: step.label.clone(), base, base_defences, implicits, unique, lines, runes: self.rune_list(&runes),
+            image,
+        };
         (!card.is_empty()).then_some(card)
     }
 
@@ -716,7 +792,14 @@ impl App {
             .fill(Color32::from_rgba_unmultiplied(8, 7, 6, 215))
             .stroke(egui::Stroke::new(1.0_f32, ui::GOLD_DIM))
             .corner_radius(4)
-            .inner_margin(egui::Margin::symmetric(10, 4))
+            // Un pixel de moins en haut : les listes, centrées sur la hauteur de la ligne, tombaient
+            // un peu bas dans le cadre.
+            .inner_margin(egui::Margin {
+                left: 10,
+                right: 10,
+                top: 3,
+                bottom: 5,
+            })
             .show(ui, |ui| {
                 ui.set_width(width - 22.0);
                 ui::gold_widgets(ui);
@@ -744,7 +827,9 @@ impl App {
         let weights = [0.22, 0.42, 0.14, 0.22];
         let count = shown.iter().filter(|s| **s).count() as f32;
         let total_weight: f32 = shown.iter().zip(weights).filter(|(s, _)| **s).map(|(_, w)| w).sum();
-        let room = ui.available_width() - ui.spacing().item_spacing.x * (count - 1.0);
+        // Place gardée tout à droite pour le lien vers la page du build.
+        let link_w = 30.0;
+        let room = ui.available_width() - ui.spacing().item_spacing.x * count - link_w;
         let zone = |i: usize| room * weights[i] / total_weight;
         let width = zone;
         let height = ui.available_height();
@@ -788,8 +873,10 @@ impl App {
             None => RichText::new("aucun build").color(Color32::GRAY),
         };
         let mut chosen: Option<String> = None;
+        // Cadre de la liste des builds : le bouton de lien prend exactement sa hauteur.
+        let mut combo_rect: Option<egui::Rect> = None;
         in_zone(ui, 1, &mut |ui| {
-        egui::ComboBox::from_id_salt("build_select").width(width(1)).truncate().selected_text(selected.clone()).show_ui(ui, |ui| {
+            let combo = egui::ComboBox::from_id_salt("build_select").width(width(1)).truncate().selected_text(selected.clone()).show_ui(ui, |ui| {
             for b in self.builds.list() {
                 let active = self.builds.active().is_some_and(|a| a.id == b.id);
                 if ui.selectable_label(active, &b.name).on_hover_text(format!("source : {}", b.source)).clicked() {
@@ -799,6 +886,7 @@ impl App {
         })
         .response
         .on_hover_text(current.as_deref().unwrap_or("aucun build"));
+            combo_rect = Some(combo.rect);
         });
 
         let mut league_pick: Option<String> = None;
@@ -852,6 +940,35 @@ impl App {
                     "Étape du build : en endgame, choisis la variante que tu joues ; les autres s'affichent en aperçu"
                 });
             });
+        }
+        // Lien sortant : la page du build, ouverte sur l'étape affichée si le site le permet.
+        let link = self.builds.active().map(|b| b.id.clone()).and_then(|id| {
+            self.builds
+                .step_link(&id, shown_step.as_deref().unwrap_or(""))
+        });
+        if let Some(url) = link {
+            let hint = match &shown_step {
+                Some(step) => format!("Ouvrir le build sur son site, à l'étape {step}"),
+                None => "Ouvrir le build sur son site".to_string(),
+            };
+            // Même hauteur et même ligne que les listes.
+            let (zone, _) = ui.allocate_exact_size(Vec2::new(link_w, height), egui::Sense::hover());
+            let rect = match combo_rect {
+                Some(c) => egui::Rect::from_min_max(
+                    egui::pos2(zone.left(), c.top()),
+                    egui::pos2(zone.right(), c.bottom()),
+                ),
+                None => zone,
+            };
+            let clicked = ui
+                .put(rect, egui::Button::new(RichText::new("↗").color(ui::GOLD)))
+                .on_hover_text(hint)
+                .clicked();
+            if clicked {
+                if let Err(e) = desktop::open_url(&url) {
+                    self.say(format!("Impossible d'ouvrir le navigateur : {e}"));
+                }
+            }
         }
         if let Some(id) = chosen {
             self.activate_build(&id);
@@ -934,6 +1051,197 @@ impl App {
 
     /// Nouveautés : après une mise à jour (versions arrivées depuis la dernière vue), ou depuis
     /// le menu (toutes).
+    /// Réglages de l'application : appliqués et enregistrés par « Enregistrer ».
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let Some(draft) = &mut self.settings else {
+            return;
+        };
+        if let Some(Ok(picked)) = draft.picking.as_ref().map(|rx| rx.try_recv()) {
+            draft.picking = None;
+            if let Some(p) = picked {
+                draft.game_dir = p;
+            }
+        }
+        let (mut save, mut cancel) = (false, false);
+        let (_, closed) = ui::modal(ctx, "settings", "Réglages", true, 620.0, |ui| {
+            // Tableau : intitulé (et son explication en petit) à gauche, réglage à droite.
+            let label = |ui: &mut egui::Ui, title: &str, hint: &str| {
+                ui.vertical(|ui| {
+                    ui.set_width(250.0);
+                    ui.label(RichText::new(title).color(Color32::from_gray(225)));
+                    if !hint.is_empty() {
+                        ui.label(RichText::new(hint).color(Color32::GRAY).small());
+                    }
+                });
+            };
+            let section = |ui: &mut egui::Ui, title: &str| {
+                ui.label(RichText::new(title).color(ui::GOLD).strong());
+                ui.end_row();
+            };
+            egui::Grid::new("settings_grid")
+                .num_columns(2)
+                .spacing([16.0, 10.0])
+                .show(ui, |ui| {
+                    section(ui, "Jeu");
+                    let check = paths::check(&draft.game_dir);
+                    let found = match (check.log, check.assets) {
+                        (true, true) => "journal et images du jeu trouvés",
+                        (true, false) => "journal trouvé, images du jeu introuvables",
+                        (false, true) => "images trouvées, journal du jeu introuvable",
+                        (false, false) => "jeu introuvable dans ce dossier",
+                    };
+                    label(ui, "Dossier du jeu", found);
+                    // Le chemin est le bouton : un clic ouvre le choix du dossier.
+                    let dir = draft.game_dir.display().to_string();
+                    let shown = if dir.is_empty() {
+                        "choisir le dossier…".to_string()
+                    } else {
+                        dir.clone()
+                    };
+                    let button =
+                        egui::Button::new(RichText::new(format!("🗁  {shown}")).color(ui::GOLD))
+                            .truncate()
+                            .min_size(Vec2::new(320.0, 0.0));
+                    let resp = ui
+                        .add_enabled(draft.picking.is_none(), button)
+                        .on_hover_text(if dir.is_empty() {
+                            "Choisir le dossier du jeu".to_string()
+                        } else {
+                            format!("{dir}\nclic : choisir un autre dossier")
+                        });
+                    if resp.clicked() {
+                        let (tx, rx) = channel();
+                        let ctx = ctx.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(
+                                rfd::FileDialog::new()
+                                    .set_title("Dossier de Path of Exile 2")
+                                    .pick_folder(),
+                            );
+                            ctx.request_repaint();
+                        });
+                        draft.picking = Some(rx);
+                    }
+                    ui.end_row();
+
+                    section(ui, "Diagnostic (Ctrl+C)");
+                    label(ui, "Affichage", "ce que fait Ctrl+C sur un objet en jeu");
+                    egui::ComboBox::from_id_salt("open_on_copy")
+                        .width(320.0)
+                        .selected_text(
+                            RichText::new(if draft.open_on_copy {
+                                "ouvrir le détail du diagnostic"
+                            } else {
+                                "rester sur l'historique"
+                            })
+                            .color(ui::GOLD),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut draft.open_on_copy,
+                                true,
+                                "ouvrir le détail du diagnostic",
+                            );
+                            ui.selectable_value(
+                                &mut draft.open_on_copy,
+                                false,
+                                "rester sur l'historique",
+                            );
+                        });
+                    ui.end_row();
+
+                    section(ui, "Prix");
+                    label(
+                        ui,
+                        "Estimation sur le trade",
+                        "recherche d'annonces comparables sur pathofexile.com",
+                    );
+                    ui.checkbox(&mut draft.trade_prices, "activée");
+                    ui.end_row();
+                    label(
+                        ui,
+                        "Lancement de l'estimation",
+                        "au Ctrl+C, ou plus tard avec le bouton « Estimer »",
+                    );
+                    ui.add_enabled_ui(draft.trade_prices, |ui| {
+                        egui::ComboBox::from_id_salt("auto_estimate")
+                            .width(320.0)
+                            .selected_text(
+                                RichText::new(if draft.auto_estimate {
+                                    "automatique, dès le Ctrl+C"
+                                } else {
+                                    "manuel, bouton « Estimer »"
+                                })
+                                .color(ui::GOLD),
+                            )
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut draft.auto_estimate,
+                                    true,
+                                    "automatique, dès le Ctrl+C",
+                                );
+                                ui.selectable_value(
+                                    &mut draft.auto_estimate,
+                                    false,
+                                    "manuel, bouton « Estimer »",
+                                );
+                            });
+                    });
+                    ui.end_row();
+                    label(
+                        ui,
+                        "Seuil du marché",
+                        "en dessous, un objet est conseillé au PNJ",
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut draft.market_min_ex)
+                            .range(1.0..=10_000.0)
+                            .speed(1.0)
+                            .suffix(" ex"),
+                    );
+                    ui.end_row();
+
+                    section(ui, "Mises à jour");
+                    label(
+                        ui,
+                        "Recherche automatique",
+                        "sur GitHub, au lancement puis toutes les 5 minutes",
+                    );
+                    ui.checkbox(&mut draft.auto_update, "activée");
+                    ui.end_row();
+                });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    save = ui::action_button(ui, "✔  Enregistrer").clicked();
+                    cancel = ui::action_button(ui, "Annuler").clicked();
+                });
+            });
+        });
+        if save {
+            let draft = self.settings.take().unwrap();
+            self.stored.trade_prices = draft.trade_prices;
+            self.stored.auto_estimate = draft.auto_estimate;
+            self.stored.open_on_copy = draft.open_on_copy;
+            self.config.auto_estimate = draft.auto_estimate;
+            self.config.open_on_copy = draft.open_on_copy;
+            self.stored.auto_update = draft.auto_update;
+            self.stored.market_min_ex = draft.market_min_ex;
+            self.market_min_ex = draft.market_min_ex;
+            self.config.trade_prices = draft.trade_prices;
+            self.config.auto_update = draft.auto_update;
+            self.config.market_min_ex = draft.market_min_ex;
+            self.updater.set_enabled(draft.auto_update);
+            if draft.game_dir != self.config.game_dir {
+                self.set_game_dir(ctx, draft.game_dir);
+            }
+            self.stored.save(&self.dirs);
+            self.say("Réglages enregistrés".into());
+        } else if cancel || closed {
+            self.settings = None;
+        }
+    }
+
     fn changelog_window(&mut self, ctx: &egui::Context) {
         let Some(releases) = &self.changelog else { return };
         let (ok, closed) = ui::modal(ctx, "changelog", "Nouveautés", true, 560.0, |ui| {
@@ -1008,10 +1316,16 @@ impl App {
                 self.add_build.open = true;
                 self.add_build.message = None;
             }
-            if ui::menu_item(ui, "🗁", "Dossier du jeu…", "où trouver le journal de Path of Exile 2", true, false).clicked() {
-                self.welcome.open = true;
-                self.welcome.path = self.config.game_dir.display().to_string();
-                self.welcome.message = None;
+            if ui::menu_item(ui,
+                    "🔧",
+                    "Réglages",
+                    "dossier du jeu, prix, mises à jour",
+                    true,
+                    false,
+                )
+                .clicked()
+                {
+                    self.settings = Some(SettingsDraft::new(&self.stored, &self.config));
             }
             ui.add_space(4.0);
             ui.separator();
@@ -1297,14 +1611,17 @@ impl App {
         let Some(it) = item::parse(&ev.text) else { return };
         match ev.kind {
             CopyKind::Diagnose => {
+                self.side_tab = views::SideTab::Diagnostic;
                 self.say(format!("Diagnostic : {}", it.title()));
-                if trade::priceable(&it) {
-                    self.trade.request(&it);
-                }
                 self.remember(&it);
-                self.diagnosed = Some(it);
+                if self.stored.auto_estimate {
+                    self.request_price(&it);
+                }
+                // Sinon on revient à l'historique, où l'objet vient s'ajouter en tête.
+                self.diagnosed = self.stored.open_on_copy.then_some(it);
             }
             CopyKind::Equip => {
+                self.tab = views::Tab::Equipment;
                 let msg = match self.gear.equip(&it) {
                     Equipped::Placed { slot, replaced } => format!(
                         "{} suivi en {}{}",
@@ -1325,6 +1642,20 @@ impl App {
                     Err(e) => self.say(format!("Impossible d'enregistrer l'équipement : {e}")),
                 }
             }
+        }
+    }
+
+    /// Objet à estimer sur le trade (bouton « Estimer ») : jamais estimé, ou l'estimation a échoué.
+    fn needs_estimate(&self, it: &Item) -> bool {
+        self.stored.trade_prices
+            && trade::priceable(it)
+            && matches!(self.trade.get(it), None | Some(trade::Estimate::Failed(_)))
+    }
+
+    /// Estimation sur le site de trade, si le réglage la permet et que l'objet s'y prête.
+    fn request_price(&self, it: &Item) {
+        if self.stored.trade_prices && trade::priceable(it) {
+            self.trade.request(it);
         }
     }
 
@@ -1366,20 +1697,166 @@ impl App {
         )
     }
 
-    /// Comment l'estimation a été trouvée : notes, lien vers la recherche, critères.
-    fn market_details(&self, ui: &mut egui::Ui, est: &trade::Estimate) {
-        let trade::Estimate::Done { relaxed, url, criteria, base_only, .. } = est else { return };
-        if *base_only {
-            ui.label(RichText::new("aucun mod reconnu : prix de la base, pour le craft").color(Color32::GRAY).italics());
-        }
-        if *relaxed > 0 {
-            let what = if *relaxed == 1 { "le mod le plus faible est lâché, sa place reste exigée".to_string() } else { format!("les {relaxed} mods les plus faibles sont lâchés, leurs places restent exigées") };
-            ui.label(RichText::new(format!("recherche élargie : {what}")).color(Color32::GRAY).italics());
-        }
-        ui.hyperlink_to("Voir la recherche sur le site de trade", url);
-        egui::CollapsingHeader::new("Critères utilisés").id_salt("trade_criteria").show(ui, |ui| {
-            for c in criteria {
-                ui.label(RichText::new(c).color(Color32::GRAY));
+    /// Annonces lues, en cartes : prix, âge, note, puis mods comparés à l'objet diagnostiqué
+    /// (vert : l'annonce en a plus, rouge : moins, gris : mod que l'objet n'a pas ; en bas, ce
+    /// qui manque à l'annonce). Les annonces proches d'abord ; les autres, en retrait, pèsent
+    /// peu dans le prix.
+    fn listing_cards(&mut self, ui: &mut egui::Ui, it: &Item, listings: &[trade::Listing], score: f64, shares: Option<Vec<f64>>) {
+        let mine: Vec<(String, Option<f64>)> = it.mods.iter().map(|m| trade::template(m)).collect();
+        let (green, red, gray) = (Color32::from_rgb(110, 200, 110), Color32::from_rgb(220, 95, 85), Color32::from_gray(140));
+        let note = |v: f64| format!("{v:.1}").replace('.', ",");
+        ui.add_space(4.0);
+        // Les proches d'abord, puis les autres ; chaque groupe du moins cher au plus cher, avec leur
+        // part dans le prix et leur image (chargée à la demande).
+        let ordered: Vec<(&trade::Listing, Option<f64>)> = listings
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kept)
+            .chain(listings.iter().enumerate().filter(|(_, l)| !l.kept))
+            .map(|(i, l)| (l, shares.as_ref().and_then(|s| s.get(i).copied())))
+            .collect();
+        let images: Vec<Option<egui::TextureHandle>> = ordered.iter().map(|(l, _)| (!l.icon.is_empty()).then(|| self.assets.texture_url(l.icon.clone())).flatten()).collect();
+        // Autant de colonnes que la largeur tient de cartes d'au moins 280 px ; les cartes prennent
+        // toute la largeur (une colonne : toute la colonne).
+        const CARD_MIN: f32 = 280.0;
+        const PAD: f32 = 16.0 + 2.0;
+        let gap = 8.0;
+        let width = ui.available_width();
+        let columns = (((width + gap) / (CARD_MIN + PAD + gap)).floor() as usize).max(1);
+        let card_w = ((width - gap * (columns - 1) as f32) / columns as f32 - PAD).max(120.0);
+        let card = |ui: &mut egui::Ui, l: &trade::Listing, share: Option<f64>, image: Option<&egui::TextureHandle>| {
+            // Annonce éloignée : toute la carte en retrait.
+            let fade = if l.kept || score == 0.0 { 1.0 } else { 0.45 };
+            let c = |color: Color32| color.gamma_multiply(fade);
+            let rarity = match l.rarity.as_str() {
+                "Magic" => item::Rarity::Magic,
+                "Unique" => item::Rarity::Unique,
+                "Normal" => item::Rarity::Normal,
+                _ => item::Rarity::Rare,
+            };
+            let amount = if (l.amount - l.amount.round()).abs() < 0.05 { format!("{}", l.amount.round()) } else { format!("{:.1}", l.amount) };
+            let age = match l.age_hours {
+                Some(h) if h < 1.0 => "à l'instant".to_string(),
+                Some(h) if h < 48.0 => format!("il y a {} h", h.round()),
+                Some(h) => format!("il y a {} j", (h / 24.0).round()),
+                None => String::new(),
+            };
+            let defences: Vec<String> = ["Armour", "Evasion", "Energy Shield"].iter().zip(l.defences).filter(|(_, v)| *v > 0.0).map(|(n, v)| format!("{n} {v:.0}")).collect();
+            // Une case de grille est en ligne : la carte remet ses lignes l'une sous l'autre.
+            egui::Frame::new().fill(ui::CARD_FILL).stroke(egui::Stroke::new(1.0_f32, c(if l.kept { ui::GOLD_DIM } else { Color32::from_gray(60) }))).corner_radius(4).inner_margin(8).show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(card_w);
+                    // En-tête comme celui de l'objet : image, nom, base, niveau et défenses ; à droite
+                    // le prix et l'âge de l'annonce. Au survol, le détail.
+                    let head = ui
+                        .horizontal_top(|ui| {
+                            match image {
+                                Some(tex) => {
+                                    let size = tex.size_vec2();
+                                    let scale = (56.0 / size.y).min(44.0 / size.x).min(1.0);
+                                    ui.add_sized([46.0, 58.0], egui::Image::new((tex.id(), size * scale)).tint(Color32::WHITE.gamma_multiply(fade)));
+                                }
+                                None => {
+                                    ui.add_space(46.0);
+                                }
+                            }
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                if !l.name.is_empty() {
+                                    ui.label(RichText::new(&l.name).color(c(ui::rarity_color(rarity))).size(15.0).strong());
+                                }
+                                ui.label(RichText::new(&l.base).color(c(ui::rarity_color(rarity))).size(14.0));
+                                let mut info = vec![format!("niv. {}", l.item_level)];
+                                info.extend(defences.iter().cloned());
+                                ui.label(RichText::new(info.join(" · ")).color(c(Color32::GRAY)).size(13.0));
+                            });
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.label(RichText::new(format!("{amount} {}", l.currency)).color(c(ui::GOLD)).size(17.0).strong());
+                                if let Some(ex) = l.ex {
+                                    ui.label(RichText::new(format!("≈ {}", self.fmt_price(ex))).color(c(Color32::GRAY)).size(13.0));
+                                }
+                                if !age.is_empty() {
+                                    ui.label(RichText::new(&age).color(c(Color32::GRAY)).size(13.0));
+                                }
+                            });
+                        })
+                        .response;
+                    head.on_hover_ui(|ui| {
+                        let title = if l.name.is_empty() { l.base.clone() } else { format!("{} — {}", l.name, l.base) };
+                        ui.label(RichText::new(title).color(ui::rarity_color(rarity)).strong());
+                        ui.label(format!("Niveau d'objet {}", l.item_level));
+                        if !defences.is_empty() {
+                            ui.label(defences.join(" · "));
+                        }
+                        ui.label(format!("Prix demandé : {amount} {}", l.currency));
+                        if let Some(ex) = l.ex {
+                            ui.label(self.price_all(ex));
+                        }
+                        if !age.is_empty() {
+                            ui.label(format!("En vente depuis : {}", age.trim_start_matches("il y a ")));
+                        }
+                    });
+                    // Note et part dans le prix, sur une ligne, entre deux traits discrets.
+                    let rule = |ui: &mut egui::Ui| {
+                        ui.add_space(3.0);
+                        let r = ui.available_rect_before_wrap();
+                        ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(1.0_f32, c(Color32::from_gray(48))));
+                        ui.add_space(4.0);
+                    };
+                    if score > 0.0 {
+                        // La note en blanc, sa part dans le prix en gris.
+                        let text = if l.kept { format!("note {}", note(l.score)) } else { format!("éloignée : note {} ({}×)", note(l.score), note(l.score / score)) };
+                        rule(ui);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(RichText::new(text).color(c(Color32::from_gray(225))).size(13.0));
+                            if let Some(sh) = share {
+                                let pct = sh * 100.0;
+                                let part = if pct < 1.0 { "· pèse moins de 1 % dans le prix".to_string() } else { format!("· pèse {} % dans le prix", pct.round()) };
+                                ui.label(RichText::new(part).color(c(Color32::GRAY)).size(13.0));
+                            }
+                        });
+                        rule(ui);
+                    } else {
+                        ui.add_space(4.0);
+                    }
+                    let mut seen = Vec::new();
+                    for m in &l.mods {
+                        let (t, v) = trade::template(m);
+                        let mut text = m.clone();
+                        let color = match mine.iter().find(|(mt, _)| *mt == t) {
+                            Some((_, mv)) => {
+                                seen.push(t.clone());
+                                match (v, mv) {
+                                    (Some(a), Some(b)) if (a - b).abs() >= 0.05 => {
+                                        let d = a - b;
+                                        let d_text = if (d - d.round()).abs() < 0.05 { format!("{}", d.round()) } else { format!("{d:.1}") };
+                                        text = format!("{m}  ({}{d_text})", if d > 0.0 { "+" } else { "" });
+                                        if d > 0.0 { green } else { red }
+                                    }
+                                    _ => Color32::from_gray(210),
+                                }
+                            }
+                            None => gray,
+                        };
+                        ui.label(RichText::new(text).color(c(color)).size(14.0));
+                    }
+                    // Mods de l'objet absents de l'annonce.
+                    for (line, (t, _)) in it.mods.iter().zip(&mine) {
+                        if !seen.contains(t) {
+                            ui.label(RichText::new(format!("sans : {line}")).color(c(red.gamma_multiply(0.8))).size(14.0).italics());
+                        }
+                    }
+                });
+            });
+        };
+        egui::Grid::new("listings_grid").num_columns(columns).spacing([gap, gap]).show(ui, |ui| {
+            for (i, ((l, share), image)) in ordered.iter().zip(&images).enumerate() {
+                card(ui, l, *share, image.as_ref());
+                if i % columns == columns - 1 {
+                    ui.end_row();
+                }
             }
         });
     }
@@ -1575,6 +2052,8 @@ impl App {
         self.header_bar(ui, whole, area, scale);
         if equipment {
             self.equipment(ui, area, scale, glow);
+        } else if self.tab == views::Tab::Stats {
+            self.stats_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         } else {
             self.build_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         }
@@ -1582,31 +2061,95 @@ impl App {
     }
 
     fn tab_row(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        // Onglets dans le style des titres de section : l'actif en doré, souligné, posé sur un
-        // filet doré qui court sous toute la rangée.
-        let line_y = rect.bottom() - 1.0;
-        ui.painter().hline(rect.x_range(), line_y, egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.6)));
-        let font = egui::FontId::proportional(14.0);
-        let mut x = rect.left() + 6.0;
-        for tab in views::Tab::ALL {
-            let on = self.tab == tab;
-            let galley = ui.painter().layout_no_wrap(tab.label().to_string(), font.clone(), Color32::WHITE);
-            let r = egui::Rect::from_min_max(egui::pos2(x, rect.top() + 3.0), egui::pos2(x + galley.size().x + 24.0, line_y));
-            let resp = ui.interact(r, ui.id().with(("tab", tab.label())), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let painter = ui.painter();
-            if on {
-                painter.rect_filled(r, egui::CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, ui::GOLD.gamma_multiply(0.10));
-                painter.hline(r.x_range(), line_y - 1.0, egui::Stroke::new(2.0_f32, ui::GOLD));
-            } else if resp.hovered() {
-                painter.rect_filled(r, egui::CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, Color32::from_white_alpha(6));
-            }
-            let color = if on { ui::GOLD } else if resp.hovered() { Color32::LIGHT_GRAY } else { Color32::GRAY };
-            painter.text(r.center(), egui::Align2::CENTER_CENTER, tab.label(), font.clone(), color);
-            if resp.clicked() {
-                self.tab = tab;
-            }
-            x = r.right() + 4.0;
+        let tabs: Vec<_> = views::Tab::ALL.iter().map(|t| (*t, t.label())).collect();
+        if let Some(tab) = ui::tab_strip(ui, rect, &tabs, self.tab) {
+            self.tab = tab;
         }
+    }
+
+    /// Onglet Caractéristiques : l'équipement porté face à ce que vise le build, pour le set
+    /// d'armes et l'étape choisis, résistances avec la pénalité de la progression.
+    fn stats_view(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let catalog = self.augments.get();
+        let no_steps: Vec<guide::Step> = Vec::new();
+        let (steps, current, penalty, level) = match &self.coach {
+            Some(c) => {
+                let penalty = c
+                    .character()
+                    .map(|(_, ch)| stats::res_penalty(ch.max_act, ch.level))
+                    .unwrap_or((0.0, "acte 1".into()));
+                (
+                    &c.steps,
+                    c.current_step_index(),
+                    penalty,
+                    c.character().map(|(_, ch)| ch.level),
+                )
+            }
+            None => (&no_steps, None, (0.0, "acte 1".into()), None),
+        };
+        let (view_step, gear) = (&mut self.view_step, &mut self.gear);
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            let mut shown = None;
+            ui.horizontal(|ui| {
+                ui::gold_widgets(ui);
+                if !steps.is_empty() {
+                    ui.label(RichText::new("Étape").color(ui::GOLD_DIM));
+                    shown = Some(views::step_selector(ui, steps, view_step, current));
+                    ui.add_space(12.0);
+                }
+                let h = ui.min_rect().height().max(ui.spacing().interact_size.y);
+                ui.label(RichText::new("Set d'armes").color(ui::GOLD_DIM));
+                let size = ui::set_tabs_size(ui, h, [false; 2]);
+                let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                let mut set = gear.set.max(1);
+                if ui::set_tabs(ui, r.center(), h, "stats_set", &mut set, [false; 2], true) {
+                    gear.set = set;
+                }
+                // Niveau du personnage, à droite.
+                if let Some(level) = level.filter(|l| *l > 0) {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(level.to_string())
+                                .color(ui::GOLD)
+                                .size(18.0)
+                                .strong(),
+                        );
+                        ui.label(RichText::new("Niveau").color(ui::GOLD_DIM));
+                    });
+                }
+            });
+            // Trait sous l'en-tête, comme sous les titres de section.
+            ui.add_space(6.0);
+            let line = ui.available_rect_before_wrap();
+            ui.painter().hline(
+                line.x_range(),
+                line.top(),
+                egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.6)),
+            );
+            ui.add_space(8.0);
+            let set = gear.set.max(1);
+            let worn = stats::sheet(gear, set);
+            let step = shown.map(|i| &steps[i]);
+            let build = step.map(|s| {
+                stats::build_sheet(
+                    s,
+                    set,
+                    |b| catalog.as_ref()?.defences.get(b).copied(),
+                    |b| catalog.as_ref()?.classes.get(b).map(|(c, _)| c.clone()),
+                    |b| {
+                        catalog
+                            .as_ref()
+                            .and_then(|c| c.implicits.get(b).cloned())
+                            .unwrap_or_default()
+                    },
+                )
+            });
+            let title = step
+                .map(|s| format!("Build · {}", s.label))
+                .unwrap_or_else(|| "Build (aucun)".into());
+            views::stats(ui, &worn, build.as_ref(), &title, &penalty);
+        });
     }
 
     /// Onglets Sorts, Talents et Ascendances, pour l'étape choisie.
@@ -1690,7 +2233,7 @@ impl App {
                         .auto_shrink([false, false])
                         .show(ui, |ui| views::uniques(ui, &coach.steps, shown, &worn, prices.as_ref(), &league, assets));
                 }
-                views::Tab::Equipment => {}
+                views::Tab::Equipment | views::Tab::Stats => {}
             }
         });
     }
@@ -1732,10 +2275,39 @@ impl App {
             }
             None => (vec![], String::new()),
         };
+        // Pour l'infobulle de l'étoile : icône et prix au marché de chaque unique.
+        let star_info: HashMap<String, (Option<egui::TextureHandle>, Option<String>)> = wanted
+            .iter()
+            .map(|(_, n)| {
+                let price = {
+                    let prices = self.prices.data.lock().unwrap();
+                    prices.as_ref().and_then(|p| {
+                        p.unique_by_name(n)
+                            .map(|(_, div, listings)| (p.to_ex(div), listings))
+                    })
+                };
+                let price = price.map(|(ex, listings)| {
+                    let doubt = if listings < prices::MIN_LISTINGS {
+                        format!(" ({listings} annonces seulement)")
+                    } else {
+                        String::new()
+                    };
+                    format!("≈ {} au marché{doubt}", self.fmt_price(ex))
+                });
+                (n.clone(), (self.assets.texture_unique(n), price))
+            })
+            .collect();
         let has_star = |slot: Slot| wanted.iter().any(|(s, _)| *s == slot);
         let mut open_uniques = false;
         let mut star = |ui: &mut egui::Ui, rect: egui::Rect, slot: Slot| {
-            let names: Vec<&str> = wanted.iter().filter(|(s, _)| *s == slot).map(|(_, n)| n.as_str()).collect();
+            let names: Vec<ui::WantedUnique> = wanted.iter().filter(|(s, _)| *s == slot).map(|(_, n)| {
+                    let (image, price) = star_info.get(n).cloned().unwrap_or_default();
+                    ui::WantedUnique {
+                        name: n.clone(),
+                        image,
+                        price,
+                    }
+                }).collect();
             if !names.is_empty() && ui::wanted_star(ui, rect, slot, &names, &step_label) {
                 open_uniques = true;
             }
@@ -1822,6 +2394,27 @@ impl App {
         }
     }
 
+    /// Prix tel que l'historique l'affiche : coloré selon la confiance quand il est estimé
+    /// d'après les annonces, blanc cassé pour un prix poe.ninja, gris sans valeur.
+    fn price_label(&self, it: &Item) -> (String, Color32) {
+        match self.price_ex(it) {
+            Ok((ex, approx)) => {
+                let text = format!("{}{}", if approx { "≈ " } else { "" }, self.fmt_price(ex));
+                let color = match self.trade.get(it).filter(|_| approx) {
+                    Some(e) => ui::confidence_color(e.confidence_pct()),
+                    // Prix poe.ninja : pas d'estimation, donc couleur neutre.
+                    None => Color32::from_rgb(225, 220, 210),
+                };
+                (text, color)
+            }
+            Err(_) => match self.trade.get(it) {
+                Some(trade::Estimate::Done { total: 0, .. }) => ("sans valeur".to_string(), Color32::GRAY),
+                Some(trade::Estimate::Done { .. }) => ("incertain".to_string(), Color32::GRAY),
+                _ => ("prix inconnu".to_string(), Color32::from_gray(110)),
+            },
+        }
+    }
+
     /// Devise la plus parlante pour un montant : divines au-delà d'une divine, chaos au-delà
     /// d'une chaos, sinon exalts. Renvoie (valeur de la devise en exalts, abréviation).
     fn price_unit(&self, ex: f64) -> (f64, &'static str) {
@@ -1887,17 +2480,28 @@ impl App {
         }
         let mut open = None;
         let mut remove = None;
+        let mut estimate = None;
         // Uniques du build : leur verdict est une étoile.
         let build_uniques: Vec<String> = self.coach.as_ref().map(|c| uniques::summary(&c.steps).into_iter().map(|u| u.name).collect()).unwrap_or_default();
         for (i, it) in self.history.clone().iter().enumerate() {
+            // Pas de trait entre les lignes : le fond alterné les sépare, lignes jointives.
             if i > 0 {
-                ui.separator();
+                ui.add_space(-ui.spacing().item_spacing.y);
             }
             let selected = self.diagnosed.as_ref().is_some_and(|d| d.raw == it.raw);
             let comparison = self.compare(it);
             let value = self.value_of(it);
+            let mut estimate_rect = None;
+            // Fond très légèrement plus clair une ligne sur deux (le panneau est en 12, 11, 10), posé
+            // sous le contenu une fois sa taille connue.
+            // Le fond déborde de la ligne jusqu'aux bords du panneau (marges du panneau à gauche,
+            // de la colonne à droite) : le prix garde de l'air, sans coins arrondis.
+            let band_painter = ui
+                .painter()
+                .with_clip_rect(ui.clip_rect().expand2(Vec2::new(8.0, 0.0)));
+            let stripe = band_painter.add(egui::Shape::Noop);
             let row = ui.horizontal(|ui| {
-                ui.set_min_height(34.0);
+                ui.set_min_height(38.0);
                 ui.set_min_width(ui.available_width());
                 match self.assets.texture(it) {
                     Some(tex) => {
@@ -1909,8 +2513,28 @@ impl App {
                         ui.add_space(38.0);
                     }
                 }
+                // Type de la pièce sur la ligne du nom quand la place le permet (nom, type et prix
+                // sans se toucher), sinon dessous.
+                let kind = kind_label(it);
+                let text_w = |text: &str, style: egui::TextStyle| {
+                    ui.painter()
+                        .layout_no_wrap(text.to_string(), style.resolve(ui.style()), Color32::WHITE)
+                        .size()
+                        .x
+                };
+                let inline = text_w(&it.name, egui::TextStyle::Body)
+                    + text_w(&kind, egui::TextStyle::Small)
+                    + 40.0
+                    + 130.0
+                    < ui.available_width();
                 // Trois couleurs seulement : la rareté (comme en jeu), le verdict et le prix.
                 ui.vertical(|ui| {
+                    // Une seule ligne : centrée sur la hauteur de la ligne d'historique.
+                    if inline {
+                        ui.add_space(
+                            ((38.0 - ui.text_style_height(&egui::TextStyle::Body)) / 2.0).max(0.0),
+                        );
+                    }
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 5.0;
                         let unique = it.rarity == item::Rarity::Unique && build_uniques.contains(&it.name);
@@ -1926,38 +2550,75 @@ impl App {
                             ui.label(RichText::new(g).color(color).strong());
                         }
                         ui.add(egui::Label::new(RichText::new(&it.name).color(ui::rarity_color(it.rarity))).truncate());
+                        if inline {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(&kind).color(Color32::GRAY).small());
+                        }
                     });
-                    ui.label(RichText::new(format!("{} · {}", kind_label(it), value.label.text().to_lowercase())).color(Color32::GRAY).small());
+                    if !inline {
+                        ui.label(RichText::new(&kind).color(Color32::GRAY).small());
+                    }
                 });
-                // Prix estimé, aligné à droite : montant et icône de la devise.
-                let price = self.price_ex(it);
-                // En haut, comme les deux lignes de gauche : prix face au nom, confiance face au type.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| match price {
-                    Ok((ex, approx)) => {
-                        // Objet à vendre au PNJ : son prix au marché est indicatif, en retrait.
-                        let color = if value.label == rules::Label::Vendor { Color32::GRAY } else { Color32::from_rgb(235, 200, 60) };
-                        let text = format!("{}{}", if approx { "≈" } else { "" }, self.fmt_price(ex));
-                        // Estimation d'après les annonces : sa confiance en dessous.
-                        let pct = self.trade.get(it).filter(|_| approx).map(|e| e.confidence_pct());
-                        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                            ui.label(RichText::new(text).color(color).strong());
-                            if let Some(p) = pct {
-                                ui.label(RichText::new(format!("confiance {p} %")).color(ui::confidence_color(p)).small());
+                // Prix estimé, aligné à droite.
+                let pending = match self.trade.get(it) {
+                    Some(trade::Estimate::Pending(m)) => Some(m),
+                    _ => None,
+                };
+                if self.needs_estimate(it) || pending.is_some() {
+                    // Bouton ou loader : centrés sur la hauteur de la ligne.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match pending {
+                            None => estimate_rect = Some(ui::action_button(ui, "💰  Estimer").rect),
+                            Some(msg) => {
+                                // Attente imposée par les limites de l'API : décompte en secondes.
+                                if let Some(left) = trade::wait_left() {
+                                    ui.label(
+                                        RichText::new(format!("{} s", left.as_secs() + 1))
+                                            .color(ui::GOLD),
+                                    );
+                                    ui.ctx().request_repaint_after(Duration::from_millis(250));
+                                }
+                                ui.add(egui::Spinner::new().size(18.0).color(ui::GOLD))
+                                    .on_hover_text(msg);
                             }
-                        });
-                    }
-                    Err(t) => {
-                        ui.label(RichText::new(t).color(Color32::GRAY).strong());
-                    }
+                        }
+                    });
+                    return;
+                }
+                // Une seule ligne, centrée : le prix, coloré selon la confiance (voir `price_label`).
+                let (text, color) = self.price_label(it);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(text).color(color).size(17.0).strong());
                 });
             });
-            let resp = ui.interact(row.response.rect, ui.id().with(("history", i)), egui::Sense::click());
+            if i % 2 == 1 {
+                band_painter.set(
+                    stripe,
+                    egui::Shape::rect_filled(
+                        row.response.rect.expand2(Vec2::new(8.0, 0.0)),
+                        0.0,
+                        Color32::from_rgb(21, 20, 18),
+                    ),
+                );
+            }
+            let resp = ui.interact(row.response.rect, ui.id().with(("history", i)), egui::Sense::click(),
+            );
             // Au survol : de quoi décider sans ouvrir le diagnostic.
             let price = match self.price_ex(it) {
-                Ok((ex, approx)) => format!("{}{}", if approx { "≈ " } else { "" }, self.price_all(ex)),
+                Ok((ex, approx)) => {
+                    format!("{}{}", if approx { "≈ " } else { "" }, self.price_all(ex))
+                }
+                _ if self.needs_estimate(it) => "pas encore estimé : bouton « Estimer »".into(),
                 Err("…") => "en cours…".into(),
+                _ if matches!(
+                    self.trade.get(it),
+                    Some(trade::Estimate::Done { total: 0, .. })
+                ) =>
+                {
+                    "sans valeur : aucune annonce comparable en achat immédiat".into()
+                }
                 Err("?") => "trop peu d'annonces pour estimer".into(),
-                Err(_) => "aucun".into(),
+                Err(_) => "inconnu".into(),
             };
             let confidence = self.trade.get(it).filter(|_| matches!(self.price_ex(it), Ok((_, true)))).map(|e| e.confidence_pct());
             let resp = resp.on_hover_ui(|ui| {
@@ -1994,10 +2655,22 @@ impl App {
                 ui.label(RichText::new("clic : ouvrir le diagnostic · clic droit : retirer").size(14.0).color(Color32::from_gray(110)).italics());
             });
             if selected || resp.hovered() {
-                ui.painter().rect_filled(row.response.rect, 3.0, Color32::from_white_alpha(if selected { 14 } else { 8 }));
+                band_painter.rect_filled(
+                    row.response.rect.expand2(Vec2::new(8.0, 0.0)),
+                    0.0,
+                    Color32::from_white_alpha(if selected { 14 } else { 8 }),
+                );
             }
+            // La ligne entière est cliquable, par-dessus le bouton : on regarde où était le clic.
+            let on_button = estimate_rect
+                .zip(resp.interact_pointer_pos())
+                .is_some_and(|(r, p)| r.contains(p));
             if resp.clicked() {
-                open = Some(it.clone());
+                if on_button {
+                    estimate = Some(it.clone());
+                } else {
+                    open = Some(it.clone());
+                }
             }
             resp.context_menu(|ui| {
                 if ui.button("Retirer de l'historique").clicked() {
@@ -2007,10 +2680,10 @@ impl App {
             });
         }
         if let Some(it) = open {
-            if trade::priceable(&it) {
-                self.trade.request(&it);
-            }
             self.diagnosed = Some(it);
+        }
+        if let Some(it) = estimate {
+            self.request_price(&it);
         }
         if let Some(i) = remove {
             self.history.remove(i);
@@ -2020,38 +2693,18 @@ impl App {
 
     /// Renvoie le verdict à afficher en haut à droite : il est dessiné par-dessus la zone qui
     /// défile, pour rester visible.
-    fn diagnostic(&mut self, ui: &mut egui::Ui, comparison: Option<&compare::Comparison>) -> Option<(&'static str, Color32)> {
-        // Sans objet ouvert : l'historique. Avec : le détail, qui le remplace.
-        let Some(it) = self.diagnosed.clone() else {
-            self.history_panel(ui);
-            return None;
-        };
-        ui.add_space(4.0);
-        // Unique recommandé par le build : il prend la place du verdict, la comparaison de ses
-        // stats ne dit rien de son effet.
-        let judged = self.judging_step().map(|s| s.label.clone());
-        let recommended = (it.rarity == item::Rarity::Unique)
-            .then(|| self.coach.as_ref())
-            .flatten()
-            .and_then(|c| {
-                let steps = uniques::summary(&c.steps).into_iter().find(|s| s.name == it.name)?.steps;
-                let current = judged.as_ref().is_some_and(|l| steps.contains(l));
-                Some((steps, current))
-            });
-        // Verdict en haut à droite de l'aperçu.
-        let verdict = match (&recommended, comparison) {
-            (Some(_), _) => Some(("★ UNIQUE DU BUILD", ui::rarity_color(item::Rarity::Unique))),
-            (None, Some(c)) => Some(ui::verdict_style(c.verdict)),
-            (None, None) => None,
-        };
+    /// En-tête d'un objet : image, nom, base, défenses de base, implicites, niveau requis ; la
+    /// fiche complète au survol. `verdict` : place gardée à droite pour le badge (dessiné à part,
+    /// il ne défile pas).
+    fn item_preview(&mut self, ui: &mut egui::Ui, it: &Item, verdict: Option<(&'static str, Color32)>) {
         // Survol de l'aperçu = fiche complète en infobulle (rien ne se déplie dans le panneau).
         // L'image prend la hauteur du texte à côté (mesurée à l'affichage précédent) : elle ne
         // grandit pas l'en-tête.
-        let base_defences = self.base_defences_text(&it);
+        let base_defences = self.base_defences_text(it);
         let text_h_id = ui.id().with("diag_text_h");
         let text_h: f32 = ui.data(|d| d.get_temp(text_h_id)).unwrap_or(80.0);
         let preview = ui.horizontal(|ui| {
-            if let Some(tex) = self.assets.texture(&it) {
+            if let Some(tex) = self.assets.texture(it) {
                 let size = tex.size_vec2();
                 let scale = (text_h / size.y).min(80.0 / size.x).min(1.5);
                 ui.image((tex.id(), size * scale));
@@ -2084,7 +2737,34 @@ impl App {
             }
         })
         .response;
-        ui.interact(preview.rect, ui.id().with("preview"), egui::Sense::hover()).on_hover_ui(|ui| ui::item_card(ui, &it));
+        ui.interact(preview.rect, ui.id().with("preview"), egui::Sense::hover()).on_hover_ui(|ui| ui::item_card(ui, it));
+    }
+
+    fn diagnostic(&mut self, ui: &mut egui::Ui, comparison: Option<&compare::Comparison>) -> Option<(&'static str, Color32)> {
+        // Sans objet ouvert : l'historique. Avec : le détail, qui le remplace.
+        let Some(it) = self.diagnosed.clone() else {
+            self.history_panel(ui);
+            return None;
+        };
+        ui.add_space(4.0);
+        // Unique recommandé par le build : il prend la place du verdict, la comparaison de ses
+        // stats ne dit rien de son effet.
+        let judged = self.judging_step().map(|s| s.label.clone());
+        let recommended = (it.rarity == item::Rarity::Unique)
+            .then(|| self.coach.as_ref())
+            .flatten()
+            .and_then(|c| {
+                let steps = uniques::summary(&c.steps).into_iter().find(|s| s.name == it.name)?.steps;
+                let current = judged.as_ref().is_some_and(|l| steps.contains(l));
+                Some((steps, current))
+            });
+        // Verdict en haut à droite de l'aperçu.
+        let verdict = match (&recommended, comparison) {
+            (Some(_), _) => Some(("★ UNIQUE DU BUILD", ui::rarity_color(item::Rarity::Unique))),
+            (None, Some(c)) => Some(ui::verdict_style(c.verdict)),
+            (None, None) => None,
+        };
+        self.item_preview(ui, &it, verdict);
         // Châsses de la pièce : augments déjà posés (leurs stats sont dans les comparaisons) et
         // châsses vides.
         if let Some(sk) = self.socketed(&it) {
@@ -2150,7 +2830,16 @@ impl App {
                 ui.label(RichText::new(when).color(Color32::from_rgb(200, 170, 110)));
             }
             if let Some(card) = &card {
-                ui::build_card_body(ui, card);
+                // Petite image de la pièce recommandée, à la taille de celles de l'historique.
+                ui.horizontal_top(|ui| {
+                    if let Some(tex) = &card.image {
+                        let size = tex.size_vec2();
+                        let scale = (32.0 / size.y).min(32.0 / size.x);
+                        ui.add_sized([34.0, 34.0], egui::Image::new((tex.id(), size * scale)));
+                    }
+                    ui.vertical(|ui| ui::build_card_head(ui, card));
+                });
+                ui::build_card_lines(ui, card);
             }
         }
         ui.add_space(8.0);
@@ -2176,98 +2865,651 @@ impl App {
         })
     }
 
+    /// Onglet Marché : cours du marché d'échange d'après poe.ninja, par catégorie.
+    fn market_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        const CATEGORIES: &[(&str, &str)] = &[
+            ("Currency", "Monnaie"),
+            ("Fragments", "Fragments"),
+            ("Runes", "Runes"),
+            ("Essences", "Essences"),
+            ("SoulCores", "Cœurs d'âme"),
+            ("Idols", "Idoles"),
+            ("Expedition", "Expédition"),
+            ("Ritual", "Rituel"),
+            ("Delirium", "Délire"),
+            ("Breach", "Brèche"),
+            ("Abyss", "Abîme"),
+            ("UncutGems", "Gemmes non taillées"),
+            ("LineageSupportGems", "Gemmes de lignée"),
+        ];
+        // Cours de la ligue regardée : celle du personnage, ou une autre choisie ici.
+        let prices = self
+            .market_league
+            .as_ref()
+            .map(|(_, p)| p.clone())
+            .unwrap_or_else(|| self.prices.clone());
+        let shown_league = self
+            .market_league
+            .as_ref()
+            .map(|(l, _)| l.clone())
+            .unwrap_or_else(|| self.league.clone());
+        let busy = prices.busy();
+        if busy {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+        let age = prices.age();
+        // Lignes de la catégorie, filtrées par la recherche, les plus chères d'abord.
+        let (rates, mut lines) = {
+            let data = prices.data.lock().unwrap();
+            let rates = data.as_ref().map(|p| {
+                (
+                    p.exalted_per_divine,
+                    p.currency("Chaos Orb").map(|c| p.to_ex(c)).unwrap_or(0.0),
+                )
+            });
+            let needle = self.market_search.trim().to_lowercase();
+            let lines: Vec<prices::MarketLine> = data
+                .as_ref()
+                .map(|p| {
+                    p.market
+                        .iter()
+                        .filter(|l| {
+                            l.category == self.market_category
+                                && (needle.is_empty() || l.name.to_lowercase().contains(&needle))
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            (rates, lines)
+        };
+        prices::sort_by_family(&mut lines);
+        // Montant en exalts dans la devise la plus parlante, aux taux de cette ligue.
+        let fmt = |ex: f64| match rates {
+            Some((div, _)) if div > 0.0 && ex >= div => Self::fmt_in(ex, (div, "div")),
+            Some((_, chaos)) if chaos > 1.0 && ex >= chaos => Self::fmt_in(ex, (chaos, "chaos")),
+            _ => Self::fmt_in(ex, (1.0, "ex")),
+        };
+        let all = |ex: f64| match rates {
+            Some((div, chaos)) if div > 0.0 && chaos > 0.0 => format!(
+                "{} · {} · {}",
+                Self::fmt_in(ex, (1.0, "ex")),
+                Self::fmt_in(ex, (chaos, "chaos")),
+                Self::fmt_in(ex, (div, "div"))
+            ),
+            _ => Self::fmt_in(ex, (1.0, "ex")),
+        };
+        let mut league_pick: Option<String> = None;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            egui::Frame::new()
+                .inner_margin(egui::Margin {
+                    left: 0,
+                    right: 8,
+                    top: 0,
+                    bottom: 0,
+                })
+                .show(ui, |ui| {
+                    let mut refresh = false;
+                    ui::section_header(ui, "MARCHÉ", None, |ui| {
+                        if busy {
+                            ui.add(egui::Spinner::new().size(16.0).color(ui::GOLD));
+                        } else {
+                            refresh = ui::action_button(ui, "⟳  Actualiser")
+                                .on_hover_text("Recharger les cours depuis poe.ninja")
+                                .clicked();
+                        }
+                        if let Some(a) = age {
+                            let text = if a < 90 {
+                                "à l'instant".to_string()
+                            } else {
+                                format!("il y a {} min", a / 60)
+                            };
+                            ui.label(RichText::new(text).color(Color32::GRAY).small());
+                        }
+                    });
+                    if refresh {
+                        prices.refresh();
+                    }
+                    // Taux de change de référence, et la ligue regardée (toujours là, même sans cours).
+                    let rates_text = rates.map(|(ex_per_div, chaos_ex)| {
+                        let mut parts = vec![format!("1 div = {} ex", ex_per_div.round())];
+                        if chaos_ex > 0.0 {
+                            parts.push(format!("1 div = {:.0} chaos", ex_per_div / chaos_ex));
+                            parts.push(format!(
+                                "1 chaos = {} ex",
+                                Self::fmt_in(chaos_ex, (1.0, "")).trim()
+                            ));
+                        }
+                        parts.join("  ·  ")
+                    });
+                    {
+                        ui.horizontal(|ui| {
+                            if let Some(t) = &rates_text {
+                                ui.label(RichText::new(t).color(Color32::LIGHT_GRAY));
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui::gold_widgets(ui);
+                                    let mut list = self.leagues.list();
+                                    if !list.contains(&shown_league) {
+                                        list.insert(0, shown_league.clone());
+                                    }
+                                    egui::ComboBox::from_id_salt("market_league")
+                                        .selected_text(RichText::new(&shown_league).color(ui::GOLD))
+                                        .show_ui(ui, |ui| {
+                                            for l in list {
+                                                let mine = if l == self.league {
+                                                    format!("{l} (personnage)")
+                                                } else {
+                                                    l.clone()
+                                                };
+                                                if ui
+                                                    .selectable_label(l == shown_league, mine)
+                                                    .clicked()
+                                                {
+                                                    league_pick = Some(l);
+                                                }
+                                            }
+                                        })
+                                        .response
+                                        .on_hover_text("Ligue dont les cours sont affichés");
+                                },
+                            );
+                        });
+                        ui.add_space(6.0);
+                    }
+                    ui.horizontal(|ui| {
+                        ui::gold_widgets(ui);
+                        let shown = CATEGORIES
+                            .iter()
+                            .find(|(k, _)| *k == self.market_category)
+                            .map(|(_, l)| *l)
+                            .unwrap_or("Monnaie");
+                        egui::ComboBox::from_id_salt("market_category")
+                            .selected_text(RichText::new(shown).color(ui::GOLD))
+                            .show_ui(ui, |ui| {
+                                for (key, label) in CATEGORIES {
+                                    ui.selectable_value(
+                                        &mut self.market_category,
+                                        key.to_string(),
+                                        *label,
+                                    );
+                                }
+                            });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.market_search)
+                                .hint_text("rechercher")
+                                .desired_width(ui.available_width()),
+                        );
+                    });
+                    ui.add_space(6.0);
+                    if lines.is_empty() {
+                        let text = if age.is_none() {
+                            "Chargement des cours…"
+                        } else {
+                            "Aucun résultat"
+                        };
+                        ui.label(RichText::new(text).color(Color32::GRAY));
+                        return;
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("market_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (i, l) in lines.iter().enumerate() {
+                                // Un peu d'air entre deux familles (orbes de joaillier, essences de glace…).
+                                if i > 0 {
+                                    if prices::family(&lines[i - 1].name).0
+                                        != prices::family(&l.name).0
+                                    {
+                                        ui.add_space(6.0);
+                                    }
+                                    ui.separator();
+                                }
+                                let ex = rates.map(|(r, _)| l.value * r).unwrap_or(0.0);
+                                let row = ui.horizontal(|ui| {
+                                    ui.set_min_height(30.0);
+                                    match self.assets.texture_url(format!(
+                                        "{}{}",
+                                        prices::IMAGE_HOST,
+                                        l.image
+                                    )) {
+                                        Some(tex) => {
+                                            ui.add(egui::Image::new((tex.id(), Vec2::splat(28.0))));
+                                        }
+                                        None => {
+                                            ui.add_space(32.0);
+                                        }
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&l.name).color(Color32::from_gray(225)),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let (sign, color) = if l.change >= 0.0 {
+                                                ("+", Color32::from_rgb(110, 200, 110))
+                                            } else {
+                                                ("", Color32::from_rgb(220, 95, 85))
+                                            };
+                                            ui.add_sized(
+                                                [56.0, 20.0],
+                                                egui::Label::new(
+                                                    RichText::new(format!(
+                                                        "{sign}{:.0} %",
+                                                        l.change
+                                                    ))
+                                                    .color(color)
+                                                    .small(),
+                                                ),
+                                            );
+                                            ui::sparkline(ui, &l.spark, color);
+                                            ui.label(
+                                                RichText::new(fmt(ex))
+                                                    .color(Color32::from_rgb(225, 220, 210))
+                                                    .size(16.0)
+                                                    .strong(),
+                                            );
+                                        },
+                                    );
+                                });
+                                row.response.on_hover_ui(|ui| {
+                                    ui.label(RichText::new(&l.name).strong());
+                                    ui.label(all(ex));
+                                    ui.label(format!("Variation sur 7 jours : {:+.1} %", l.change));
+                                    ui.label(format!("Volume échangé : {} div", l.volume.round()));
+                                });
+                            }
+                        });
+                });
+        });
+        if let Some(l) = league_pick {
+            self.market_league = (l != self.league).then(|| {
+                let p = prices::Prices::start(self.dirs.cache_dir().to_path_buf(), l.clone());
+                (l, p)
+            });
+        }
+    }
+
     /// Bas du diagnostic, toujours visible en entier : conseil, prix, confiance, puis comment
     /// le prix a été trouvé.
+    /// Bas du diagnostic, toujours visible. Avec une estimation sur le trade : titre
+    /// « ESTIMATION » et bouton « Détails » (écran de l'estimation) sur sa ligne, puis prix estimé,
+    /// confiance, conseil et « basé sur » ; « Réestimer » en icône devant le titre.
     fn value_panel(&mut self, ui: &mut egui::Ui, it: &Item) {
+        let est = if trade::priceable(it) { self.trade.get(it) } else { None };
+        // Ce qui a un détail et peut être relancé : une estimation faite sur le trade, ou un prix
+        // poe.ninja (relancer = recharger les cours).
+        let done = matches!(est, Some(trade::Estimate::Done { .. }));
+        let ninja = est.is_none() && self.ninja_price(it).is_some();
+        // Une carte, comme la route et l'activité : un peu plus claire que le fond, bordée.
+        let (mut again, mut open, mut estimate) = (false, false, false);
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(ui::CARD_FILL)
+            .stroke(egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.55)))
+            .corner_radius(6)
+            .inner_margin(egui::Margin { left: 12, right: 12, top: 6, bottom: 10 })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                // « Réestimer » en simple icône devant le titre ; « Détails » au bout de la ligne. Même
+                // trait dessous que les autres titres de carte.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if let Some(step) = self.trade.refreshing(it) {
+                        // Réestimation en cours : l'ancienne estimation reste affichée.
+                        let step = match trade::wait_left() {
+                            Some(left) => format!("{step} (limite de l'API : encore {} s)", left.as_secs() + 1),
+                            None => step,
+                        };
+                        ui.add(egui::Spinner::new().size(16.0).color(ui::GOLD)).on_hover_text(step);
+                        ui.ctx().request_repaint_after(Duration::from_millis(250));
+                        ui.add_space(2.0);
+                    } else if done && self.stored.trade_prices {
+                        again = ui::action_button(ui, "⟳").on_hover_text("Réestimer : relancer la recherche sur le site de trade (les prix bougent)").clicked();
+                        ui.add_space(2.0);
+                    } else if ninja {
+                        if self.prices.busy() {
+                            ui.add(egui::Spinner::new().size(16.0).color(ui::GOLD));
+                            ui.ctx().request_repaint_after(Duration::from_millis(250));
+                        } else {
+                            again = ui::action_button(ui, "⟳").on_hover_text("Recharger les cours de poe.ninja").clicked();
+                        }
+                        ui.add_space(2.0);
+                    }
+                    ui.label(RichText::new("ESTIMATION").color(ui::GOLD).size(13.0).strong());
+                    // Jamais estimé (ou échec) : le bouton pour lancer l'estimation, à la place de
+                    // « Détails ».
+                    if self.needs_estimate(it) {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (label, hint) = match est {
+                                Some(trade::Estimate::Failed(_)) => ("⟳  Réessayer", "Relancer l'estimation sur le site de trade"),
+                                _ => ("💰  Estimer", "Cherche des annonces comparables sur le site de trade"),
+                            };
+                            estimate = ui::action_button(ui, label).on_hover_text(hint).clicked();
+                        });
+                    }
+                    if done || ninja {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let hint = if done { "Comment le prix a été trouvé : recherche, critères, annonces" } else { "D'où vient le prix : cours de poe.ninja" };
+                            open = ui::action_button(ui, "🔍  Détails").on_hover_text(hint).clicked();
+                        });
+                    }
+                });
+                ui.add_space(2.0);
+                let line = ui.available_rect_before_wrap();
+                ui.painter().hline(line.x_range(), line.top(), egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.6)));
+                ui.add_space(8.0);
+                self.value_rows(ui, it, &est);
+            });
+        if again {
+            if done {
+                self.trade.request_again(it);
+            } else {
+                self.prices.refresh();
+            }
+        }
+        if open {
+            self.estimate_open = Some(it.raw.clone());
+        }
+        if estimate {
+            self.request_price(it);
+        }
+    }
+
+    /// Écran de l'estimation d'un unique ou d'une monnaie : le cours de poe.ninja, d'où il vient,
+    /// et la recherche de l'unique sur le site de trade.
+    fn ninja_detail(&mut self, ui: &mut egui::Ui, it: &Item) {
+        if self.ninja_price(it).is_none() {
+            ui.label(RichText::new("Pas d'estimation pour cet objet.").color(Color32::GRAY));
+            return;
+        }
+        ui.add_space(4.0);
+        self.item_preview(ui, it, None);
+        // Le prix : les mêmes lignes qu'au diagnostic.
+        self.price_title(ui, it, true);
+        self.value_rows(ui, it, &None);
+        // La source du prix : sa page sur poe.ninja (sinon, pour un unique, ses annonces).
+        let page = self.prices.data.lock().unwrap().as_ref().and_then(|p| p.page_url(it.rarity == item::Rarity::Unique, &it.name, &it.base));
+        ui.add_space(10.0);
+        ui::zone_title(ui, "SOURCE", "");
+        match page {
+            Some(url) => {
+                ui.hyperlink_to("Voir sur poe.ninja", url);
+            }
+            None if it.rarity == item::Rarity::Unique => {
+                ui.hyperlink_to("Voir les annonces sur le site de trade", uniques::trade_url(&self.league, &it.name, Some(&it.base)));
+            }
+            None => {}
+        }
+    }
+
+    /// Prix poe.ninja d'un unique ou d'une monnaie, en exalts, et le nombre d'annonces qui le
+    /// fondent (uniques seulement).
+    fn ninja_price(&self, it: &Item) -> Option<(f64, Option<u32>)> {
+        let data = self.prices.data.lock().unwrap();
+        let p = data.as_ref()?;
+        if it.rarity == item::Rarity::Unique {
+            return p.unique(&it.name, &it.base).map(|(v, n)| (p.to_ex(v), Some(n)));
+        }
+        p.currency(&it.base).map(|unit| (p.to_ex(unit * it.stack.max(1) as f64), None))
+    }
+
+    /// Lignes du bas du diagnostic, dans l'ordre : prix estimé, confiance, conseil, basé sur.
+    /// Sans estimation sur le trade, le résumé de la valeur suit.
+    fn value_rows(&mut self, ui: &mut egui::Ui, it: &Item, est: &Option<trade::Estimate>) {
         let value = self.value_of(it);
         let gold = Color32::from_rgb(235, 200, 60);
         let row = |ui: &mut egui::Ui, label: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
-            ui.horizontal(|ui| {
+            // Une ligne trop longue passe à la ligne plutôt que d'être coupée ; en passe de mesure,
+            // elle reste sur une ligne (sa vraie largeur).
+            let mut inner = |ui: &mut egui::Ui| {
                 ui.label(RichText::new(format!("{label} :")).color(Color32::from_gray(225)).strong());
                 add(ui);
+            };
+            if ui.is_sizing_pass() {
+                ui.horizontal(|ui| inner(ui));
+            } else {
+                ui.horizontal_wrapped(|ui| inner(ui));
+            }
+        };
+        let advice = |ui: &mut egui::Ui| {
+            row(ui, "Conseil", &mut |ui| {
+                ui.label(RichText::new(value.label.advice()).color(ui::value_color(value.label)).strong());
             });
         };
-        row(ui, "Conseil", &mut |ui| {
-            ui.label(RichText::new(value.label.advice()).color(ui::value_color(value.label)).strong());
-        });
-        let est = if trade::priceable(it) { self.trade.get(it) } else { None };
-        let mut estimated = false;
-        match &est {
-            Some(e @ trade::Estimate::Done { total, prices_ex, base_only, .. }) => match (e.value_ex(), e.range_ex()) {
-                (Some(estimate), Some((low, high))) if *total > 0 => {
-                    estimated = true;
-                    // Fourchette dans la même devise que l'estimation.
-                    let unit = self.price_unit(estimate);
-                    let range = if high - low >= 0.1 { format!(" · de {} à {}", Self::fmt_in(low, unit), Self::fmt_in(high, unit)) } else { String::new() };
-                    let base = if *base_only { "base " } else { "" };
-                    let text = format!("{base}≈ {}", self.fmt_price(estimate));
-                    let detail = format!("({}){range}", self.price_all(estimate));
-                    row(ui, "Prix estimé", &mut |ui| {
-                        ui.label(RichText::new(&text).color(gold).strong()).on_hover_text(
-                            "Prix médian des annonces comparables les moins chères, sans les prix aberrants (plus de 5 fois au-dessus ou en dessous de leur médiane). La fourchette va de la moins chère à la plus chère des annonces retenues.",
-                        );
-                        ui.label(RichText::new(&detail).color(Color32::GRAY));
-                    });
-                    let p = e.confidence_pct();
-                    let count = if *total == 1 { "1 annonce".to_string() } else { format!("{total} annonces") };
-                    row(ui, "Confiance", &mut |ui| {
-                        ui.label(RichText::new(format!("{p} % ({})", e.confidence())).color(ui::confidence_color(p))).on_hover_text(
-                            "100 % : 5 annonces retenues, trouvées avec tous les mods de l'objet. Moins 10 points par annonce retenue en moins, moins 15 par mod lâché pour trouver assez d'annonces.\nBonne à partir de 75 %, moyenne à partir de 50 %.",
-                        );
-                        ui.label(RichText::new(format!("· {count} en achat immédiat")).color(Color32::GRAY));
-                    });
+        // En attente d'estimation : les lignes restent, avec « — » en gris.
+        let unknown = |ui: &mut egui::Ui| {
+            for label in ["Confiance", "Conseil", "Basé sur"] {
+                row(ui, label, &mut |ui| {
+                    ui.label(RichText::new("—").color(Color32::from_gray(110)));
+                });
+            }
+        };
+        match est {
+            Some(e @ trade::Estimate::Done { total, prices_ex, base_only, listings, score, .. }) => {
+                match (e.value_ex(), e.range_ex()) {
+                    (Some(estimate), Some((low, high))) if *total > 0 => {
+                        // Fourchette dans la même devise que l'estimation.
+                        let unit = self.price_unit(estimate);
+                        let span = format!("de {} à {}", Self::fmt_in(low, unit), Self::fmt_in(high, unit));
+                        let base = if *base_only { "base " } else { "" };
+                        let p = e.confidence_pct();
+                        row(ui, "Prix estimé", &mut |ui| {
+                            // Confiance faible : la fourchette d'abord, le prix n'est qu'un repère.
+                            if p < 50 && high - low >= 0.1 {
+                                ui.label(RichText::new(format!("{base}{span}")).color(gold).strong());
+                                ui.label(RichText::new(format!("(repère {})", self.fmt_price(estimate))).color(Color32::GRAY));
+                            } else {
+                                ui.label(RichText::new(format!("{base}≈ {}", self.fmt_price(estimate))).color(gold).strong());
+                                let range = if high - low >= 0.1 { format!(" · {span}") } else { String::new() };
+                                ui.label(RichText::new(format!("({}){range}", self.price_all(estimate))).color(Color32::GRAY));
+                            }
+                        });
+                        row(ui, "Confiance", &mut |ui| {
+                            ui.label(RichText::new(format!("{p} % ({})", e.confidence())).color(ui::confidence_color(p)));
+                        });
+                    }
+                    _ if *total == 0 => row(ui, "Prix estimé", &mut |ui| {
+                        ui.label(RichText::new("aucune annonce comparable en achat immédiat").color(Color32::LIGHT_GRAY));
+                    }),
+                    _ => {
+                        let min = prices_ex.iter().copied().fold(f64::INFINITY, f64::min);
+                        let from = if min.is_finite() { format!(", dès {}", self.fmt_price(min)) } else { String::new() };
+                        let text = format!("trop peu d'annonces pour estimer ({total}{from} ; il en faut {})", trade::MIN_PRICED);
+                        row(ui, "Prix estimé", &mut |ui| {
+                            ui.label(RichText::new(&text).color(Color32::LIGHT_GRAY));
+                        });
+                    }
                 }
-                _ if *total == 0 => row(ui, "Prix estimé", &mut |ui| {
-                    ui.label(RichText::new("aucune annonce comparable en achat immédiat").color(Color32::LIGHT_GRAY));
-                }),
-                _ => {
-                    let min = prices_ex.iter().copied().fold(f64::INFINITY, f64::min);
-                    let from = if min.is_finite() { format!(", dès {}", self.fmt_price(min)) } else { String::new() };
-                    let text = format!("trop peu d'annonces pour estimer ({total}{from} ; il en faut {})", trade::MIN_PRICED);
-                    row(ui, "Prix estimé", &mut |ui| {
-                        ui.label(RichText::new(&text).color(Color32::LIGHT_GRAY));
-                    });
+                advice(ui);
+                // Sur quoi repose l'estimation (annonces proches sur celles lues, éparpillement).
+                let kept = listings.iter().filter(|l| l.kept).count();
+                let mut basis = if *score == 0.0 || listings.is_empty() {
+                    if *total == 1 { "1 annonce en achat immédiat".to_string() } else { format!("{total} annonces en achat immédiat") }
+                } else {
+                    format!("{kept} {} sur {} annonces lues", if kept == 1 { "proche" } else { "proches" }, listings.len())
+                };
+                if let Some(spread) = e.spread().filter(|s| *s >= 2.0) {
+                    basis.push_str(&format!(" · prix éparpillés ×{}", spread.round()));
                 }
-            },
-            Some(trade::Estimate::Pending(msg)) => row(ui, "Prix estimé", &mut |ui| {
-                ui.spinner();
-                ui.label(RichText::new(msg).color(Color32::LIGHT_GRAY));
-            }),
-            Some(trade::Estimate::Failed(e)) => row(ui, "Prix estimé", &mut |ui| {
-                ui.label(RichText::new(e).color(Color32::from_rgb(230, 120, 100)));
-            }),
-            None if trade::priceable(it) => row(ui, "Prix estimé", &mut |ui| {
-                ui.label(RichText::new("pas encore estimé").color(Color32::GRAY));
-            }),
-            // Uniques et devises : prix de poe.ninja.
-            None => match self.price_ex(it) {
-                Ok((ex, _)) => {
-                    let text = self.fmt_price(ex);
-                    let detail = format!("({})", self.price_all(ex));
+                row(ui, "Basé sur", &mut |ui| {
+                    ui.label(RichText::new(&basis).color(Color32::GRAY));
+                });
+
+            }
+            Some(trade::Estimate::Pending(msg)) => {
+                row(ui, "Prix estimé", &mut |ui| {
+                    ui.add(egui::Spinner::new().color(ui::GOLD));
+                    match trade::wait_left() {
+                        Some(left) => {
+                            ui.label(RichText::new(format!("limite de l'API de trade : encore {} s", left.as_secs() + 1)).color(Color32::LIGHT_GRAY));
+                            ui.ctx().request_repaint_after(Duration::from_millis(250));
+                        }
+                        None => {
+                            ui.label(RichText::new(msg).color(Color32::LIGHT_GRAY));
+                        }
+                    }
+                });
+                unknown(ui);
+            }
+            Some(trade::Estimate::Failed(e)) => {
+                row(ui, "Prix estimé", &mut |ui| {
+                    ui.label(RichText::new(e).color(Color32::from_rgb(230, 120, 100)));
+                });
+                unknown(ui);
+            }
+            None if trade::priceable(it) => {
+                row(ui, "Prix estimé", &mut |ui| {
+                    if self.stored.trade_prices {
+                        ui.label(RichText::new("—").color(Color32::from_gray(110)));
+                    } else {
+                        ui.label(RichText::new("estimation sur le trade coupée dans les réglages").color(Color32::GRAY));
+                    }
+                });
+                // Estimation coupée : le conseil d'après les règles reste la seule indication.
+                if self.stored.trade_prices {
+                    unknown(ui);
+                } else {
+                    advice(ui);
+                }
+            }
+            // Uniques et devises : prix de poe.ninja, présenté comme une estimation.
+            None => match self.ninja_price(it) {
+                Some((ex, listings)) => {
+                    row(ui, "Prix estimé", &mut |ui| {
+                        ui.label(RichText::new(self.fmt_price(ex)).color(gold).strong());
+                        ui.label(RichText::new(format!("({})", self.price_all(ex))).color(Color32::GRAY));
+                    });
+                    advice(ui);
+                    let basis = match listings {
+                        Some(1) => "1 annonce, cours de poe.ninja".to_string(),
+                        Some(n) => format!("{n} annonces, cours de poe.ninja"),
+                        None => "cours de poe.ninja".to_string(),
+                    };
+                    row(ui, "Basé sur", &mut |ui| {
+                        ui.label(RichText::new(&basis).color(Color32::GRAY));
+                    });
+                    // Le résumé redit le prix : il est dans le détail.
+                    return;
+                }
+                None => {
                     row(ui, "Prix", &mut |ui| {
-                        ui.label(RichText::new(&text).color(gold).strong());
-                        ui.label(RichText::new(&detail).color(Color32::GRAY));
+                        ui.label(RichText::new("inconnu").color(Color32::GRAY));
                     });
+                    advice(ui);
                 }
-                Err(_) => row(ui, "Prix", &mut |ui| {
-                    ui.label(RichText::new("inconnu").color(Color32::GRAY));
-                }),
             },
         }
-        // Le résumé redit le prix d'un objet à vendre au marché, ou l'absence d'annonce : inutile
-        // sous la ligne du prix.
-        ui.add_space(4.0);
-        let no_listing = matches!(&est, Some(trade::Estimate::Done { total: 0, .. }));
-        if !(estimated && value.label == rules::Label::Market) && !no_listing {
-            ui.label(RichText::new(&value.summary).color(Color32::LIGHT_GRAY));
-        }
-        for r in &value.reasons {
-            ui.label(RichText::new(format!("• {r}")).color(Color32::GRAY));
-        }
-        if let Some(e) = &est {
+        // Ni conseil ni résumé tant que l'objet attend son estimation : sans prix, « à vendre au
+        // PNJ » ou « ne vaut rien » seraient faux. Sinon (estimation coupée, pas de prix connu), le
+        // résumé des règles ici.
+        let waiting = trade::priceable(it) && self.stored.trade_prices && !matches!(est, Some(trade::Estimate::Done { .. }));
+        if !waiting && !matches!(est, Some(trade::Estimate::Done { .. })) {
             ui.add_space(4.0);
-            self.market_details(ui, e);
+            ui.label(RichText::new(&value.summary).color(Color32::LIGHT_GRAY));
+            for r in &value.reasons {
+                ui.label(RichText::new(format!("• {r}")).color(Color32::GRAY));
+            }
         }
+    }
+
+    /// Écran de l'estimation : comment le prix a été trouvé (calcul, confiance, valeur), la
+    /// recherche faite sur le site de trade et ses critères, puis les annonces lues.
+    /// Titre « PRIX » de l'écran d'estimation, précédé de « ⟳ » pour relancer l'estimation
+    /// (recherche sur le trade, ou cours de poe.ninja) ; le loader pendant qu'elle tourne.
+    fn price_title(&mut self, ui: &mut egui::Ui, it: &Item, ninja: bool) {
+        ui.add_space(8.0);
+        ui.separator();
+        let busy = if ninja { self.prices.busy() } else { matches!(self.trade.get(it), Some(trade::Estimate::Pending(_))) || self.trade.refreshing(it).is_some() };
+        let mut again = false;
+        ui.horizontal(|ui| {
+            if busy {
+                ui.add(egui::Spinner::new().size(14.0).color(ui::GOLD));
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+            } else if ninja || self.stored.trade_prices {
+                let hint = if ninja { "Recharger les cours de poe.ninja" } else { "Réestimer : relancer la recherche sur le site de trade (les prix bougent)" };
+                again = ui::action_button(ui, "⟳").on_hover_text(hint).clicked();
+            }
+            ui.label(RichText::new("PRIX").color(ui::GOLD_DIM).small().strong());
+        });
+        ui.add_space(2.0);
+        if again {
+            if ninja {
+                self.prices.refresh();
+            } else {
+                self.trade.request_again(it);
+            }
+        }
+    }
+
+    /// Titre de la colonne des annonces lues (fixe au-dessus de leur défilement).
+    fn listings_title(&self, ui: &mut egui::Ui, it: &Item) {
+        let detail = match self.trade.get(it).filter(|_| trade::priceable(it)) {
+            Some(trade::Estimate::Done { listings, total, .. }) => format!("{} sur {total} en vente", listings.len()),
+            _ => String::new(),
+        };
+        // Même titre que les cartes (« ACTIVITÉ ») : sous-titre gris, trait dessous.
+        ui::section_header_sub(ui, "ANNONCES LUES", &detail);
+    }
+
+    /// `listings_only` : la colonne de droite, les annonces lues seules (sans leur titre) ; sinon
+    /// tout le reste.
+    fn estimation_detail(&mut self, ui: &mut egui::Ui, it: &Item, listings_only: bool) {
+        let Some(e) = self.trade.get(it).filter(|_| trade::priceable(it)) else {
+            if listings_only {
+                ui.label(RichText::new("Aucune : le prix vient des cours de poe.ninja.").color(Color32::GRAY));
+            } else {
+                self.ninja_detail(ui, it);
+            }
+            return;
+        };
+        let trade::Estimate::Done { url, criteria, base_only, widened, listings, score, .. } = &e else { return };
+        let (base_only, widened, score) = (*base_only, *widened, *score);
+        if listings_only {
+            if listings.is_empty() {
+                ui.label(RichText::new("Aucune annonce gardée : réestime l'objet pour les voir.").color(Color32::GRAY));
+            } else {
+                self.listing_cards(ui, it, listings, score, e.shares());
+            }
+            return;
+        }
+        let text = |ui: &mut egui::Ui, t: &str| {
+            ui.label(RichText::new(t).color(Color32::GRAY));
+        };
+        ui.add_space(4.0);
+        self.item_preview(ui, it, None);
+        // Le prix : les mêmes lignes qu'au diagnostic.
+        self.price_title(ui, it, false);
+        self.value_rows(ui, it, &Some(e.clone()));
+        ui.add_space(10.0);
+
+        ui::zone_title(ui, "RECHERCHE", "");
+        if base_only {
+            text(ui, "aucun mod reconnu : prix de la base, pour le craft");
+        }
+        if widened {
+            text(ui, &format!("trop peu d'annonces de note proche (±{} %) : les plus proches ont été prises", (trade::SCORE_GAP * 100.0) as u32));
+        }
+        // Mods cherchés ; ceux lâchés par la recherche élargie, en gris. Le nombre de mods exigé
+        // n'est pas répété.
+        for c in criteria {
+            if c.starts_with("au moins ") && c.ends_with("comme cet objet") {
+                continue;
+            }
+            match c.strip_suffix(" (lâché, sa place reste exigée)") {
+                Some(dropped) => ui.label(RichText::new(format!("• {dropped}")).color(Color32::from_gray(110))).on_hover_text("Lâché par la recherche élargie : sa place reste exigée"),
+                None => ui.label(RichText::new(format!("• {c}")).color(Color32::LIGHT_GRAY)),
+            };
+        }
+        // La source du prix, comme pour un prix poe.ninja.
+        ui.add_space(10.0);
+        ui::zone_title(ui, "SOURCE", "");
+        ui.hyperlink_to("Voir la recherche sur le site de trade", url);
     }
 }
 
@@ -2304,8 +3546,9 @@ impl eframe::App for App {
         }
         if self.character.is_some() {
             if let Some(it) = self.open_diag.take().and_then(|i| self.history.get(i).cloned()) {
-                if trade::priceable(&it) {
-                    self.trade.request(&it);
+                // Développement : `POE2_TRACKER_ESTIMATE=1` ouvre aussi le détail de l'estimation.
+                if std::env::var_os("POE2_TRACKER_ESTIMATE").is_some() {
+                    self.estimate_open = Some(it.raw.clone());
                 }
                 self.diagnosed = Some(it);
             }
@@ -2348,6 +3591,7 @@ impl eframe::App for App {
         self.sync_league(ctx);
         self.welcome_window(ctx);
         self.changelog_window(ctx);
+        self.settings_window(ctx);
         self.add_build_window(ctx);
         // La grille garde ses proportions et prend toute la place possible ; le diagnostic
         // (à droite) et le fil (en bas) absorbent le reste, sans bande vide autour du fond.
@@ -2362,50 +3606,169 @@ impl eframe::App for App {
             .flat_map(|c| c.against.iter().map(|s| (*s, ui::verdict_style(c.verdict).1)))
             .collect();
         egui::SidePanel::right("diagnostic").resizable(false).exact_width(side_w).show(ctx, |ui| {
-            // Valeur et marché collés en bas, toujours visibles ; le reste défile au-dessus. La
+            // Onglets en bas, sur la même ligne que ceux de gauche ; le contenu au-dessus.
+            let side = ui.available_rect_before_wrap();
+            let full = egui::Rect::from_min_max(side.min, egui::pos2(side.max.x, side.max.y - TAB_H));
+            let tabs_rect = egui::Rect::from_min_max(egui::pos2(side.min.x, full.max.y), side.max);
+            let tabs: Vec<_> = views::SideTab::ALL.iter().map(|t| (*t, t.label())).collect();
+            if let Some(tab) = ui::tab_strip(ui, tabs_rect, &tabs, self.side_tab) {
+                self.side_tab = tab;
+            }
+            if self.side_tab == views::SideTab::Market {
+                self.market_panel(ui, full);
+                return;
+            }
+            // Trois niveaux : historique, diagnostic, détail de l'estimation. Au diagnostic, valeur
+            // et estimation sont collées en bas, toujours visibles ; le reste défile au-dessus. La
             // colonne est découpée à la main : la hauteur du bas, mesurée à l'affichage précédent,
             // est retirée à la zone qui défile.
-            let full = ui.available_rect_before_wrap();
-            let value_h_id = ui.id().with("value_h");
             let diagnosed = self.diagnosed.clone();
-            let value_h: f32 = if diagnosed.is_some() { ui.data(|d| d.get_temp(value_h_id)).unwrap_or(160.0) } else { 0.0 };
+            let detail = diagnosed.as_ref().is_some_and(|d| self.estimate_open.as_deref() == Some(d.raw.as_str()));
+            let value_h_id = ui.id().with("value_h");
+            let value_h: f32 = if diagnosed.is_some() && !detail { ui.data(|d| d.get_temp(value_h_id)).unwrap_or(160.0) } else { 0.0 };
             let split = full.max.y - value_h;
             let top = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x, split));
             let scroll = ui
                 .allocate_new_ui(egui::UiBuilder::new().max_rect(top), |ui| {
-                    // Titre de l'historique ou du diagnostic : il reste en place, le contenu défile dessous.
+                    // Titre du niveau affiché : il reste en place, le contenu défile dessous.
+                    // Fil d'Ariane : HISTORIQUE › DIAGNOSTIC › ESTIMATION ; les niveaux au-dessus
+                    // sont soulignés et y ramènent. « Retour » remonte d'un niveau.
                     let mut back = false;
+                    let mut goto: Option<usize> = None;
+                    let depth = if diagnosed.is_none() { 0 } else if detail { 2 } else { 1 };
                     egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }).show(ui, |ui| {
-                        if self.diagnosed.is_none() {
-                            ui::section_header(ui, "HISTORIQUE", Some(self.history.len()), |_| {});
-                        } else {
-                            ui::section_header(ui, "DIAGNOSTIC", None, |ui| {
-                                back = ui::text_button(ui, "← retour").on_hover_text("Revenir à l'historique").clicked();
-                            });
-                        }
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let crumbs = ["HISTORIQUE", "DIAGNOSTIC", "ESTIMATION"];
+                            for (i, name) in crumbs.iter().enumerate().take(depth + 1) {
+                                if i > 0 {
+                                    ui.label(RichText::new("›").color(ui::GOLD_DIM).size(14.0));
+                                }
+                                if i == depth {
+                                    ui.label(RichText::new(*name).color(ui::GOLD).size(13.0).strong());
+                                    if i == 0 {
+                                        ui.label(RichText::new(self.history.len().to_string()).color(ui::GOLD_DIM).size(12.0));
+                                    }
+                                } else {
+                                    let r = ui.add(egui::Label::new(RichText::new(*name).color(ui::GOLD_DIM).size(13.0).strong().underline()).sense(egui::Sense::click()));
+                                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                        goto = Some(i);
+                                    }
+                                }
+                            }
+                            if depth > 0 {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let hint = if depth == 2 { "Revenir au diagnostic" } else { "Revenir à l'historique" };
+                                    back = ui::action_button(ui, "⬅  Retour").on_hover_text(hint).clicked();
+                                });
+                            }
+                        });
+                        ui.add_space(2.0);
+                        let line = ui.available_rect_before_wrap();
+                        ui.painter().hline(line.x_range(), line.top(), egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.6)));
+                        ui.add_space(8.0);
                     });
                     if back {
-                        self.diagnosed = None;
+                        goto = Some(depth.saturating_sub(1));
                     }
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }).show(ui, |ui| {
-                            self.diagnostic(ui, comparison.as_ref())
-                        })
-                        .inner
-                    })
+                    match goto {
+                        Some(0) => {
+                            self.estimate_open = None;
+                            self.diagnosed = None;
+                        }
+                        Some(1) => self.estimate_open = None,
+                        _ => {}
+                    }
+                    let margin = egui::Margin { left: 0, right: 8, top: 0, bottom: 0 };
+                    match (&diagnosed, detail) {
+                        // Détail de l'estimation : deux colonnes, chacune avec sa barre de défilement.
+                        // À gauche le calcul et la recherche, à droite les annonces lues.
+                        // Trop étroit pour deux colonnes : une seule, le calcul au-dessus des annonces.
+                        (Some(it), true) if ui.available_width() < 640.0 => egui::ScrollArea::vertical().id_salt("estimate_left").auto_shrink([false, false]).show(ui, |ui| {
+                            egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                                self.estimation_detail(ui, it, false);
+                                ui.add_space(10.0);
+                                self.listings_title(ui, it);
+                                self.estimation_detail(ui, it, true);
+                            });
+                            None
+                        }),
+                        (Some(it), true) => {
+                            let area = ui.available_rect_before_wrap();
+                            // La colonne de gauche prend juste la largeur de son contenu sans retour à
+                            // la ligne (mesurée à chaque image, en passe invisible) ; celle des annonces
+                            // prend le reste, au moins 330 px.
+                            let natural = {
+                                let mut probe = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(egui::Rect::from_min_size(area.min, Vec2::new(4000.0, area.height())))
+                                        .sizing_pass()
+                                        .invisible(),
+                                );
+                                // Texte jamais coupé : la largeur mesurée est celle de la plus longue ligne.
+                                probe.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                                egui::Frame::new().inner_margin(margin).show(&mut probe, |ui| self.estimation_detail(ui, it, false));
+                                probe.min_rect().width() + 16.0
+                            };
+                            let left_w = natural.min(area.width() - 330.0 - 12.0).max(260.0);
+                            let left = egui::Rect::from_min_max(area.min, egui::pos2(area.min.x + left_w, area.max.y));
+                            let right = egui::Rect::from_min_max(egui::pos2(left.max.x + 12.0, area.min.y), area.max);
+                            let out = ui
+                                .allocate_new_ui(egui::UiBuilder::new().max_rect(left), |ui| {
+                                    egui::ScrollArea::vertical().id_salt("estimate_left").auto_shrink([false, false]).show(ui, |ui| {
+                                        egui::Frame::new().inner_margin(margin).show(ui, |ui| self.estimation_detail(ui, it, false));
+                                        None
+                                    })
+                                })
+                                .inner;
+                            let listings = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right), |ui| {
+                                // Le titre reste en place, les annonces défilent dessous.
+                                egui::Frame::new().inner_margin(margin).show(ui, |ui| self.listings_title(ui, it));
+                                egui::ScrollArea::vertical().id_salt("estimate_right").auto_shrink([false, false]).show(ui, |ui| {
+                                    egui::Frame::new().inner_margin(margin).show(ui, |ui| self.estimation_detail(ui, it, true));
+                                })
+                            });
+                            ui::fade_scroll(ui, &listings.inner, true);
+                            out
+                        }
+                        _ => egui::ScrollArea::vertical().id_salt("diagnostic_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                            egui::Frame::new().inner_margin(margin).show(ui, |ui| self.diagnostic(ui, comparison.as_ref())).inner
+                        }),
+                    }
                 })
                 .inner;
             ui::fade_scroll(ui, &scroll, true);
-            // Verdict du diagnostic : à sa place dans l'en-tête, mais fixe, par-dessus ce qui défile.
-            if let Some((text, color)) = scroll.inner {
-                let anchor = egui::Rect::from_min_max(scroll.inner_rect.min + Vec2::new(0.0, 4.0), egui::pos2(scroll.inner_rect.max.x - 8.0, scroll.inner_rect.min.y + 40.0));
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(anchor).layout(egui::Layout::right_to_left(egui::Align::Min)), |ui| ui::badge(ui, text, color));
+            // Verdict du diagnostic, et dessous le prix comme dans l'historique (loader le temps de
+            // l'estimation) : à leur place dans l'en-tête, mais fixes, par-dessus ce qui défile.
+            if let Some(it) = diagnosed.as_ref().filter(|_| !detail) {
+                let anchor = egui::Rect::from_min_max(scroll.inner_rect.min + Vec2::new(0.0, 4.0), egui::pos2(scroll.inner_rect.max.x - 8.0, scroll.inner_rect.min.y + 90.0));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(anchor).layout(egui::Layout::top_down(egui::Align::Max)), |ui| {
+                    if let Some((text, color)) = scroll.inner {
+                        ui::badge(ui, text, color);
+                        ui.add_space(6.0);
+                    }
+                    match self.trade.get(it) {
+                        // Pas encore estimé : le bouton est dans la carte du bas, pas ici.
+                        _ if self.needs_estimate(it) => {}
+                        Some(trade::Estimate::Pending(msg)) => {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(18.0).color(ui::GOLD)).on_hover_text(msg);
+                                if let Some(left) = trade::wait_left() {
+                                    ui.label(RichText::new(format!("{} s", left.as_secs() + 1)).color(ui::GOLD));
+                                    ui.ctx().request_repaint_after(Duration::from_millis(250));
+                                }
+                            });
+                        }
+                        _ => {
+                            let (text, color) = self.price_label(it);
+                            ui.label(RichText::new(text).color(color).size(17.0).strong());
+                        }
+                    }
+                });
             }
-            if let Some(it) = diagnosed {
+            if let Some(it) = diagnosed.filter(|_| !detail) {
                 let bottom = egui::Rect::from_min_max(egui::pos2(full.min.x, split), full.max);
                 let shown = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bottom), |ui| {
-                    ui.separator();
-                    ui.add_space(4.0);
                     egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 8 }).show(ui, |ui| self.value_panel(ui, &it));
                 });
                 let h = shown.response.rect.height();
@@ -2580,9 +3943,14 @@ fn main() -> eframe::Result {
     if let Some(icon) = desktop::window_icon() {
         viewport = viewport.with_icon(icon);
     }
+    // Développement : taille de départ imposée (`POE2_TRACKER_SIZE=2400x1250`).
+    let size = std::env::var("POE2_TRACKER_SIZE")
+        .ok()
+        .and_then(|v| v.split_once('x').and_then(|(w, h)| Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])))
+        .unwrap_or([1280.0, 1000.0]);
     let options = eframe::NativeOptions {
         viewport: viewport
-            .with_inner_size([1280.0, 1000.0])
+            .with_inner_size(size)
             .with_min_inner_size([1200.0, 1000.0]),
         ..Default::default()
     };

@@ -16,18 +16,39 @@ const GREEN: Color32 = Color32::from_rgb(110, 210, 110);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Equipment,
+    Stats,
     Skills,
     Passives,
     Ascendancy,
     Uniques,
 }
 
+/// Onglets du panneau de droite.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SideTab {
+    Diagnostic,
+    Market,
+}
+
+impl SideTab {
+    pub const ALL: [SideTab; 2] = [SideTab::Diagnostic, SideTab::Market];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SideTab::Diagnostic => "Diagnostic",
+            SideTab::Market => "Marché",
+        }
+    }
+}
+
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Equipment, Tab::Skills, Tab::Passives, Tab::Ascendancy, Tab::Uniques];
+    pub const ALL: [Tab; 6] = [Tab::Equipment,
+        Tab::Stats, Tab::Skills, Tab::Passives, Tab::Ascendancy, Tab::Uniques];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Equipment => "Équipement",
+            Tab::Stats => "Caractéristiques",
             Tab::Skills => "Sorts",
             Tab::Passives => "Talents",
             Tab::Ascendancy => "Ascendances",
@@ -706,4 +727,289 @@ impl TreeView {
         painter.rect_filled(Rect::from_min_size(pos, galley.size()).expand(5.0), 3.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
         painter.galley(pos, galley, Color32::LIGHT_GRAY);
     }
+}
+
+/// Case de largeur fixe, contenu aligné à gauche.
+fn left_cell(ui: &mut egui::Ui, w: f32, h: f32, label: egui::Label) -> egui::Response {
+    ui.allocate_ui_with_layout(
+        egui::vec2(w, h),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(w);
+            ui.set_max_width(w);
+            ui.add(label)
+        },
+    )
+    .inner
+}
+
+/// Onglet Caractéristiques : l'équipement porté face à ce que vise le build, mods additionnés.
+/// Une colonne de noms, puis « Porté » et « Build ». Les valeurs portées sont comparées au build :
+/// vert si elles l'atteignent, rouge sinon, gris sans équivalent dans le build. `penalty` :
+/// pénalité de résistances élémentaires de la progression et ce qui l'explique.
+pub fn stats(
+    ui: &mut egui::Ui,
+    worn: &crate::stats::Sheet,
+    build: Option<&crate::stats::Sheet>,
+    build_title: &str,
+    penalty: &(f64, String),
+) {
+    use crate::stats::{Group, Line, RES_CAP, Total};
+    let fmt = |v: f64| {
+        if (v - v.round()).abs() < 0.05 {
+            format!("{}", v.round())
+        } else {
+            format!("{v:.1}")
+        }
+    };
+    let name_color = Color32::from_gray(200);
+    let neutral = Color32::from_gray(225);
+    let dim = Color32::from_gray(100);
+    let (green, red) = (
+        Color32::from_rgb(110, 200, 110),
+        Color32::from_rgb(220, 95, 85),
+    );
+    // Porté face au build : vert s'il l'atteint, rouge sinon, gris si le build n'en vise pas.
+    let versus = |mine: f64, target: Option<f64>| match target {
+        Some(t) if t != 0.0 => {
+            if mine >= t {
+                green
+            } else {
+                red
+            }
+        }
+        _ => {
+            if mine == 0.0 {
+                dim
+            } else {
+                neutral
+            }
+        }
+    };
+    let breakdown = |ui: &mut egui::Ui, t: &Total, suffix: &str| {
+        for (slot, v) in &t.from {
+            ui.label(format!("{slot} : {}{suffix}", fmt(*v)));
+        }
+    };
+    // Largeurs : la moitié pour les noms, un quart pour chaque colonne de valeurs.
+    let width = ui.available_width() - 16.0;
+    let name_w = (width * 0.5).max(160.0);
+    let col_w = ((width - name_w) / 2.0 - 8.0).max(90.0);
+    let row = |ui: &mut egui::Ui, name: &str, cells: &mut dyn FnMut(&mut egui::Ui)| {
+        ui.horizontal(|ui| {
+            left_cell(
+                ui,
+                name_w,
+                22.0,
+                egui::Label::new(RichText::new(name).color(name_color).size(15.0)).truncate(),
+            );
+            cells(ui);
+        });
+    };
+    let cell = |ui: &mut egui::Ui, text: String, color: Color32| {
+        left_cell(
+            ui,
+            col_w,
+            22.0,
+            egui::Label::new(RichText::new(text).color(color).size(15.0).strong()),
+        )
+    };
+    let total_row =
+        |ui: &mut egui::Ui, name: &str, pick: &dyn Fn(&crate::stats::Sheet) -> &Total| {
+            row(ui, name, &mut |ui| {
+                let w = pick(worn);
+                let t = build.map(pick);
+                cell(ui, fmt(w.value), versus(w.value, t.map(|t| t.value)))
+                    .on_hover_ui(|ui| breakdown(ui, w, ""));
+                match t {
+                    Some(t) => cell(ui, fmt(t.value), if t.value == 0.0 { dim } else { neutral })
+                        .on_hover_ui(|ui| breakdown(ui, t, "")),
+                    None => cell(ui, "—".into(), dim),
+                };
+            });
+        };
+    // Résistance effective, suivie en gris de la valeur de l'équipement quand elle diffère.
+    let res_cell = |ui: &mut egui::Ui, eff: f64, raw: f64, color: Color32| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(col_w, 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(col_w);
+                ui.set_max_width(col_w);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    RichText::new(format!("{} %", fmt(eff)))
+                        .color(color)
+                        .size(15.0)
+                        .strong(),
+                );
+                if (raw - eff).abs() >= 0.05 {
+                    ui.label(
+                        RichText::new(format!("({} %)", fmt(raw)))
+                            .color(Color32::from_gray(120))
+                            .size(14.0),
+                    );
+                }
+            },
+        )
+        .response
+    };
+    // Résistance effective : équipement + pénalité (élémentaires), plafonnée.
+    let res_row = |ui: &mut egui::Ui, name: &str, idx: usize| {
+        let pen = if idx < 3 { penalty.0 } else { 0.0 };
+        let eff = |t: &Total| (t.value + pen).min(RES_CAP);
+        let hover = |ui: &mut egui::Ui, t: &Total| {
+            breakdown(ui, t, " %");
+            ui.separator();
+            ui.label(format!("Équipement : {} %", fmt(t.value)));
+            if idx < 3 {
+                ui.label(format!("Pénalité ({}) : {} %", penalty.1, fmt(pen)));
+            }
+            ui.label(format!("Plafond : {} %", fmt(RES_CAP)));
+            let over = t.value + pen - RES_CAP;
+            if over > 0.0 {
+                ui.label(format!("{} % au-dessus du plafond", fmt(over)));
+            }
+        };
+        row(ui, name, &mut |ui| {
+            let w = &worn.resistances[idx];
+            let t = build.map(|b| &b.resistances[idx]);
+            // Comparé sur l'équipement brut : deux résistances au plafond peuvent différer.
+            let color = match t {
+                Some(t) if t.value != 0.0 => {
+                    if w.value >= t.value {
+                        green
+                    } else {
+                        red
+                    }
+                }
+                _ => neutral,
+            };
+            res_cell(ui, eff(w), w.value, color).on_hover_ui(|ui| hover(ui, w));
+            match t {
+                Some(t) => res_cell(ui, eff(t), t.value, neutral).on_hover_ui(|ui| hover(ui, t)),
+                None => cell(ui, "—".into(), dim),
+            };
+        });
+    };
+    // Titres de section sans trait : la ligne des colonnes, fixe, porte déjà le seul trait.
+    let section = |ui: &mut egui::Ui, title: &str| {
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(title)
+                .color(crate::ui::GOLD)
+                .size(13.0)
+                .strong(),
+        );
+        ui.add_space(2.0);
+    };
+
+    if worn.pieces == 0 {
+        ui.label(RichText::new("Aucune pièce suivie : Ctrl+Alt+C sur chaque pièce portée en jeu pour remplir la colonne « Porté ».").color(Color32::GRAY));
+        ui.add_space(4.0);
+    }
+    // Titres des colonnes : fixes, le tableau défile dessous.
+    ui.horizontal(|ui| {
+        left_cell(ui, name_w, 20.0, egui::Label::new(""));
+        left_cell(
+            ui,
+            col_w,
+            20.0,
+            egui::Label::new(RichText::new("Porté").color(crate::ui::GOLD).strong()),
+        );
+        left_cell(
+            ui,
+            col_w,
+            20.0,
+            egui::Label::new(RichText::new(build_title).color(crate::ui::GOLD).strong()).truncate(),
+        );
+    });
+    ui.add_space(4.0);
+    let line = ui.available_rect_before_wrap();
+    ui.painter().hline(
+        line.x_range(),
+        line.top(),
+        egui::Stroke::new(1.0_f32, crate::ui::GOLD_DIM.gamma_multiply(0.6)),
+    );
+    ui.add_space(2.0);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            section(ui, "ATTRIBUTS");
+            total_row(ui, "Force", &|s| &s.attributes[0]);
+            total_row(ui, "Dextérité", &|s| &s.attributes[1]);
+            total_row(ui, "Intelligence", &|s| &s.attributes[2]);
+            section(ui, "VIE ET DÉFENSES");
+            total_row(ui, "Vie", &|s| &s.life);
+            total_row(ui, "Mana", &|s| &s.mana);
+            total_row(ui, "Esprit", &|s| &s.spirit);
+            total_row(ui, "Armure", &|s| &s.defences[0]);
+            total_row(ui, "Évasion", &|s| &s.defences[1]);
+            total_row(ui, "Bouclier d'énergie", &|s| &s.defences[2]);
+            section(ui, "RÉSISTANCES");
+            res_row(ui, "Feu", 0);
+            res_row(ui, "Froid", 1);
+            res_row(ui, "Foudre", 2);
+            res_row(ui, "Chaos", 3);
+
+            // Autres mods : le texte du mod en nom, ses nombres dans chaque colonne.
+            let empty: Vec<Line> = Vec::new();
+            for group in [
+                Group::Damage,
+                Group::Gems,
+                Group::Resources,
+                Group::Defence,
+                Group::Other,
+            ] {
+                let mine = worn.lines.get(&group).unwrap_or(&empty);
+                let theirs = build.and_then(|b| b.lines.get(&group)).unwrap_or(&empty);
+                let mut templates: Vec<&str> = mine
+                    .iter()
+                    .chain(theirs.iter())
+                    .map(|l| l.template.as_str())
+                    .collect();
+                templates.sort();
+                templates.dedup();
+                if templates.is_empty() {
+                    continue;
+                }
+                section(ui, &group.label().to_uppercase());
+                for t in templates {
+                    let a = mine.iter().find(|l| l.template == t);
+                    let b = theirs.iter().find(|l| l.template == t);
+                    row(ui, t, &mut |ui| {
+                        let color = versus(a.map(|l| l.sum()).unwrap_or(0.0), b.map(|l| l.sum()));
+                        let r = cell(
+                            ui,
+                            a.map(|l| l.value_text()).unwrap_or_else(|| "—".into()),
+                            if a.is_none() && b.is_some() {
+                                red
+                            } else {
+                                color
+                            },
+                        );
+                        if let Some(l) = a {
+                            r.on_hover_text(l.from.join(", "));
+                        }
+                        let r = cell(
+                            ui,
+                            b.map(|l| l.value_text()).unwrap_or_else(|| "—".into()),
+                            if b.is_some() { neutral } else { dim },
+                        );
+                        if let Some(l) = b {
+                            r.on_hover_text(l.from.join(", "));
+                        }
+                    });
+                }
+            }
+            if !worn.weapon_local.is_empty() {
+                section(ui, "PROPRE À L'ARME PORTÉE");
+                for (slot, lines) in &worn.weapon_local {
+                    ui.label(RichText::new(slot).color(crate::ui::GOLD_DIM));
+                    for l in lines {
+                        ui.label(RichText::new(l).color(Color32::GRAY).size(14.0));
+                    }
+                }
+            }
+        });
 }

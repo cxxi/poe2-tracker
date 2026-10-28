@@ -3,8 +3,9 @@
 //! Chaque binaire publié a son empreinte SHA-256, vérifiée avant installation.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use serde::Deserialize;
@@ -33,7 +34,11 @@ pub enum State {
 }
 
 #[derive(Clone)]
-pub struct Updater(Arc<Mutex<State>>);
+pub struct Updater {
+    state: Arc<Mutex<State>>,
+    /// Recherche automatique activée (réglage).
+    enabled: Arc<AtomicBool>,
+}
 
 /// "0.10.2" > "0.9.7" : comparaison numérique, partie par partie.
 pub fn newer(candidate: &str, current: &str) -> bool {
@@ -99,41 +104,60 @@ fn install(url: &str, sha_url: &str) -> Result<(), String> {
 }
 
 impl Updater {
-    pub fn start(ctx: &egui::Context) -> Updater {
-        let updater = Updater(Arc::new(Mutex::new(State::UpToDate)));
+    pub fn start(ctx: &egui::Context, enabled: bool) -> Updater {
+        let updater = Updater {
+            state: Arc::new(Mutex::new(State::UpToDate)),
+            enabled: Arc::new(AtomicBool::new(enabled)),
+        };
         if std::env::var_os("POE2_TRACKER_NO_UPDATE").is_some() {
             return updater;
         }
         let (shared, ctx) = (updater.clone(), ctx.clone());
-        std::thread::spawn(move || loop {
-            // Une vérification ne remplace pas un téléchargement en cours ou déjà fait ; une
-            // version proposée peut l'être par une plus récente.
-            if matches!(shared.state(), State::UpToDate | State::Failed(_) | State::Available { .. }) {
-                if let Ok(s) = check() {
-                    *shared.0.lock().unwrap() = s;
+        std::thread::spawn(move || {
+            let mut last: Option<Instant> = None;
+            loop {
+                // Une vérification ne remplace pas un téléchargement en cours ou déjà fait ; une
+                // version proposée peut l'être par une plus récente.
+                let due = last.is_none_or(|t| t.elapsed() >= EVERY);
+                if shared.enabled.load(Ordering::Relaxed)
+                    && due
+                    && matches!(shared.state(), State::UpToDate | State::Failed(_) | State::Available { .. }) {
+                    last = Some(Instant::now());
+                    if let Ok(s) = check() {
+                    *shared.state.lock().unwrap() = s;
                     ctx.request_repaint();
                 }
             }
-            std::thread::sleep(EVERY);
+            std::thread::sleep(Duration::from_secs(5));
+            }
         });
         updater
     }
 
+    /// Active ou coupe la recherche automatique ; coupée, une version proposée n'est plus montrée.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+        if !on && matches!(*state, State::Available { .. } | State::Failed(_)) {
+            *state = State::UpToDate;
+        }
+    }
+
     pub fn state(&self) -> State {
-        self.0.lock().unwrap().clone()
+        self.state.lock().unwrap().clone()
     }
 
     /// Lance la mise à jour proposée (bouton).
     pub fn install(&self, ctx: &egui::Context) {
         let State::Available { version, url, sha_url } = self.state() else { return };
-        *self.0.lock().unwrap() = State::Downloading { version: version.clone() };
+        *self.state.lock().unwrap() = State::Downloading { version: version.clone() };
         let (shared, ctx) = (self.clone(), ctx.clone());
         std::thread::spawn(move || {
             let next = match install(&url, &sha_url) {
                 Ok(()) => State::Ready { version },
                 Err(e) => State::Failed(e),
             };
-            *shared.0.lock().unwrap() = next;
+            *shared.state.lock().unwrap() = next;
             ctx.request_repaint();
         });
     }

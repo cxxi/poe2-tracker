@@ -387,7 +387,7 @@ impl Assets {
         self.texture_url(url)
     }
 
-    fn texture_url(&mut self, url: String) -> Option<TextureHandle> {
+    pub fn texture_url(&mut self, url: String) -> Option<TextureHandle> {
         if let Some(t) = self.textures.get(&url) {
             return Some(t.clone());
         }
