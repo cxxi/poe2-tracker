@@ -30,6 +30,12 @@ pub fn log_path(game_dir: &Path) -> PathBuf {
     game_dir.join("logs").join("Client.txt")
 }
 
+/// Dossier des données d'un personnage (équipement, historique, maps).
+pub fn character_dir(data_dir: &Path, name: &str) -> PathBuf {
+    let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+    data_dir.join("characters").join(safe)
+}
+
 /// Dossiers Steam possibles (racines), avant lecture de leurs bibliothèques.
 fn steam_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();

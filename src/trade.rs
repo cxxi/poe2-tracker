@@ -384,8 +384,8 @@ fn age_weight(age_hours: Option<f64>) -> f64 {
     age_hours.map(|h| 0.5f64.powf(h.max(0.0) / AGE_HALF_LIFE_H).max(AGE_FLOOR)).unwrap_or(1.0)
 }
 
-/// Date du site (« 2026-10-23T22:41:00Z ») en secondes Unix.
-fn unix_time(date: &str) -> Option<i64> {
+/// Date du site (« 2026-10-23T22:41:00Z ») ou du log (« 2026/10/23 22:41:00 ») en secondes Unix.
+pub fn unix_time(date: &str) -> Option<i64> {
     let n = |r: std::ops::Range<usize>| date.get(r)?.parse::<i64>().ok();
     let (y, m, d, hh, mm, ss) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
     // Jours depuis le 1er janvier 1970 (calendrier grégorien).

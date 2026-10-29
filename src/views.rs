@@ -21,6 +21,7 @@ pub enum Tab {
     Passives,
     Ascendancy,
     Uniques,
+    Atlas,
 }
 
 /// Onglets du panneau de droite.
@@ -28,22 +29,26 @@ pub enum Tab {
 pub enum SideTab {
     Diagnostic,
     Market,
+    Maps,
+    Bosses,
 }
 
 impl SideTab {
-    pub const ALL: [SideTab; 2] = [SideTab::Diagnostic, SideTab::Market];
+    pub const ALL: [SideTab; 4] = [SideTab::Diagnostic, SideTab::Market, SideTab::Maps, SideTab::Bosses];
 
     pub fn label(self) -> &'static str {
         match self {
             SideTab::Diagnostic => "Diagnostic",
             SideTab::Market => "Marché",
+            SideTab::Maps => "Maps",
+            SideTab::Bosses => "Boss",
         }
     }
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [Tab::Equipment,
-        Tab::Stats, Tab::Skills, Tab::Passives, Tab::Ascendancy, Tab::Uniques];
+    pub const ALL: [Tab; 7] = [Tab::Equipment,
+        Tab::Stats, Tab::Skills, Tab::Passives, Tab::Ascendancy, Tab::Atlas, Tab::Uniques];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -53,6 +58,7 @@ impl Tab {
             Tab::Passives => "Talents",
             Tab::Ascendancy => "Ascendances",
             Tab::Uniques => "Uniques",
+            Tab::Atlas => "Atlas",
         }
     }
 }
@@ -405,7 +411,13 @@ fn arc(a: Pos2, b: Pos2, center: Pos2, segments: usize) -> Vec<Pos2> {
 
 /// Tracé d'une liaison (coordonnées de l'arbre) : arc de rayon donné, arc du groupe, ou droite.
 fn link_path(a: &Node, b: &Node, radius: f32) -> Vec<Pos2> {
-    let (pa, pb) = (a.pos, b.pos);
+    link_points((a.pos, a.group, a.orbit), (b.pos, b.group, b.orbit), radius)
+}
+
+/// Tracé d'une liaison entre deux nœuds (position, centre du groupe, orbite) : arc de rayon
+/// donné (signé), arc de l'orbite commune, ou droite. Partagé avec l'arbre de l'Atlas.
+pub fn link_points(a: (Pos2, Pos2, u8), b: (Pos2, Pos2, u8), radius: f32) -> Vec<Pos2> {
+    let (pa, pb) = (a.0, b.0);
     if radius != 0.0 {
         let half = (pb - pa).length() / 2.0;
         let r = radius.abs();
@@ -417,8 +429,8 @@ fn link_path(a: &Node, b: &Node, radius: f32) -> Vec<Pos2> {
             return arc(pa, pb, center, 16);
         }
     }
-    if a.group == b.group && a.orbit == b.orbit && a.orbit > 0 {
-        return arc(pa, pb, a.group, 16);
+    if a.1 == b.1 && a.2 == b.2 && a.2 > 0 {
+        return arc(pa, pb, a.1, 16);
     }
     vec![pa, pb]
 }

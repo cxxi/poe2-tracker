@@ -7,12 +7,14 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod art;
+mod atlas;
 mod augments;
 mod builds;
 mod bundles;
 mod capture;
 mod changelog;
 mod coach;
+mod dat;
 mod compare;
 mod desktop;
 mod gear;
@@ -21,12 +23,14 @@ mod guide;
 mod item;
 mod leagues;
 mod logwatch;
+mod mapping;
 mod passive_icons;
 mod paths;
 mod prices;
 mod route;
 mod rules;
 mod stats;
+mod statdesc;
 mod trade;
 mod ui;
 mod ui_art;
@@ -36,9 +40,9 @@ mod vendor_regex;
 mod views;
 mod weights;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
@@ -73,6 +77,8 @@ struct Config {
     auto_estimate: bool,
     /// Ctrl+C ouvre le détail du diagnostic (sinon l'objet s'ajoute à l'historique).
     open_on_copy: bool,
+    /// Onglet Boss (expérimental) : les boss d'endgame affrontés.
+    boss_tab: bool,
 }
 
 impl Default for Config {
@@ -82,6 +88,7 @@ impl Default for Config {
             trade_prices: true,
             auto_estimate: true,
             open_on_copy: true,
+            boss_tab: false,
         }
     }
 }
@@ -190,6 +197,11 @@ struct App {
     builds: builds::BuildStore,
     add_build: AddBuild,
     data_dir: PathBuf,
+    cache_dir: PathBuf,
+    /// Arbre de l'Atlas lu dans les fichiers du jeu (au premier affichage de l'onglet).
+    atlas_tree: Arc<Mutex<Option<Result<atlas::AtlasTree, String>>>>,
+    atlas_loading: bool,
+    atlas_view: atlas::AtlasView,
     /// Personnage dont l'équipement, l'historique et le build sont affichés.
     character: Option<String>,
     /// Hauteur réelle de la barre personnage / build (mesurée à l'affichage).
@@ -197,6 +209,13 @@ struct App {
     tab: views::Tab,
     /// Onglet du panneau de droite.
     side_tab: views::SideTab,
+    /// Bloc en bas à gauche : maps (vrai) ou route de leveling. `None` : les maps dès que le
+    /// personnage en a fait une.
+    bottom_maps: Option<bool>,
+    /// Maps affichées dans l'onglet Maps : toutes, solo (`Some(false)`) ou en groupe.
+    maps_filter: Option<bool>,
+    /// Tier affiché dans l'onglet Maps : niveau de zone, 0 pour les arènes de boss, tous sinon.
+    maps_tier: Option<u32>,
     /// Détail de l'estimation ouvert, pour l'objet de ce texte (troisième niveau : historique,
     /// diagnostic, estimation). Sans effet quand un autre objet est diagnostiqué.
     estimate_open: Option<String>,
@@ -232,6 +251,7 @@ struct SettingsDraft {
     open_on_copy: bool,
     auto_update: bool,
     market_min_ex: f64,
+    boss_tab: bool,
     /// Choix du dossier du jeu en cours (fenêtre du système).
     picking: Option<Receiver<Option<PathBuf>>>,
 }
@@ -245,6 +265,7 @@ impl SettingsDraft {
             open_on_copy: stored.open_on_copy,
             auto_update: stored.auto_update,
             market_min_ex: stored.market_min_ex,
+            boss_tab: stored.boss_tab,
             picking: None,
         }
     }
@@ -260,9 +281,132 @@ struct Welcome {
 }
 
 /// Dossier des données propres à un personnage (équipement suivi, historique).
-fn character_dir(data_dir: &std::path::Path, name: &str) -> PathBuf {
-    let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
-    data_dir.join("characters").join(safe)
+/// Nom d'une map : celui affiché par le jeu, sinon son code sans « Map ».
+fn run_name(r: &mapping::Run) -> String {
+    r.zone.clone().unwrap_or_else(|| r.code.trim_start_matches("Map").to_string())
+}
+
+/// Tier du waystone d'après le niveau de zone (65 = T1… 80 = T16), « boss » pour une arène.
+fn run_tier(r: &mapping::Run) -> String {
+    match r.kind {
+        mapping::RunKind::Boss => "boss".into(),
+        mapping::RunKind::Map if r.level > 80 => format!("T16+ · niv {}", r.level),
+        mapping::RunKind::Map if r.level >= 65 => format!("T{}", r.level - 64),
+        mapping::RunKind::Map => format!("niv {}", r.level),
+    }
+}
+
+/// Tier d'une map : l'image du waystone du jeu (T1 à T16) ou le crâne des boss, le texte au
+/// survol. Le texte à défaut d'image (niveau hors tiers, image pas encore extraite).
+fn tier_badge(ui: &mut egui::Ui, icons: &mut passive_icons::PassiveIcons, r: &mapping::Run, size: f32, color: Color32) {
+    tier_image(ui, icons, r, size, color).on_hover_text(run_tier(r));
+}
+
+/// L'image du tier seule, sans infobulle (la ligne d'historique a la sienne).
+fn tier_image(ui: &mut egui::Ui, icons: &mut passive_icons::PassiveIcons, r: &mapping::Run, size: f32, color: Color32) -> egui::Response {
+    let tier = r.level.checked_sub(64).filter(|t| (1..=16).contains(t) && r.kind == mapping::RunKind::Map);
+    let icon = match (r.kind, tier) {
+        // Arène de boss : le crâne des boss de l'Atlas.
+        (mapping::RunKind::Boss, _) => Some("art/textures/interface/2d/2dart/uiimages/ingame/atlasscreen/atlasiconcontent/atlasiconcontentmapbossspecial.dds".to_string()),
+        (_, Some(t)) => Some(format!("art/2ditems/maps/endgamemaps/endgamemap{t}.dds")),
+        _ => None,
+    };
+    let texture = icon.and_then(|i| icons.get(&i));
+    match texture {
+        Some(tex) => {
+            let resp = ui.add(egui::Image::new((tex.id(), Vec2::splat(size))));
+            // Le crâne rond des boss, cerclé de blanc pour se détacher des waystones.
+            if r.kind == mapping::RunKind::Boss {
+                ui.painter().circle_stroke(resp.rect.center(), size / 2.0 - 0.5, egui::Stroke::new(1.5_f32, Color32::from_gray(235)));
+            }
+            resp
+        }
+        None => ui.label(RichText::new(run_tier(r)).color(color).size(13.5)),
+    }
+}
+
+const TOMB_ICON: &str = "art/textures/interface/2d/2dart/uiimages/ingame/partymenu/4k/partyrevivesicon.dds";
+const PORTAL_ICON: &str = "art/textures/interface/2d/2dart/uiimages/ingame/4k/worldpaneltownportalicon.dds";
+
+/// Image du jeu suivie d'un nombre (morts, retours en ville).
+/// Le nombre prend `color` quand il n'est pas nul (rouge pour les morts, bleu pour les retours).
+fn icon_count(ui: &mut egui::Ui, icons: &mut passive_icons::PassiveIcons, icon: &str, n: u32, text: &str, color: Color32) {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        match icons.get(icon) {
+            Some(tex) => ui.add(egui::Image::new((tex.id(), Vec2::splat(22.0)))),
+            None => ui.label(RichText::new(text).color(Color32::GRAY).size(13.5)),
+        };
+        ui.label(RichText::new(n.to_string()).color(if n > 0 { color } else { Color32::GRAY }).size(15.0));
+    });
+}
+
+/// Ce que mesure le temps d'une map, au survol du chrono et des durées. Sans serveur pour
+/// synchroniser les apps d'un groupe, chacun ne voit que sa propre présence.
+fn time_note(r: &mapping::Run) -> &'static str {
+    if r.group {
+        "En groupe : c'est ton propre temps passé dans la map (hors repaire et AFK), pas la durée de la map pour tout le groupe."
+    } else {
+        "Temps passé dans la map, hors repaire et AFK."
+    }
+}
+
+/// « solo » ou « en groupe », à la suite du nom de la map.
+fn group_label(r: &mapping::Run) -> RichText {
+    RichText::new(if r.group { "en groupe" } else { "solo" }).color(Color32::GRAY).size(13.5)
+}
+
+/// En-tête et mods d'un waystone, en petit.
+fn waystone_lines(ui: &mut egui::Ui, w: &mapping::Waystone) {
+    if !w.stats.is_empty() {
+        ui.label(RichText::new(w.stats.join(" · ")).color(Color32::LIGHT_GRAY).size(13.5));
+    }
+    for m in &w.mods {
+        ui.label(RichText::new(m).color(Color32::from_rgb(140, 150, 230)).size(13.5));
+    }
+}
+
+/// Mécanique d'une arène de boss d'après son code (noms du Marché).
+fn boss_mechanic(code: &str) -> &'static str {
+    [("Ritual", "Rituel"), ("Delirium", "Délire"), ("Abyss", "Abîme"), ("Expedition", "Expédition"), ("Chayula", "Brèche"), ("Breach", "Brèche")]
+        .iter()
+        .find(|(k, _)| code.contains(k))
+        .map_or("boss de l'Atlas", |(_, v)| *v)
+}
+
+fn plural(n: u32, word: &str) -> String {
+    format!("{n} {word}{}", if n > 1 { "s" } else { "" })
+}
+
+/// Date et heure d'une map (heure du log) : « 29 oct. 02:37 ».
+fn date_text(t: i64) -> String {
+    const MONTHS: [&str; 12] = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+    // Jour civil depuis le nombre de jours depuis 1970 (calendrier grégorien).
+    let z = t.div_euclid(86_400) + 719_468;
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let secs = t.rem_euclid(86_400);
+    format!("{day} {} {:02}:{:02}", MONTHS[month as usize - 1], secs / 3600, secs / 60 % 60)
+}
+
+/// Chronomètre : « 4:07 », « 1:02:45 ».
+fn clock_text(secs: i64) -> String {
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// Durée arrondie : « 45 s », « 12 min », « 1 h 05 ».
+fn duration_text(secs: i64) -> String {
+    match secs {
+        s if s < 60 => format!("{s} s"),
+        // Les secondes comptent sur les maps rapides.
+        s if s < 3600 => format!("{} min {:02} s", s / 60, s % 60),
+        s => format!("{} h {:02}", s / 3600, (s + 30) / 60 % 60),
+    }
 }
 
 /// Gestionnaire de builds : liste, suppression, ajout.
@@ -333,13 +477,18 @@ fn start_coach(ctx: egui::Context, config: &Config, files: Vec<PathBuf>, cache: 
         let mut c = coach::Coach::new(steps, catalog, state);
         // Premier lancement : tout le log, pour retrouver les personnages, leur dernière zone
         // et les récompenses de la route déjà obtenues.
-        let whole = !c.full_scan_done() || !c.route_scan_done();
+        let whole = !c.full_scan_done() || !c.route_scan_done() || !c.maps_scan_done();
+        if whole {
+            c.begin_replay();
+        }
         let events = if whole { logwatch::read_all(&log_path) } else { logwatch::read_recent(&log_path, 8 * 1024 * 1024) };
         for ev in events {
             c.handle(&ev);
         }
         c.mark_full_scan();
         c.mark_route_scan();
+        c.mark_maps_scan();
+        c.clock = logwatch::log_clock_offset(&log_path);
         c.live = true;
         c.save();
         let _ = coach_tx.send(c);
@@ -402,6 +551,10 @@ impl App {
             // Développement : `POE2_TRACKER_BUILDS` ouvre le gestionnaire de builds au démarrage.
             add_build: AddBuild { open: std::env::var_os("POE2_TRACKER_BUILDS").is_some(), ..Default::default() },
             data_dir: dirs.data_dir().to_path_buf(),
+            cache_dir: dirs.cache_dir().to_path_buf(),
+            atlas_tree: Arc::new(Mutex::new(None)),
+            atlas_loading: false,
+            atlas_view: atlas::AtlasView::default(),
             character: None,
             bar_h: 34.0,
             // Développement : onglet de droite (POE2_TRACKER_SIDE=market).
@@ -409,10 +562,15 @@ impl App {
             market_search: String::new(),
             market_league: None,
             estimate_open: None,
-            side_tab: if std::env::var("POE2_TRACKER_SIDE").as_deref() == Ok("market") {
-                views::SideTab::Market
-            } else {
-                views::SideTab::Diagnostic
+            // Développement : bloc du bas sur la route (POE2_TRACKER_BOTTOM=route).
+            bottom_maps: (std::env::var("POE2_TRACKER_BOTTOM").as_deref() == Ok("route")).then_some(false),
+            maps_filter: None,
+            maps_tier: None,
+            side_tab: match std::env::var("POE2_TRACKER_SIDE").as_deref() {
+                Ok("market") => views::SideTab::Market,
+                Ok("maps") => views::SideTab::Maps,
+                Ok("bosses") => views::SideTab::Bosses,
+                _ => views::SideTab::Diagnostic,
             },
             tab: match std::env::var("POE2_TRACKER_TAB").as_deref() {
                 Ok("carac") => views::Tab::Stats,
@@ -420,6 +578,7 @@ impl App {
                 Ok("talents") => views::Tab::Passives,
                 Ok("ascendances") => views::Tab::Ascendancy,
                 Ok("uniques") => views::Tab::Uniques,
+                Ok("atlas") => views::Tab::Atlas,
                 _ => views::Tab::Equipment,
             },
             view_step: None,
@@ -899,7 +1058,7 @@ impl App {
             egui::ComboBox::from_id_salt("league_select")
                 .truncate()
                 .width(width(2))
-                .selected_text(RichText::new(&self.league).color(ui::GOLD_DIM))
+                .selected_text(RichText::new(&self.league).color(ui::GOLD))
                 .show_ui(ui, |ui| {
                     for l in list {
                         if ui.selectable_label(l == self.league, &l).clicked() {
@@ -916,7 +1075,7 @@ impl App {
         if let Some(shown_label) = &shown_step {
             in_zone(ui, 3, &mut |ui| {
             let preview = self.step_preview.is_some();
-            let mut text = RichText::new(if preview { format!("{shown_label} (aperçu)") } else { shown_label.clone() }).color(ui::GOLD_DIM);
+            let mut text = RichText::new(if preview { format!("{shown_label} (aperçu)") } else { shown_label.clone() }).color(ui::GOLD);
             if preview {
                 text = text.italics();
             }
@@ -1209,6 +1368,15 @@ impl App {
                     );
                     ui.checkbox(&mut draft.auto_update, "activée");
                     ui.end_row();
+
+                    section(ui, "Expérimental");
+                    label(
+                        ui,
+                        "Onglet Boss",
+                        "boss d'endgame affrontés : passages, morts, temps (expérimental)",
+                    );
+                    ui.checkbox(&mut draft.boss_tab, "afficher l'onglet");
+                    ui.end_row();
                 });
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -1228,6 +1396,7 @@ impl App {
             self.stored.auto_update = draft.auto_update;
             self.stored.market_min_ex = draft.market_min_ex;
             self.market_min_ex = draft.market_min_ex;
+            self.stored.boss_tab = draft.boss_tab;
             self.config.trade_prices = draft.trade_prices;
             self.config.auto_update = draft.auto_update;
             self.config.market_min_ex = draft.market_min_ex;
@@ -1573,7 +1742,7 @@ impl App {
             return;
         }
         if let Some(n) = &name {
-            let dir = character_dir(&self.data_dir, n);
+            let dir = paths::character_dir(&self.data_dir, n);
             // Reprise unique des données d'avant le suivi par personnage.
             if !dir.exists() {
                 let _ = std::fs::create_dir_all(&dir);
@@ -1608,6 +1777,18 @@ impl App {
     }
 
     fn on_copy(&mut self, ev: CopyEvent) {
+        // Waystone : noté pour la prochaine map (onglet Maps), pas diagnostiqué.
+        if let Some(w) = mapping::Waystone::parse(&ev.text) {
+            let title = format!("Waystone T{} « {} »", w.tier, w.name);
+            match self.coach.as_mut().map(|c| c.set_waystone(w)) {
+                Some(true) => {
+                    self.side_tab = views::SideTab::Maps;
+                    self.say(format!("{title} : associé à la prochaine map ouverte"));
+                }
+                _ => self.say(format!("{title} : personnage pas encore détecté, impossible de l'associer à une map")),
+            }
+            return;
+        }
         let Some(it) = item::parse(&ev.text) else { return };
         match ev.kind {
             CopyKind::Diagnose => {
@@ -1875,7 +2056,7 @@ impl App {
         for card in [left, right] {
             ui.painter().rect(card, 6.0, ui::CARD_FILL, egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.55)), egui::StrokeKind::Inside);
         }
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left.shrink2(Vec2::new(12.0, 6.0))), |ui| self.route_panel(ui));
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left.shrink2(Vec2::new(12.0, 6.0))), |ui| self.left_panel(ui));
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right.shrink2(Vec2::new(12.0, 6.0))), |ui| {
             let summary = self.coach.as_ref().map(|c| c.summary()).unwrap_or_else(|| "chargement du guide…".into());
             ui::section_header_sub(ui, "ACTIVITÉ", &summary);
@@ -1883,9 +2064,130 @@ impl App {
         });
     }
 
+    /// Bloc en bas à gauche : la route de leveling, puis les maps une fois l'endgame commencé.
+    fn left_panel(&mut self, ui: &mut egui::Ui) {
+        let has_maps = self.coach.as_mut().and_then(|c| c.maps()).is_some_and(|b| !b.runs.is_empty());
+        if has_maps && self.bottom_maps.unwrap_or(true) {
+            self.mapping_panel(ui);
+        } else {
+            self.route_panel(ui, has_maps);
+        }
+    }
+
+    /// Maps de l'endgame : la map en cours et son chronomètre, la séance (l'historique est dans
+    /// l'onglet Maps).
+    fn mapping_panel(&mut self, ui: &mut egui::Ui) {
+        let mut to_route = false;
+        ui::section_header(ui, "MAPPING", None, |ui| {
+            to_route = ui::header_button(ui, "Route").on_hover_text("Revoir la route de leveling et ce qui a été oublié pendant la campagne").clicked();
+        });
+        if to_route {
+            self.bottom_maps = Some(false);
+        }
+        let Some(c) = &mut self.coach else { return };
+        let now = c.log_now();
+        let Some(book) = c.maps() else { return };
+        let dim = Color32::GRAY;
+        // Une map quittée depuis longtemps n'est plus en cours (son instance a expiré).
+        let recent = |t: i64, max: i64| now.is_none_or(|n| n - t < max);
+        match book.current().filter(|(r, inside)| inside.is_some() || recent(r.last, 15 * 60)) {
+            Some((run, inside)) => {
+                let secs = now.and_then(|n| book.live_secs(n)).unwrap_or(run.active_secs());
+                ui.horizontal(|ui| {
+                    tier_badge(ui, &mut self.passive_icons, run, 44.0, dim);
+                    ui.label(RichText::new(run_name(run)).color(ui::GOLD).size(20.0).strong());
+                    ui.label(group_label(run));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let color = if inside.is_some() { Color32::from_gray(230) } else { dim };
+                        ui.label(RichText::new(clock_text(secs)).color(color).size(28.0).monospace()).on_hover_text(time_note(run));
+                    });
+                });
+                ui.horizontal(|ui| {
+                    match inside {
+                        Some(_) => ui.label(RichText::new("en cours").color(Color32::from_rgb(110, 200, 110)).size(13.5)),
+                        // Dehors après y être entré : retour en ville, le chrono est arrêté.
+                        None => ui.label(RichText::new("en pause").color(Color32::from_rgb(230, 160, 70)).size(13.5)),
+                    };
+                    ui.add_space(10.0);
+                    icon_count(ui, &mut self.passive_icons, TOMB_ICON, run.deaths, &plural(run.deaths, "mort"), Color32::from_rgb(225, 90, 80));
+                    ui.add_space(10.0);
+                    icon_count(ui, &mut self.passive_icons, PORTAL_ICON, run.returns(), &format!("{} en ville", plural(run.returns(), "retour")), Color32::from_rgb(110, 150, 255));
+                });
+                if inside.is_some() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+                }
+            }
+            None => {
+                ui.label(RichText::new("Pas de map en cours : le chronomètre démarre à l'entrée dans une map.").color(dim).size(15.0));
+                if let Some(w) = book.pending_waystone() {
+                    ui.label(RichText::new(format!("Waystone T{} « {} » prêt pour la prochaine map ({} mods)", w.tier, w.name, w.mods.len())).color(Color32::LIGHT_GRAY).size(13.5));
+                }
+            }
+        }
+        // Séance : les maps enchaînées sans longue pause, en tableau. La map en cours y compte
+        // avec son temps en direct.
+        let open = book.current().map(|(r, _)| r as *const mapping::Run);
+        let live = now.and_then(|n| book.live_secs(n));
+        let secs = |r: &mapping::Run| if Some(r as *const _) == open { live.unwrap_or(r.active_secs()) } else { r.active_secs() };
+        let sitting = book.sitting();
+        let maps: Vec<&mapping::Run> = sitting.iter().filter(|r| r.kind == mapping::RunKind::Map).collect();
+        if !sitting.is_empty() {
+            let bosses = sitting.len() - maps.len();
+            let total: i64 = sitting.iter().map(secs).sum();
+            let map_secs: i64 = maps.iter().map(|r| secs(r)).sum();
+            let deaths: u32 = sitting.iter().map(|r| r.deaths).sum();
+            let returns: u32 = sitting.iter().map(|r| r.returns()).sum();
+            let group = maps.iter().filter(|r| r.group).count();
+            ui.add_space(12.0);
+            ui.add(egui::Separator::default().spacing(0.0));
+            ui.add_space(12.0);
+            let title = if sitting.last().is_some_and(|r| recent(r.last, 2 * 3600)) { "SÉANCE" } else { "DERNIÈRE SÉANCE" };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).color(ui::GOLD_DIM).size(13.0).strong());
+                ui.label(RichText::new(format!("depuis le {}", date_text(sitting[0].start))).color(dim).size(13.5));
+            });
+            ui.add_space(6.0);
+            let mut rows: Vec<(&str, String)> = Vec::new();
+            let mut count = plural(maps.len() as u32, "map");
+            if group > 0 {
+                count.push_str(&format!(" · {} solo, {} en groupe", maps.len() - group, group));
+            }
+            rows.push(("Maps", count));
+            if bosses > 0 {
+                rows.push(("Boss", plural(bosses as u32, "arène")));
+            }
+            rows.push(("Temps de jeu", duration_text(total)));
+            if !maps.is_empty() {
+                rows.push(("Temps moyen par map", duration_text(map_secs / maps.len() as i64)));
+                if map_secs > 0 {
+                    rows.push(("Maps par heure", format!("{:.1}", maps.len() as f64 * 3600.0 / map_secs as f64)));
+                }
+            }
+            let per = |n: u32| if sitting.is_empty() { String::new() } else { format!(" · {:.2} par map", n as f64 / sitting.len() as f64) };
+            rows.push(("Morts", format!("{deaths}{}", per(deaths))));
+            rows.push(("Retours en ville", format!("{returns}{}", per(returns))));
+            // Deux moitiés quand la largeur le permet : chacune son tableau libellé / valeur, le
+            // même écart entre libellé et valeur des deux côtés.
+            let pairs = if ui.available_width() >= 520.0 { 2 } else { 1 };
+            let per_half = rows.len().div_ceil(pairs);
+            ui.columns(pairs, |cols| {
+                for (h, col) in cols.iter_mut().enumerate() {
+                    egui::Grid::new(("sitting", h)).num_columns(2).spacing([20.0, 7.0]).show(col, |ui| {
+                        for (label, value) in rows.iter().skip(h * per_half).take(per_half) {
+                            ui.label(RichText::new(*label).color(dim).size(13.5));
+                            ui.label(RichText::new(value).color(Color32::from_gray(215)).size(15.0));
+                            ui.end_row();
+                        }
+                    });
+                }
+            });
+        }
+    }
+
     /// Contenus facultatifs à ne pas rater (route de leveling), cochés tout seuls via le log.
-    fn route_panel(&mut self, ui: &mut egui::Ui) {
+    fn route_panel(&mut self, ui: &mut egui::Ui, has_maps: bool) {
         let quest_choices = self.quest_choices();
+        let mut to_maps = false;
         let Some(c) = &mut self.coach else { return };
         let (act, items) = c.reminders();
         let label = match act {
@@ -1894,7 +2196,11 @@ impl App {
             a if a > 5 => "ROUTE — CAMPAGNE TERMINÉE".to_string(),
             a => format!("ROUTE — ACTE {a}"),
         };
-        ui::section_header(ui, &label, None, |_| {});
+        ui::section_header(ui, &label, None, |ui| {
+            if has_maps {
+                to_maps = ui::header_button(ui, "Mapping").on_hover_text("Revenir aux maps : map en cours, séance, dernières maps").clicked();
+            }
+        });
         let mut toggle: Option<String> = None;
         let out = egui::ScrollArea::vertical().id_salt("route").auto_shrink([false, false]).show(ui, |ui| {
             if items.is_empty() {
@@ -1905,7 +2211,19 @@ impl App {
                 };
                 ui.label(RichText::new(empty).color(Color32::GRAY));
             }
+            // Ce qui est fait, regroupé par acte sous un petit titre.
+            let mut first = true;
+            let mut done_act: Option<u32> = None;
             for (r, done) in items {
+                if done && done_act != Some(r.act) {
+                    if !first {
+                        ui.add_space(8.0);
+                    }
+                    let title = if r.act == 5 { "INTERLUDES".to_string() } else { format!("ACTE {}", r.act) };
+                    ui.label(RichText::new(title).color(ui::GOLD_DIM).small().strong());
+                    done_act = Some(r.act);
+                }
+                first = false;
                 let behind = r.act < act;
                 // Couleur selon l'importance seulement : pas de vert ni de rouge, qui diraient
                 // « réussi » ou « erreur ».
@@ -1990,6 +2308,9 @@ impl App {
         if let Some(id) = toggle {
             c.toggle_done(&id);
         }
+        if to_maps {
+            self.bottom_maps = Some(true);
+        }
     }
 
     fn feed_list(&mut self, ui: &mut egui::Ui) {
@@ -2054,6 +2375,8 @@ impl App {
             self.equipment(ui, area, scale, glow);
         } else if self.tab == views::Tab::Stats {
             self.stats_view(ui, ui::place(area, scale, ui::VIEW_AREA));
+        } else if self.tab == views::Tab::Atlas {
+            self.atlas_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         } else {
             self.build_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         }
@@ -2152,6 +2475,38 @@ impl App {
         });
     }
 
+    /// Onglet Atlas : l'arbre de l'Atlas du jeu, passifs posés allumés (journal du jeu).
+    fn atlas_view(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let dim = Color32::GRAY;
+        // L'arbre est lu dans les fichiers du jeu une fois, en arrière-plan (puis gardé en cache).
+        if !self.atlas_loading {
+            self.atlas_loading = true;
+            let (slot, cache, game, ctx) = (self.atlas_tree.clone(), self.cache_dir.clone(), self.config.game_dir.clone(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let tree = atlas::load(&cache, &game);
+                *slot.lock().unwrap() = Some(tree);
+                ctx.request_repaint();
+            });
+        }
+        let Some(book) = self.coach.as_mut().and_then(|c| c.maps()) else {
+            ui.put(rect, egui::Label::new(RichText::new("Chargement du guide…").color(dim)));
+            return;
+        };
+        let allocated: HashSet<String> = book.atlas.keys().cloned().collect();
+        match &*self.atlas_tree.lock().unwrap() {
+            None => {
+                ui.put(rect, egui::Label::new(RichText::new("Lecture de l'arbre de l'Atlas dans les fichiers du jeu…").color(dim)));
+            }
+            Some(Err(e)) => {
+                ui.put(rect, egui::Label::new(RichText::new(format!("Arbre de l'Atlas indisponible : {e}")).color(dim)));
+            }
+            Some(Ok(tree)) => {
+                let allocated: HashSet<&str> = allocated.iter().map(String::as_str).collect();
+                self.atlas_view.show(ui, rect, tree, &allocated, &mut self.passive_icons);
+            }
+        }
+    }
+
     /// Onglets Sorts, Talents et Ascendances, pour l'étape choisie.
     fn build_view(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let Some(coach) = self.coach.as_ref() else {
@@ -2233,7 +2588,7 @@ impl App {
                         .auto_shrink([false, false])
                         .show(ui, |ui| views::uniques(ui, &coach.steps, shown, &worn, prices.as_ref(), &league, assets));
                 }
-                views::Tab::Equipment | views::Tab::Stats => {}
+                views::Tab::Equipment | views::Tab::Stats | views::Tab::Atlas => {}
             }
         });
     }
@@ -2866,6 +3221,355 @@ impl App {
     }
 
     /// Onglet Marché : cours du marché d'échange d'après poe.ninja, par catégorie.
+    /// Onglet Maps : chiffres de l'endgame du personnage, par tier, puis l'historique des maps.
+    fn maps_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let (filter, tier) = (self.maps_filter, self.maps_tier);
+        let (mut pick_filter, mut pick_tier) = (filter, tier);
+        let Some(book) = self.coach.as_mut().and_then(|c| c.maps()) else { return };
+        let tier_key = |r: &mapping::Run| if r.kind == mapping::RunKind::Boss { 0 } else { r.level };
+        let shown = |r: &&mapping::Run| filter.is_none_or(|g| r.group == g) && tier.is_none_or(|t| tier_key(r) == t);
+        // Chiffres clés sur les maps ; sur les arènes quand on a choisi les boss.
+        let kind = if tier == Some(0) { mapping::RunKind::Boss } else { mapping::RunKind::Map };
+        let maps: Vec<&mapping::Run> = book.runs.iter().filter(|r| r.kind == kind).filter(shown).collect();
+        // Tiers rencontrés, du plus haut au plus bas, les boss à la fin.
+        let mut tiers: Vec<(u32, String)> = Vec::new();
+        for r in &book.runs {
+            if !tiers.iter().any(|(k, _)| *k == tier_key(r)) {
+                tiers.push((tier_key(r), if r.kind == mapping::RunKind::Boss { "Boss".to_string() } else { run_tier(r) }));
+            }
+        }
+        tiers.sort_by_key(|(k, _)| std::cmp::Reverse(*k));
+        let dim = Color32::GRAY;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }).show(ui, |ui| {
+                let count = book.runs.iter().filter(shown).count();
+                ui::section_header(ui, "MAPS", Some(count), |ui| {
+                    // À la taille des listes du personnage et du build.
+                    ui::gold_widgets(ui);
+                    let group_label = |g: Option<bool>| match g {
+                        None => "Solo et groupe",
+                        Some(false) => "Solo",
+                        Some(true) => "En groupe",
+                    };
+                    // Le tier à gauche, solo/groupe à droite, chacun dans une case de même taille
+                    // centrée sur la ligne du titre (sinon la seconde liste descend d'un cran).
+                    let row = ui.available_rect_before_wrap();
+                    let h = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+                    let cell = |right: f32| egui::Rect::from_min_max(egui::pos2(right - 160.0, row.center().y - h / 2.0), egui::pos2(right, row.center().y + h / 2.0));
+                    let center = egui::Layout::left_to_right(egui::Align::Center);
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(cell(row.right())).layout(center), |ui| {
+                        egui::ComboBox::from_id_salt("maps_group")
+                            .width(150.0)
+                            .selected_text(RichText::new(group_label(filter)).color(ui::GOLD))
+                            .show_ui(ui, |ui| {
+                                for g in [None, Some(false), Some(true)] {
+                                    ui.selectable_value(&mut pick_filter, g, group_label(g));
+                                }
+                            })
+                            .response
+                            .on_hover_text("Les moyennes ne se comparent qu'entre maps du même genre");
+                    });
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(cell(row.right() - 168.0)).layout(center), |ui| {
+                        let tier_label = |t: Option<u32>| t.and_then(|t| tiers.iter().find(|(k, _)| *k == t)).map_or("Tous les tiers".to_string(), |(_, l)| l.clone());
+                        egui::ComboBox::from_id_salt("maps_tier")
+                            .width(150.0)
+                            .selected_text(RichText::new(tier_label(tier)).color(ui::GOLD))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut pick_tier, None, "Tous les tiers");
+                                for (k, l) in &tiers {
+                                    ui.selectable_value(&mut pick_tier, Some(*k), l);
+                                }
+                            });
+                    });
+                });
+                if let Some(w) = book.pending_waystone() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("WAYSTONE PRÊT").color(ui::GOLD_DIM).size(13.5).strong());
+                        ui.label(RichText::new(format!("T{} · {}", w.tier, w.name)).color(ui::GOLD));
+                        if w.corrupted {
+                            ui.label(RichText::new("corrompu").color(dim).size(13.5));
+                        }
+                    });
+                    waystone_lines(ui, w);
+                    ui.label(RichText::new("Il sera associé à la prochaine map ouverte.").color(dim).size(13.5).italics());
+                    ui.add_space(10.0);
+                }
+                if book.runs.is_empty() {
+                    ui.label(RichText::new("Les maps s'afficheront ici dès ta première entrée en map : durée, morts, retours en ville et contenus visités.").color(dim));
+                    return;
+                }
+                // Chiffres clés, sur le temps de jeu dans les maps (hors AFK et hors repaire).
+                if !maps.is_empty() {
+                    let play: i64 = maps.iter().map(|r| r.active_secs()).sum();
+                    let deaths: u32 = maps.iter().map(|r| r.deaths).sum();
+                    let n = maps.len() as f64;
+                    let per_hour = if play > 0 { n * 3600.0 / play as f64 } else { 0.0 };
+                    let (each, per, in_maps) = if kind == mapping::RunKind::Boss { ("par boss en moyenne", "boss par heure", "de jeu en boss") } else { ("par map en moyenne", "maps par heure", "de jeu en maps") };
+                    let figures = [
+                        (duration_text(play / maps.len() as i64), each),
+                        (format!("{per_hour:.1}"), per),
+                        (format!("{:.2}", deaths as f64 / n), if kind == mapping::RunKind::Boss { "morts par boss" } else { "morts par map" }),
+                        (duration_text(play), in_maps),
+                    ];
+                    // Une carte par chiffre, centrée ; 2 par ligne quand la place manque pour 4.
+                    let gap = 10.0;
+                    let width = ui.available_width();
+                    let per_row = if width >= 4.0 * 160.0 + 3.0 * gap { 4 } else { 2 };
+                    let card = Vec2::new((width - gap * (per_row - 1) as f32) / per_row as f32, 78.0);
+                    for row in figures.chunks(per_row) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            for (value, label) in row {
+                                let (rect, _) = ui.allocate_exact_size(card, egui::Sense::hover());
+                                let p = ui.painter();
+                                p.rect(rect, 4.0, ui::CARD_FILL, egui::Stroke::new(1.0_f32, Color32::from_gray(48)), egui::StrokeKind::Inside);
+                                let c = rect.center();
+                                p.text(c - Vec2::new(0.0, 10.0), egui::Align2::CENTER_CENTER, value, egui::FontId::proportional(28.0), Color32::from_gray(225));
+                                p.text(c + Vec2::new(0.0, 20.0), egui::Align2::CENTER_CENTER, *label, egui::FontId::proportional(13.5), dim);
+                            }
+                        });
+                        ui.add_space(gap - ui.spacing().item_spacing.y);
+                    }
+                    // Mods de waystone rencontrés sur au moins deux maps : les plus mortels en haut.
+                    let mut by_mod: BTreeMap<String, (u32, i64, u32)> = BTreeMap::new();
+                    for r in &maps {
+                        for m in r.waystone.iter().flat_map(|w| &w.mods) {
+                            let e = by_mod.entry(mapping::mod_pattern(m)).or_default();
+                            *e = (e.0 + 1, e.1 + r.active_secs(), e.2 + r.deaths);
+                        }
+                    }
+                    let mut mods: Vec<_> = by_mod.into_iter().filter(|(_, (n, _, _))| *n >= 2).collect();
+                    mods.sort_by(|a, b| (b.1.2 as f64 / b.1.0 as f64).total_cmp(&(a.1.2 as f64 / a.1.0 as f64)).then(b.1.0.cmp(&a.1.0)));
+                    if !mods.is_empty() {
+                        ui.add_space(22.0);
+                        ui.label(RichText::new("MODS DE WAYSTONE").color(ui::GOLD_DIM).size(13.0).strong());
+                        egui::Grid::new("map_mods").num_columns(4).spacing([24.0, 6.0]).min_col_width(110.0).show(ui, |ui| {
+                            // Le mod en dernier : il prend la place qui reste.
+                            for h in ["Maps", "Temps moyen", "Morts par map", "Mod"] {
+                                ui.label(RichText::new(h).color(dim).size(13.5));
+                            }
+                            ui.end_row();
+                            for (m, (count, secs, deaths)) in mods.iter().take(10) {
+                                ui.label(RichText::new(count.to_string()).color(Color32::LIGHT_GRAY).size(15.5));
+                                ui.label(RichText::new(duration_text(secs / *count as i64)).color(Color32::LIGHT_GRAY).size(15.5));
+                                ui.label(RichText::new(format!("{:.2}", *deaths as f64 / *count as f64)).color(Color32::LIGHT_GRAY).size(15.5));
+                                ui.label(RichText::new(m).color(Color32::from_rgb(140, 150, 230)).size(15.5));
+                                ui.end_row();
+                            }
+                        });
+                    }
+                }
+                // Historique : la plus récente en haut, bandes alternées comme l'historique des objets.
+                ui.add_space(22.0);
+                ui.label(RichText::new("HISTORIQUE").color(ui::GOLD_DIM).size(13.0).strong());
+                ui.add_space(2.0);
+                let out = egui::ScrollArea::vertical().id_salt("maps_history").auto_shrink([false, false]).show(ui, |ui| {
+                    // Colonne des mods seulement si une map affichée a un waystone.
+                    let any_mods = book.runs.iter().filter(shown).any(|r| r.waystone.is_some());
+                    for (i, run) in book.runs.iter().rev().filter(shown).enumerate() {
+                        if i > 0 {
+                            ui.add_space(-ui.spacing().item_spacing.y);
+                        }
+                        let band = ui.painter().with_clip_rect(ui.clip_rect().expand2(Vec2::new(8.0, 0.0)));
+                        let stripe = band.add(egui::Shape::Noop);
+                        // Une ligne : le tier et le nom à gauche, puis en colonnes alignées sur la
+                        // droite la date, les mods, les morts, les retours en ville et la durée.
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), egui::Sense::hover());
+                        let icons = &mut self.passive_icons;
+                        // Colonnes depuis la droite : durée, retours, morts, mods, date, chacune à la
+                        // largeur de son texte le plus long, séparées d'un même écart. Quand la place
+                        // manque pour le nom, les morts et retours disparaissent d'abord, puis les mods,
+                        // puis la date ; ce qui est masqué passe dans l'infobulle de la durée.
+                        const GAP: f32 = 18.0;
+                        let text_w = |t: &str, size: f32| ui.painter().layout_no_wrap(t.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x.ceil();
+                        let dur_w = text_w("00 min 00 s", 18.0);
+                        let count_w = 22.0 + 3.0 + text_w("00", 15.0);
+                        let mods_w = if any_mods { text_w("00 mods", 13.5) } else { 0.0 };
+                        let date_w = text_w("29 sept. 23:59", 13.5);
+                        // Colonnes gardées (morts et retours, mods, date) : on retire dans cet ordre.
+                        let optional = [2.0 * (count_w + GAP), if any_mods { mods_w + GAP } else { 0.0 }, date_w + GAP];
+                        let mut keep = [true; 3];
+                        for i in 0..3 {
+                            let need: f32 = dur_w + optional.iter().zip(&keep).filter(|(_, k)| **k).map(|(w, _)| w).sum::<f32>();
+                            if rect.width() - need >= 200.0 {
+                                break;
+                            }
+                            keep[i] = false;
+                        }
+                        let [counts, mods, date] = keep;
+                        let mut right = rect.right();
+                        let mut take = |w: f32| {
+                            let r = egui::Rect::from_min_max(egui::pos2(right - w, rect.top()), egui::pos2(right, rect.bottom()));
+                            right -= w + GAP;
+                            r
+                        };
+                        let col = |ui: &mut egui::Ui, r: egui::Rect, layout: egui::Layout, add: &mut dyn FnMut(&mut egui::Ui)| {
+                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r).layout(layout), |ui| add(ui));
+                        };
+                        let ltr = egui::Layout::left_to_right(egui::Align::Center);
+                        let deaths_text = plural(run.deaths, "mort");
+                        let returns_text = format!("{} en ville", plural(run.returns(), "retour"));
+                        let mods_text = run.waystone.as_ref().map(|w| plural(w.mods.len() as u32, "mod"));
+                        col(ui, take(dur_w), egui::Layout::right_to_left(egui::Align::Center), &mut |ui| {
+                            ui.label(RichText::new(duration_text(run.active_secs())).color(Color32::from_gray(225)).size(18.0).strong());
+                        });
+                        if counts {
+                            col(ui, take(count_w), ltr, &mut |ui| icon_count(ui, icons, PORTAL_ICON, run.returns(), &returns_text, Color32::from_rgb(110, 150, 255)));
+                            col(ui, take(count_w), ltr, &mut |ui| icon_count(ui, icons, TOMB_ICON, run.deaths, &deaths_text, Color32::from_rgb(225, 90, 80)));
+                        }
+                        if mods && any_mods {
+                            let r = take(mods_w);
+                            if let Some(m) = &mods_text {
+                                col(ui, r, ltr, &mut |ui| {
+                                    ui.label(RichText::new(m).color(dim).size(13.5));
+                                });
+                            }
+                        }
+                        if date {
+                            col(ui, take(date_w), ltr, &mut |ui| {
+                                ui.label(RichText::new(date_text(run.start)).color(dim).size(13.5));
+                            });
+                        }
+                        // Le reste de la largeur : tier, nom et solo/groupe.
+                        let left = egui::Rect::from_min_max(rect.min, egui::pos2(right, rect.bottom()));
+                        col(ui, left, ltr, &mut |ui| {
+                            ui.allocate_ui_with_layout(Vec2::new(38.0, 44.0), ltr, |ui| {
+                                tier_image(ui, icons, run, 34.0, dim);
+                            });
+                            // Le nom tronqué laisse la place à solo/groupe juste derrière lui.
+                            let group = group_label(run);
+                            let group_w = ui.painter().layout_no_wrap(group.text().to_string(), egui::FontId::proportional(13.5), Color32::GRAY).size().x;
+                            let name_w = (ui.available_width() - group_w - ui.spacing().item_spacing.x).max(0.0);
+                            ui.scope(|ui| {
+                                ui.set_max_width(name_w);
+                                ui.add(egui::Label::new(RichText::new(run_name(run)).color(Color32::from_gray(220)).size(16.5)).truncate());
+                            });
+                            ui.label(group);
+                        });
+                        let row = egui::InnerResponse::new((), ui.interact(rect, ui.id().with(("map_line", i)), egui::Sense::hover()));
+                        if i % 2 == 1 {
+                            band.set(stripe, egui::Shape::rect_filled(row.response.rect.expand2(Vec2::new(8.0, 0.0)), 0.0, Color32::from_rgb(21, 20, 18)));
+                        }
+                        // Une seule infobulle pour toute la ligne : tier, date, morts, retours, waystone.
+                        row.response.on_hover_ui(|ui| {
+                            ui.set_max_width(420.0);
+                            ui.label(RichText::new(format!("{} · {}", run_tier(run), run_name(run))).color(ui::GOLD));
+                            ui.label(RichText::new(date_text(run.start)).color(Color32::LIGHT_GRAY).size(13.5));
+                            ui.label(RichText::new(format!("{} · {}", deaths_text, returns_text)).color(Color32::LIGHT_GRAY).size(13.5));
+                            ui.label(RichText::new(time_note(run)).color(Color32::GRAY).size(13.5).italics());
+                            if let Some(w) = &run.waystone {
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(format!("Waystone T{} · {}{}", w.tier, w.name, if w.corrupted { " · corrompu" } else { "" })).color(ui::GOLD));
+                                waystone_lines(ui, w);
+                            }
+                        });
+                    }
+                });
+                ui::fade_scroll(ui, &out, true);
+            });
+        });
+        (self.maps_filter, self.maps_tier) = (pick_filter, pick_tier);
+    }
+
+    /// Onglet Boss : les boss d'endgame affrontés, un par arène : passages (arènes ouvertes),
+    /// morts, temps moyen d'un passage et date du dernier.
+    fn bosses_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let Some(book) = self.coach.as_mut().and_then(|c| c.maps()) else { return };
+        let mut bosses: Vec<(String, Vec<&mapping::Run>)> = Vec::new();
+        for r in book.runs.iter().filter(|r| r.kind == mapping::RunKind::Boss) {
+            match bosses.iter_mut().find(|(c, _)| *c == r.code) {
+                Some((_, runs)) => runs.push(r),
+                None => bosses.push((r.code.clone(), vec![r])),
+            }
+        }
+        bosses.sort_by_key(|(_, runs)| std::cmp::Reverse(runs.last().map_or(0, |r| r.last)));
+        let dim = Color32::GRAY;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }).show(ui, |ui| {
+                ui::section_header(ui, "BOSS D'ENDGAME", Some(bosses.len()), |_| {});
+                if bosses.is_empty() {
+                    ui.label(RichText::new("Les boss d'endgame s'afficheront ici dès ta première arène : tentatives, morts, temps passé.").color(dim).size(15.0));
+                    return;
+                }
+                let out = egui::ScrollArea::vertical().id_salt("bosses").auto_shrink([false, false]).show(ui, |ui| {
+                    for (i, (code, runs)) in bosses.iter().enumerate() {
+                        let last = runs[runs.len() - 1];
+                        // Un passage = une arène ouverte (une clé) : les morts n'en relancent pas, le
+                        // boss se reprend sur place.
+                        let tries = runs.len() as u32;
+                        let deaths: u32 = runs.iter().map(|r| r.deaths).sum();
+                        let time: i64 = runs.iter().map(|r| r.active_secs()).sum();
+                        if i > 0 {
+                            ui.add_space(-ui.spacing().item_spacing.y);
+                        }
+                        let band = ui.painter().with_clip_rect(ui.clip_rect().expand2(Vec2::new(8.0, 0.0)));
+                        let stripe = band.add(egui::Shape::Noop);
+                        // Comme l'historique des maps : l'arène à gauche, puis en colonnes depuis la
+                        // droite le temps moyen d'un passage, les morts, les passages et la date du
+                        // dernier (la date puis les passages disparaissent quand la place manque).
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), egui::Sense::hover());
+                        const GAP: f32 = 18.0;
+                        let text_w = |t: &str, size: f32| ui.painter().layout_no_wrap(t.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x.ceil();
+                        let dur_w = text_w("00 min 00 s", 18.0);
+                        let count_w = 22.0 + 3.0 + text_w("00", 15.0);
+                        let tries_w = text_w("00 passages", 13.5);
+                        let date_w = text_w("29 sept. 23:59", 13.5);
+                        let room = |extra: f32| rect.width() - dur_w - count_w - 2.0 * GAP - extra >= 200.0;
+                        let date = room(tries_w + date_w + 2.0 * GAP);
+                        let show_tries = room(tries_w + GAP);
+                        let mut right = rect.right();
+                        let mut take = |w: f32| {
+                            let r = egui::Rect::from_min_max(egui::pos2(right - w, rect.top()), egui::pos2(right, rect.bottom()));
+                            right -= w + GAP;
+                            r
+                        };
+                        let ltr = egui::Layout::left_to_right(egui::Align::Center);
+                        let col = |ui: &mut egui::Ui, r: egui::Rect, layout: egui::Layout, add: &mut dyn FnMut(&mut egui::Ui)| {
+                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r).layout(layout), |ui| add(ui));
+                        };
+                        let icons = &mut self.passive_icons;
+                        col(ui, take(dur_w), egui::Layout::right_to_left(egui::Align::Center), &mut |ui| {
+                            ui.label(RichText::new(duration_text(time / tries as i64)).color(Color32::from_gray(225)).size(18.0).strong());
+                        });
+                        col(ui, take(count_w), ltr, &mut |ui| icon_count(ui, icons, TOMB_ICON, deaths, &plural(deaths, "mort"), Color32::from_rgb(225, 90, 80)));
+                        if show_tries {
+                            col(ui, take(tries_w), ltr, &mut |ui| {
+                                ui.label(RichText::new(plural(tries, "passage")).color(dim).size(13.5));
+                            });
+                        }
+                        if date {
+                            col(ui, take(date_w), ltr, &mut |ui| {
+                                ui.label(RichText::new(date_text(last.start)).color(dim).size(13.5));
+                            });
+                        }
+                        let left = egui::Rect::from_min_max(rect.min, egui::pos2(right, rect.bottom()));
+                        col(ui, left, ltr, &mut |ui| {
+                            ui.allocate_ui_with_layout(Vec2::new(44.0, 52.0), ltr, |ui| {
+                                tier_image(ui, icons, last, 38.0, dim);
+                            });
+                            ui.vertical(|ui| {
+                                ui.add_space(7.0);
+                                ui.add(egui::Label::new(RichText::new(run_name(last)).color(Color32::from_gray(220)).size(16.5)).truncate());
+                                ui.add(egui::Label::new(RichText::new(boss_mechanic(code)).color(dim).size(13.5)).truncate());
+                            });
+                        });
+                        let row = egui::InnerResponse::new((), ui.interact(rect, ui.id().with(("boss_line", i)), egui::Sense::hover()));
+                        row.response.clone().on_hover_ui(|ui| {
+                            ui.label(RichText::new(format!("{} · {}", run_name(last), boss_mechanic(code))).color(ui::GOLD));
+                            ui.label(RichText::new(format!("{} · {} au total", plural(tries, "passage"), plural(deaths, "mort"))).color(Color32::LIGHT_GRAY).size(13.5));
+                            ui.label(RichText::new(format!("{} par passage en moyenne · {} au total", duration_text(time / tries as i64), duration_text(time))).color(Color32::LIGHT_GRAY).size(13.5));
+                            ui.label(RichText::new(format!("dernier passage le {}", date_text(last.start))).color(Color32::LIGHT_GRAY).size(13.5));
+                        });
+                        if i % 2 == 1 {
+                            band.set(stripe, egui::Shape::rect_filled(row.response.rect.expand2(Vec2::new(8.0, 0.0)), 0.0, Color32::from_rgb(21, 20, 18)));
+                        }
+                    }
+                });
+                ui::fade_scroll(ui, &out, true);
+            });
+        });
+    }
+
     fn market_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         const CATEGORIES: &[(&str, &str)] = &[
             ("Currency", "Monnaie"),
@@ -3038,9 +3742,12 @@ impl App {
                                 }
                             });
                         ui.add(
+                            // À la hauteur de la liste voisine.
                             egui::TextEdit::singleline(&mut self.market_search)
                                 .hint_text("rechercher")
-                                .desired_width(ui.available_width()),
+                                .desired_width(ui.available_width())
+                                .min_size(Vec2::new(0.0, ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y))
+                                .vertical_align(egui::Align::Center),
                         );
                     });
                     ui.add_space(6.0);
@@ -3053,7 +3760,7 @@ impl App {
                         ui.label(RichText::new(text).color(Color32::GRAY));
                         return;
                     }
-                    egui::ScrollArea::vertical()
+                    let out = egui::ScrollArea::vertical()
                         .id_salt("market_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -3125,6 +3832,7 @@ impl App {
                                 });
                             }
                         });
+                    ui::fade_scroll(ui, &out, true);
                 });
         });
         if let Some(l) = league_pick {
@@ -3529,11 +4237,18 @@ impl eframe::App for App {
         }
         if let Some(c) = &mut self.coach {
             let mut changed = false;
+            let runs = |c: &mut coach::Coach| c.maps().map_or(0, |b| b.runs.len());
+            let before = runs(c);
             while let Ok(ev) = self.log_rx.try_recv() {
                 for line in c.handle(&ev) {
                     self.feed.push_front(line);
                     changed = true;
                 }
+                changed |= matches!(ev, logwatch::Event::Area { .. } | logwatch::Event::Death { .. });
+            }
+            // Entrée dans une nouvelle map : le bloc du bas passe sur les maps.
+            if runs(c) > before {
+                self.bottom_maps = Some(true);
             }
             self.feed.truncate(FEED_MAX);
             if changed {
@@ -3610,12 +4325,24 @@ impl eframe::App for App {
             let side = ui.available_rect_before_wrap();
             let full = egui::Rect::from_min_max(side.min, egui::pos2(side.max.x, side.max.y - TAB_H));
             let tabs_rect = egui::Rect::from_min_max(egui::pos2(side.min.x, full.max.y), side.max);
-            let tabs: Vec<_> = views::SideTab::ALL.iter().map(|t| (*t, t.label())).collect();
+            // L'onglet Boss, expérimental, seulement s'il est activé dans les réglages.
+            if !self.stored.boss_tab && self.side_tab == views::SideTab::Bosses {
+                self.side_tab = views::SideTab::Maps;
+            }
+            let tabs: Vec<_> = views::SideTab::ALL.iter().filter(|t| self.stored.boss_tab || **t != views::SideTab::Bosses).map(|t| (*t, t.label())).collect();
             if let Some(tab) = ui::tab_strip(ui, tabs_rect, &tabs, self.side_tab) {
                 self.side_tab = tab;
             }
             if self.side_tab == views::SideTab::Market {
                 self.market_panel(ui, full);
+                return;
+            }
+            if self.side_tab == views::SideTab::Maps {
+                self.maps_panel(ui, full);
+                return;
+            }
+            if self.side_tab == views::SideTab::Bosses {
+                self.bosses_panel(ui, full);
                 return;
             }
             // Trois niveaux : historique, diagnostic, détail de l'estimation. Au diagnostic, valeur

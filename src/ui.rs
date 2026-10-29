@@ -872,6 +872,22 @@ pub fn action_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     resp
 }
 
+/// Bouton d'action à droite d'un titre de section, à la taille des boutons de la barre du bas
+/// (l'en-tête a toujours sa hauteur, avec ou sans bouton : les filets restent alignés).
+pub fn header_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let resp = ui
+        .scope(|ui| {
+            gold_widgets(ui);
+            ui.add(egui::Button::new(RichText::new(text).color(GOLD)))
+        })
+        .inner;
+    if ui.rect_contains_pointer(resp.rect) {
+        ui.painter().rect_stroke(resp.rect, CornerRadius::same(3), Stroke::new(1.0_f32, GOLD), StrokeKind::Inside);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
 /// Rangée d'onglets dans le style des titres de section : l'actif en doré, souligné, posé sur
 /// un filet doré qui court sous toute la rangée. Renvoie l'onglet cliqué.
 pub fn tab_strip<T: Copy + PartialEq>(
@@ -949,12 +965,18 @@ pub fn tab_strip<T: Copy + PartialEq>(
 }
 
 /// Titre de section : petites capitales dorées, compteur, actions discrètes à droite, filet dessous.
+/// Hauteur d'une ligne de titre de section : celle d'un bouton ou d'une liste de taille normale.
+fn header_height(ui: &egui::Ui) -> f32 {
+    (ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y).max(ui.spacing().interact_size.y)
+}
+
 pub fn section_header(ui: &mut egui::Ui, title: &str, count: Option<usize>, actions: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).color(GOLD).size(13.0).strong());
+        ui.set_min_height(header_height(ui));
+        ui.label(RichText::new(title).color(GOLD).size(15.5).strong());
         if let Some(n) = count {
-            ui.label(RichText::new(n.to_string()).color(GOLD_DIM).size(12.0));
+            ui.label(RichText::new(n.to_string()).color(GOLD_DIM).size(14.0));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
     });
@@ -976,8 +998,9 @@ pub fn plain_widgets(ui: &mut egui::Ui) {
 pub fn section_header_sub(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).color(GOLD).size(13.0).strong());
-        ui.add(egui::Label::new(RichText::new(subtitle).color(Color32::GRAY).small()).truncate()).on_hover_text(subtitle);
+        ui.set_min_height(header_height(ui));
+        ui.label(RichText::new(title).color(GOLD).size(15.5).strong());
+        ui.add(egui::Label::new(RichText::new(subtitle).color(Color32::GRAY).size(13.0)).truncate()).on_hover_text(subtitle);
     });
     ui.add_space(2.0);
     let rect = ui.available_rect_before_wrap();

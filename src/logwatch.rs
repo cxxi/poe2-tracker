@@ -14,28 +14,38 @@ use regex::Regex;
 pub enum Event {
     /// Le jeu vient d'être lancé (nouvelle session dans le log).
     Session,
-    /// Génération d'une zone : code ("G2_4") et niveau de zone.
-    Area { code: String, level: u32, act: Option<u32> },
+    /// Génération d'une zone : code ("G2_4"), niveau de zone, seed (le même pour une
+    /// instance rouverte) et heure du log.
+    Area { code: String, level: u32, act: Option<u32>, seed: u64, time: i64 },
     /// Nom affiché de la zone.
     Zone(String),
     Level { character: String, class: String, level: u32 },
-    Death { character: String },
+    Death { character: String, time: i64 },
+    /// Mode absent (AFK) activé ou désactivé.
+    Afk { on: bool, time: i64 },
+    /// Passif de l'Atlas posé ou retiré : identifiant (« AtlasRitualNotable3 ») et nom affiché.
+    Atlas { id: String, name: String, allocated: bool },
     /// Récompense de quête : « X has received +30 to Spirit » (nommée) ou
     /// « You have received 2 Passive Skill Points » (sans nom).
     Received { character: Option<String>, text: String },
     Whisper { from: String, text: String },
     /// « X has joined the area » / « has left the area » : un autre joueur (groupe), jamais soi.
     Party { character: String },
+    /// Fermeture de l'Atlas (« Atlas input suspension DISABLED ») : on vient d'utiliser le
+    /// device, pour lancer une map à soi.
+    Device,
 }
 
 static LINE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \d+ \w+ \[\w+ Client \d+\] (.*)$").unwrap());
-static AREA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^Generating level (\d+) area "([^"]+)""#).unwrap());
+    LazyLock::new(|| Regex::new(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \d+ \w+ \[\w+ Client \d+\] (.*)$").unwrap());
+static AREA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^Generating level (\d+) area "([^"]+)"(?: with seed (\d+))?"#).unwrap());
 static SCENE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[SCENE\] Set Source \[(.+)\]$").unwrap());
 static LEVEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (.+) \((\w+)\) is now level (\d+)$").unwrap());
-static SLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (.+) has been slain\.$").unwrap());
+static SLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (.+) (?:has been slain|vient de mourir)\.$").unwrap());
+static ATLAS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Successfully (un)?allocated passive skill id: (Atlas\w*), name: (.*)$").unwrap());
+static AFK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (?:AFK mode is now (ON|OFF)|Le mode Absent \(AFK\) est (désormais activé|désactivé))").unwrap());
 static RECEIVED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (?:(\S+) has|You have) received (.+)$").unwrap());
-static PARTY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (\S+) has (?:joined|left) the area\.$").unwrap());
+static PARTY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (\S+) (?:has (?:joined|left) the area|a (?:rejoint|quitté) la zone)\.$").unwrap());
 static WHISPER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@From (.+?): (.*)$").unwrap());
 static ACT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^G(\d)_").unwrap());
 static INTERLUDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^P\d_").unwrap());
@@ -62,9 +72,13 @@ pub fn parse_line(raw: &str) -> Option<Event> {
     if raw.ends_with(SESSION_START) {
         return Some(Event::Session);
     }
-    let msg = LINE.captures(raw)?.get(1)?.as_str();
+    let line = LINE.captures(raw)?;
+    // Heure locale du joueur, comptée comme une date UTC : ne sert qu'à mesurer des durées.
+    let time = crate::trade::unix_time(&line[1]).unwrap_or(0);
+    let msg = line.get(2)?.as_str();
     if let Some(c) = AREA.captures(msg) {
-        return Some(Event::Area { code: c[2].to_string(), level: c[1].parse().ok()?, act: act_of(&c[2]) });
+        let seed = c.get(3).and_then(|s| s.as_str().parse().ok()).unwrap_or(0);
+        return Some(Event::Area { code: c[2].to_string(), level: c[1].parse().ok()?, act: act_of(&c[2]), seed, time });
     }
     if let Some(c) = SCENE.captures(msg) {
         return (!matches!(&c[1], "(null)" | "(unknown)")).then(|| Event::Zone(c[1].to_string()));
@@ -73,13 +87,22 @@ pub fn parse_line(raw: &str) -> Option<Event> {
         return Some(Event::Level { character: c[1].to_string(), class: c[2].to_string(), level: c[3].parse().ok()? });
     }
     if let Some(c) = SLAIN.captures(msg) {
-        return Some(Event::Death { character: c[1].to_string() });
+        return Some(Event::Death { character: c[1].to_string(), time });
+    }
+    if let Some(c) = ATLAS.captures(msg) {
+        return Some(Event::Atlas { id: c[2].to_string(), name: c[3].trim().to_string(), allocated: c.get(1).is_none() });
+    }
+    if let Some(c) = AFK.captures(msg) {
+        return Some(Event::Afk { on: c.get(1).map_or(c.get(2).is_some_and(|m| m.as_str().starts_with("désormais")), |m| m.as_str() == "ON"), time });
     }
     if let Some(c) = RECEIVED.captures(msg) {
         return Some(Event::Received { character: c.get(1).map(|m| m.as_str().to_string()), text: c[2].to_string() });
     }
     if let Some(c) = PARTY.captures(msg) {
         return Some(Event::Party { character: c[1].to_string() });
+    }
+    if msg == "Atlas input suspension DISABLED" {
+        return Some(Event::Device);
     }
     if let Some(c) = WHISPER.captures(msg) {
         return Some(Event::Whisper { from: c[1].to_string(), text: c[2].to_string() });
@@ -101,6 +124,29 @@ pub fn read_recent(path: &Path, max_bytes: u64) -> Vec<Event> {
     }
     let start = lines.iter().rposition(|l| l.trim_end().ends_with(SESSION_START)).unwrap_or(0);
     lines[start..].iter().filter_map(|l| parse_line(l)).collect()
+}
+
+/// Secondes à ajouter à l'heure UTC pour obtenir l'heure du log (heure locale du joueur),
+/// au quart d'heure près.
+pub fn clock_offset(log_time: i64, utc: i64) -> i64 {
+    ((log_time - utc) as f64 / 900.0).round() as i64 * 900
+}
+
+pub fn utc_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// Décalage de l'heure du log d'après sa dernière ligne et sa date de modification.
+pub fn log_clock_offset(path: &Path) -> Option<i64> {
+    let mut f = File::open(path).ok()?;
+    let meta = f.metadata().ok()?;
+    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+    let _ = f.seek(SeekFrom::Start(meta.len().saturating_sub(64 * 1024)));
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let last = text.lines().rev().find_map(|l| LINE.captures(l).and_then(|c| crate::trade::unix_time(&c[1])))?;
+    Some(clock_offset(last, modified))
 }
 
 /// Tous les événements du log, du début à la fin (recensement des personnages).
@@ -170,11 +216,24 @@ mod tests {
         );
         assert_eq!(
             parse_line(&format!("{P}Generating level 16 area \"G2_town\" with seed 1")),
-            Some(Event::Area { code: "G2_town".into(), level: 16, act: Some(2) })
+            Some(Event::Area { code: "G2_town".into(), level: 16, act: Some(2), seed: 1, time: 1792819706 })
         );
         assert_eq!(parse_line(&format!("{P}[SCENE] Set Source [Clearfell]")), Some(Event::Zone("Clearfell".into())));
         assert_eq!(parse_line(&format!("{P}[SCENE] Set Source [(null)]")), None);
-        assert_eq!(parse_line(&format!("{P}: Juliana has been slain.")), Some(Event::Death { character: "Juliana".into() }));
+        assert_eq!(parse_line(&format!("{P}: Juliana has been slain.")), Some(Event::Death { character: "Juliana".into(), time: 1792819706 }));
+        assert_eq!(parse_line(&format!("{P}: Cxxisag vient de mourir.")), Some(Event::Death { character: "Cxxisag".into(), time: 1792819706 }));
+        assert_eq!(parse_line(&format!("{P}: AFK mode is now ON. Autoreply \"This player is AFK.\"")), Some(Event::Afk { on: true, time: 1792819706 }));
+        assert_eq!(parse_line(&format!("{P}: Le mode Absent (AFK) est désactivé.")), Some(Event::Afk { on: false, time: 1792819706 }));
+        assert_eq!(
+            parse_line(&format!("{P}Successfully allocated passive skill id: AtlasRitualSmall1, name: Augmentation de Tribut")),
+            Some(Event::Atlas { id: "AtlasRitualSmall1".into(), name: "Augmentation de Tribut".into(), allocated: true })
+        );
+        assert_eq!(
+            parse_line(&format!("{P}Successfully unallocated passive skill id: AtlasAbyssSmall14_, name: Depths Chance")),
+            Some(Event::Atlas { id: "AtlasAbyssSmall14_".into(), name: "Depths Chance".into(), allocated: false })
+        );
+        // Talents du personnage : pas l'Atlas.
+        assert_eq!(parse_line(&format!("{P}Successfully allocated passive skill id: energy_shield35, name: Fusion")), None);
         assert_eq!(parse_line(&format!("{P}#DarthPillars: shes great")), None);
         assert_eq!(
             parse_line(&format!("{P}: Juliana_novachrono has received +30 to [Spirit|Spirit].")),
@@ -185,7 +244,16 @@ mod tests {
             Some(Event::Received { character: None, text: "2 Passive Skill Points.".into() })
         );
         assert_eq!(parse_line(&format!("{P}: Bob_duo has joined the area.")), Some(Event::Party { character: "Bob_duo".into() }));
+        assert_eq!(parse_line(&format!("{P}: Bob_duo a quitté la zone.")), Some(Event::Party { character: "Bob_duo".into() }));
+        assert_eq!(parse_line(&format!("{P}Atlas input suspension DISABLED")), Some(Event::Device));
         assert_eq!(parse_line("2026/10/24 02:09:16 ***** LOG FILE OPENING *****"), Some(Event::Session));
+    }
+
+    #[test]
+    fn clock() {
+        // Heure d'été française : le log a deux heures d'avance sur l'UTC.
+        assert_eq!(clock_offset(10_000 + 7200, 10_000 - 3), 7200);
+        assert_eq!(clock_offset(10_000, 10_000 + 40), 0);
     }
 
     #[test]

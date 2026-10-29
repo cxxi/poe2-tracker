@@ -463,4 +463,30 @@ mod tests {
         read_paths(&data, &mut out).unwrap();
         assert_eq!(out, vec!["Art/a.dds"]);
     }
+
+    /// Liste les fichiers du jeu dont le chemin contient un motif (exploration des données) :
+    /// POE2_GAME=…/Path\ of\ Exile\ 2 POE2_GREP=atlas cargo test list_game_paths -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn list_game_paths() {
+        let (Ok(game), Ok(grep)) = (std::env::var("POE2_GAME"), std::env::var("POE2_GREP")) else { return };
+        let index = Index::open(Path::new(&game)).unwrap();
+        let grep = grep.to_lowercase();
+        for p in index.paths.iter().filter(|p| p.to_lowercase().contains(&grep)) {
+            eprintln!("{p}  ({} o)", index.entry(p).map_or(0, |e| e.size));
+        }
+    }
+
+    /// Copie un fichier du jeu sur le disque (exploration des données) :
+    /// POE2_GAME=… POE2_FILE=metadata/… POE2_OUT=/tmp/x cargo test dump_game_file -- --ignored
+    #[test]
+    #[ignore]
+    fn dump_game_file() {
+        let (Ok(game), Ok(file), Ok(out)) = (std::env::var("POE2_GAME"), std::env::var("POE2_FILE"), std::env::var("POE2_OUT")) else { return };
+        let index = Index::open(Path::new(&game)).unwrap();
+        for f in file.split(',') {
+            let name = f.rsplit('/').next().unwrap();
+            std::fs::write(Path::new(&out).join(name), index.read(f).unwrap()).unwrap();
+        }
+    }
 }

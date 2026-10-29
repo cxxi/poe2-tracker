@@ -1,5 +1,16 @@
 # Nouveautés
 
+## 0.2.9
+
+- Mapping, en bas à gauche une fois en endgame (bouton « Route » pour revoir la route de leveling) : la map en cours avec son chronomètre, qui compte le temps passé dans la map hors repaire et AFK et se met en pause au retour en ville ; morts et retours en ville. Dessous, la séance en tableau : maps, temps de jeu, temps moyen, maps par heure, morts et retours.
+- Onglet Maps à droite : chiffres clés en cartes, filtres par tier et solo / en groupe, mods de waystone les plus mortels, historique de toutes les maps (image du waystone du tier, date, morts, retours, durée ; le détail et le waystone au survol de la ligne). Un waystone copié (Ctrl+C) est associé à la prochaine map ouverte.
+- Solo ou en groupe : une map est en groupe quand on y entre sans avoir lancé le device, ou quand un autre joueur y entre ou en sort. En groupe, le temps affiché est le sien propre, pas celui de tout le groupe.
+- Onglet Atlas : l'arbre de l'Atlas du jeu, navigable comme l'arbre des talents, avec les passifs posés allumés (d'après le journal du jeu) et leurs effets au survol.
+- Onglet Boss (expérimental, à activer dans les réglages) : les boss d'endgame affrontés, avec passages, morts et temps moyen.
+- Route : ce qui est déjà fait est regroupé par acte.
+- Durées en minutes et secondes.
+- Interface : titres de section et boutons plus grands, textes du mapping plus lisibles, fondu en bas des listes Marché et Maps, champ de recherche du Marché à la hauteur des listes, listes du haut toutes de la même couleur, en-tête de l'activité raccourci (classe, niveau, zone).
+
 ## 0.2.8
 
 - Réglages : une page de réglages dans le menu, enregistrés avec « Enregistrer ». Dossier du jeu, estimation sur le trade, lancement de l'estimation au Ctrl+C (automatique par défaut) ou au bouton, ouverture du détail au Ctrl+C ou historique, seuil du marché, recherche automatique des mises à jour.

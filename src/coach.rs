@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::guide::{self, Catalog, Step};
 use crate::logwatch::{self, Event};
+use crate::mapping::Book;
 use crate::route::{self, Reward};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -41,6 +42,13 @@ struct State {
     /// Tout le log a été relu pour cocher les récompenses de la route déjà obtenues.
     #[serde(default)]
     route_scan: bool,
+    /// Tout le log a été relu pour reconstituer les maps de l'endgame.
+    #[serde(default)]
+    maps_scan: bool,
+    /// Tout le log a été relu pour l'arbre de l'Atlas (après les maps : une relecture de plus,
+    /// sans rien recompter grâce au repère `seen` des maps).
+    #[serde(default)]
+    atlas_scan: bool,
     /// Joueurs vus rejoindre ou quitter la zone : des coéquipiers, jamais nos personnages.
     #[serde(default)]
     party: BTreeSet<String>,
@@ -88,12 +96,16 @@ pub struct Coach {
     /// Faux après une connexion non reconnue : on n'attribue ni zones ni progression
     /// au personnage précédent tant que le bon n'est pas identifié.
     attributing: bool,
+    /// Maps de chaque personnage, chargées à la demande (characters/<nom>/maps.json).
+    maps: BTreeMap<String, Book>,
+    /// Secondes à ajouter à l'heure UTC pour avoir l'heure du log (chronomètre des maps).
+    pub clock: Option<i64>,
 }
 
 impl Coach {
     pub fn new(steps: Vec<Step>, catalog: Catalog, path: PathBuf) -> Coach {
         let state = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        Coach { steps, route: route::load(), catalog, state, path, zone: None, area: None, last_act: None, deaths_here: 0, live: false, confirmed: false, awaiting_login: false, attributing: true }
+        Coach { steps, route: route::load(), catalog, state, path, zone: None, area: None, last_act: None, deaths_here: 0, live: false, confirmed: false, awaiting_login: false, attributing: true, maps: BTreeMap::new(), clock: None }
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -126,14 +138,89 @@ impl Coach {
         self.state.route_scan = true;
     }
 
+    /// Avant de relire tout le log : personne n'est actif et aucune dernière zone n'est connue,
+    /// chaque session sera attribuée par les lignes qui nomment le personnage, comme au tout
+    /// premier lancement (sinon le dernier personnage joué hériterait des maps de tous les
+    /// autres, deviné d'après sa dernière zone).
+    pub fn begin_replay(&mut self) {
+        self.state.active = None;
+        for c in self.state.characters.values_mut() {
+            c.last_area = None;
+        }
+    }
+
+    pub fn maps_scan_done(&self) -> bool {
+        self.state.maps_scan && self.state.atlas_scan
+    }
+
+    pub fn mark_maps_scan(&mut self) {
+        self.state.maps_scan = true;
+        self.state.atlas_scan = true;
+    }
+
+    fn book_path(&self, name: &str) -> PathBuf {
+        crate::paths::character_dir(self.path.parent().unwrap_or(std::path::Path::new(".")), name).join("maps.json")
+    }
+
+    /// Maps du personnage actif.
+    pub fn maps(&mut self) -> Option<&Book> {
+        let name = self.state.active.clone()?;
+        Some(self.book(&name))
+    }
+
+    fn book(&mut self, name: &str) -> &mut Book {
+        if !self.maps.contains_key(name) {
+            let book = Book::load(&self.book_path(name));
+            self.maps.insert(name.to_string(), book);
+        }
+        self.maps.get_mut(name).unwrap()
+    }
+
+    /// Waystone copié en jeu : il sera associé à la prochaine map du personnage actif.
+    pub fn set_waystone(&mut self, w: crate::mapping::Waystone) -> bool {
+        let Some(name) = self.state.active.clone() else { return false };
+        let now = self.log_now();
+        self.book(&name).set_waystone(w, now);
+        true
+    }
+
+    /// Heure actuelle dans l'heure du log, si on sait la déduire.
+    pub fn log_now(&self) -> Option<i64> {
+        Some(logwatch::utc_now() + self.clock?)
+    }
+
+    /// Suivi des maps du personnage actif (une fois le personnage de l'événement connu).
+    fn track_maps(&mut self, ev: &Event) {
+        // Un événement reçu en direct donne l'heure du log de maintenant.
+        if let (true, Event::Area { time, .. } | Event::Death { time, .. } | Event::Afk { time, .. }) = (self.live, ev) {
+            self.clock = Some(logwatch::clock_offset(*time, logwatch::utc_now()));
+        }
+        if !self.attributing {
+            return;
+        }
+        let Some(name) = self.state.active.clone() else { return };
+        match ev {
+            Event::Session => self.book(&name).session(),
+            Event::Area { code, level, seed, time, .. } => self.book(&name).area(code, *level, *seed, *time),
+            Event::Zone(zone) => self.book(&name).zone(zone),
+            Event::Death { character, time } if *character == name => self.book(&name).death(*time),
+            Event::Afk { on, time } => self.book(&name).afk(*on, *time),
+            Event::Atlas { id, name: node, allocated } => self.book(&name).atlas_node(id, node, *allocated),
+            Event::Device => self.book(&name).device(),
+            Event::Party { .. } => self.book(&name).party(),
+            _ => {}
+        }
+    }
+
     /// Pense-bête de la route : celles laissées en arrière, celles de l'acte en cours, puis
     /// celles de l'acte en cours déjà faites. Vide en endgame.
     /// Route jusqu'à l'acte en cours : ce qui reste à faire d'abord (actes passés, puis acte en
-    /// cours), puis ce qui est fait, coché.
+    /// cours), puis ce qui est fait, coché, de l'acte le plus récent au plus ancien.
     pub fn reminders(&self) -> (u32, Vec<(&Reward, bool)>) {
         let Some((_, c)) = self.character() else { return (0, vec![]) };
         let act = c.max_act;
-        let (done, todo): (Vec<_>, Vec<_>) = self.route.iter().filter(|r| r.act <= act).map(|r| (r, c.done.contains(&r.id))).partition(|(_, d)| *d);
+        let (mut done, todo): (Vec<_>, Vec<_>) = self.route.iter().filter(|r| r.act <= act).map(|r| (r, c.done.contains(&r.id))).partition(|(_, d)| *d);
+        done.sort_by_key(|(r, _)| std::cmp::Reverse(r.act));
         (act, todo.into_iter().chain(done).collect())
     }
 
@@ -240,6 +327,9 @@ impl Coach {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::write(&self.path, serde_json::to_string_pretty(&self.state).unwrap_or_default());
+        for (name, book) in &self.maps {
+            book.save(&self.book_path(name));
+        }
     }
 
     pub fn character(&self) -> Option<(&str, &CharState)> {
@@ -262,6 +352,12 @@ impl Coach {
     }
 
     pub fn handle(&mut self, ev: &Event) -> Vec<FeedLine> {
+        let out = self.react(ev);
+        self.track_maps(ev);
+        out
+    }
+
+    fn react(&mut self, ev: &Event) -> Vec<FeedLine> {
         match ev {
             Event::Session => {
                 self.zone = None;
@@ -272,7 +368,7 @@ impl Coach {
                 self.confirmed = false;
                 vec![line(FeedKind::Session, "Le jeu vient d'être lancé.".into(), vec![])]
             }
-            Event::Area { code, level, act } => {
+            Event::Area { code, level, act, .. } => {
                 if self.area.as_deref() != Some(code) {
                     self.deaths_here = 0;
                 }
@@ -343,7 +439,7 @@ impl Coach {
                 }
                 vec![line(FeedKind::Ascendancy, format!("{name} : ordre prévu → {}", planned.join(" > ")), vec![])]
             }
-            Event::Level { character, .. } | Event::Death { character } if self.state.party.contains(character) => vec![],
+            Event::Level { character, .. } | Event::Death { character, .. } if self.state.party.contains(character) => vec![],
             Event::Received { character: Some(name), .. } if self.state.party.contains(name) => vec![],
             Event::Level { character, class, level } => {
                 let mut out = self.identify(character, Some(class));
@@ -383,7 +479,7 @@ impl Coach {
                 }
                 out
             }
-            Event::Death { character } => {
+            Event::Death { character, .. } => {
                 // Seul un personnage déjà connu est identifié (pas un membre du groupe).
                 let mut out = if self.state.characters.contains_key(character) { self.identify(character, None) } else { vec![] };
                 if self.state.active.as_deref() != Some(character.as_str()) {
@@ -395,6 +491,7 @@ impl Coach {
                 out.push(line(FeedKind::Death, format!("Mort dans {zone}{extra}"), vec![]));
                 out
             }
+            Event::Afk { .. } | Event::Atlas { .. } | Event::Device => vec![],
             Event::Whisper { from, text } => vec![line(FeedKind::Whisper, format!("{from} : {text}"), vec![])],
             Event::Party { character } => {
                 if !self.state.party.insert(character.clone()) {
@@ -416,14 +513,10 @@ impl Coach {
     pub fn summary(&self) -> String {
         match self.character() {
             None => "personnage pas encore détecté (il faut une montée de niveau dans le journal)".into(),
-            Some((name, c)) => {
+            // Le nom et l'étape sont déjà dans les listes du haut.
+            Some((_, c)) => {
                 let zone = self.zone.as_deref().unwrap_or("zone inconnue");
-                let mut s = format!("{name} ({}) niveau {} — {zone}", c.class, c.level);
-                // Sans build, pas d'étape à afficher.
-                if let Some(step) = self.current_step() {
-                    s.push_str(&format!(" — étape du guide : {}", step.label));
-                }
-                s
+                format!("{} · niveau {} · {zone}", c.class, c.level)
             }
         }
     }
@@ -459,10 +552,10 @@ mod tests {
     fn act_change_switches_step_and_never_goes_back() {
         let mut c = coach();
         c.handle(&level(16));
-        let out = c.handle(&Event::Area { code: "G2_town".into(), level: 16, act: Some(2) });
+        let out = c.handle(&Event::Area { code: "G2_town".into(), level: 16, act: Some(2), seed: 1, time: 0 });
         assert_eq!(out[0].kind, FeedKind::Step);
         assert!(out[0].details.iter().any(|d| d.contains("Ice Nova")));
-        assert!(c.handle(&Event::Area { code: "G1_town".into(), level: 15, act: Some(1) }).is_empty());
+        assert!(c.handle(&Event::Area { code: "G1_town".into(), level: 15, act: Some(1), seed: 1, time: 0 }).is_empty());
         assert_eq!(c.current_step().unwrap().label, "Act 2");
     }
 
@@ -470,13 +563,13 @@ mod tests {
     fn deaths_counted_per_area() {
         let mut c = coach();
         c.handle(&level(5));
-        c.handle(&Event::Area { code: "G1_9".into(), level: 9, act: Some(1) });
+        c.handle(&Event::Area { code: "G1_9".into(), level: 9, act: Some(1), seed: 1, time: 0 });
         c.handle(&Event::Zone("Tomb".into()));
-        c.handle(&Event::Death { character: "Juliana".into() });
-        let out = c.handle(&Event::Death { character: "Juliana".into() });
+        c.handle(&Event::Death { character: "Juliana".into(), time: 0 });
+        let out = c.handle(&Event::Death { character: "Juliana".into(), time: 0 });
         assert!(out.iter().any(|l| l.head.contains("2e mort ici")), "{out:?}");
         // La mort d'un inconnu (membre du groupe) n'est pas comptée.
-        assert!(c.handle(&Event::Death { character: "Bob".into() }).is_empty());
+        assert!(c.handle(&Event::Death { character: "Bob".into(), time: 0 }).is_empty());
     }
 
     #[test]
@@ -491,22 +584,52 @@ mod tests {
         assert_eq!(c.character().unwrap().0, "Juliana");
         assert!(c.characters().iter().all(|(n, _, _)| n != "Bob"));
         c.handle(&Event::Level { character: "Bob".into(), class: "Warrior".into(), level: 6 });
-        c.handle(&Event::Death { character: "Bob".into() });
+        c.handle(&Event::Death { character: "Bob".into(), time: 0 });
         assert_eq!(c.character().unwrap().0, "Juliana");
+    }
+
+    /// Maps reconstituées depuis un vrai log, sur une copie de l'état :
+    /// POE2_LOG=…/Client.txt POE2_STATE=…/state.json cargo test real_log_maps -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_log_maps() {
+        let (Ok(log), Ok(state)) = (std::env::var("POE2_LOG"), std::env::var("POE2_STATE")) else { return };
+        let mut c = Coach::new(vec![], Catalog::default(), PathBuf::from(state));
+        c.begin_replay();
+        let mut was = None;
+        for ev in logwatch::read_all(std::path::Path::new(&log)) {
+            c.handle(&ev);
+            if c.state.active != was {
+                if std::env::var("POE2_TRACE").is_ok() {
+                    eprintln!("actif {:?} -> {:?} après {ev:?}", was, c.state.active);
+                }
+                was = c.state.active.clone();
+            }
+        }
+        let names: Vec<String> = c.maps.keys().cloned().collect();
+        for name in names {
+            let runs = &c.book(&name).runs;
+            let deaths: u32 = runs.iter().map(|r| r.deaths).sum();
+            eprintln!("{name} : {} maps, {deaths} morts", runs.len());
+            for r in runs.iter().rev().take(6) {
+                eprintln!("    jour {} {:<24} niv {} {:?} {:>5.1} min (AFK {:.1}) entrées {} morts {} {:?} {:?}", r.start / 86_400, r.code, r.level, r.kind, r.active_secs() as f64 / 60.0, r.afk_secs as f64 / 60.0, r.entries, r.deaths, r.zone, r.sub_areas);
+            }
+        }
+        c.save();
     }
 
     #[test]
     fn login_guesses_character_from_last_area_then_confirms() {
         let mut c = coach();
         c.handle(&Event::Session);
-        c.handle(&Event::Area { code: "G2_3".into(), level: 20, act: Some(2) });
+        c.handle(&Event::Area { code: "G2_3".into(), level: 20, act: Some(2), seed: 1, time: 0 });
         c.handle(&level(20)); // Juliana, vue en G2_3
         c.handle(&Event::Session);
-        c.handle(&Event::Area { code: "G1_town".into(), level: 15, act: Some(1) });
+        c.handle(&Event::Area { code: "G1_town".into(), level: 15, act: Some(1), seed: 1, time: 0 });
         c.handle(&Event::Level { character: "Bob".into(), class: "Monk".into(), level: 5 }); // Bob, vu en G1_town
         // Reconnexion : le jeu place le personnage en G2_3 → Juliana probable.
         c.handle(&Event::Session);
-        let out = c.handle(&Event::Area { code: "G2_3".into(), level: 20, act: Some(2) });
+        let out = c.handle(&Event::Area { code: "G2_3".into(), level: 20, act: Some(2), seed: 1, time: 0 });
         assert!(out.iter().any(|l| l.head.contains("Juliana") && l.head.contains("à confirmer")), "{out:?}");
         assert_eq!(c.character().unwrap().0, "Juliana");
         assert!(!c.confirmed);
