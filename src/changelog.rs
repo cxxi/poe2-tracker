@@ -2,6 +2,7 @@
 //! à jour et depuis le menu.
 
 const TEXT: &str = include_str!("../CHANGELOG.md");
+const TEXT_EN: &str = include_str!("../CHANGELOG.en.md");
 
 /// Une version et ses changements.
 pub struct Release {
@@ -9,10 +10,14 @@ pub struct Release {
     pub items: Vec<String>,
 }
 
-/// Toutes les versions, de la plus récente à la plus ancienne.
+/// Toutes les versions, de la plus récente à la plus ancienne, dans la langue de l'interface.
 pub fn releases() -> Vec<Release> {
+    parse(if crate::i18n::english() { TEXT_EN } else { TEXT })
+}
+
+fn parse(text: &str) -> Vec<Release> {
     let mut out: Vec<Release> = Vec::new();
-    for line in TEXT.lines() {
+    for line in text.lines() {
         if let Some(v) = line.strip_prefix("## ") {
             out.push(Release { version: v.trim().to_string(), items: Vec::new() });
         } else if let (Some(item), Some(r)) = (line.strip_prefix("- "), out.last_mut()) {
@@ -46,5 +51,13 @@ mod tests {
     fn current_version_is_documented() {
         let v = crate::updater::VERSION;
         assert!(releases().iter().any(|r| r.version == v), "CHANGELOG.md : section « ## {v} » manquante");
+    }
+
+    /// Les nouveautés en anglais suivent celles en français, version par version.
+    #[test]
+    fn english_changelog_matches() {
+        let (fr, en) = (parse(TEXT), parse(TEXT_EN));
+        let versions = |r: &[Release]| r.iter().map(|r| (r.version.clone(), r.items.len())).collect::<Vec<_>>();
+        assert_eq!(versions(&fr), versions(&en), "CHANGELOG.en.md ne suit pas CHANGELOG.md");
     }
 }

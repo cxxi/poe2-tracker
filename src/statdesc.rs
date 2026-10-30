@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 
 #[derive(Debug)]
-struct Variant {
-    ranges: Vec<(i64, i64)>,
-    text: String,
+pub struct Variant {
+    pub ranges: Vec<(i64, i64)>,
+    pub text: String,
     /// Transformation et numéro de la stat (à partir de 1).
     handlers: Vec<(String, usize)>,
 }
@@ -43,7 +43,7 @@ fn range(s: &str) -> (i64, i64) {
 }
 
 /// Une ligne de variante : plages, texte entre guillemets, transformations.
-fn variant(line: &str, n: usize) -> Option<Variant> {
+pub fn variant(line: &str, n: usize) -> Option<Variant> {
     let (head, rest) = line.split_once('"')?;
     let (text, tail) = rest.rsplit_once('"')?;
     let ranges: Vec<(i64, i64)> = head.split_whitespace().take(n).map(range).collect();

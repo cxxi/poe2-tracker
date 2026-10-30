@@ -20,7 +20,7 @@ const STATS: &str = "data/balance/stats.datc64";
 const DESCRIPTIONS: &str = "data/statdescriptions/atlas_stat_descriptions.csd";
 /// Inclus par celui de l'Atlas : effets communs aux maps.
 const MAP_DESCRIPTIONS: &str = "data/statdescriptions/map_stat_descriptions.csd";
-const CACHE: &str = "atlas_tree_v1.json";
+const CACHE: &str = "atlas_tree_v2.json";
 
 /// Rayons des orbites (mêmes que l'arbre des talents, constantes de Path of Building).
 const RADII: [f32; 10] = [0.0, 82.0, 162.0, 335.0, 493.0, 662.0, 846.0, 251.0, 1080.0, 1322.0];
@@ -51,6 +51,23 @@ pub struct AtlasNode {
     /// Nœuds reliés et rayon d'arc signé de la liaison (0 : droite).
     pub links: Vec<(usize, f32)>,
     pub stats: Vec<String>,
+    /// Nom et effets en anglais (`name` et `stats` sont en français quand le jeu l'a).
+    #[serde(default)]
+    pub name_en: String,
+    #[serde(default)]
+    pub stats_en: Vec<String>,
+}
+
+impl AtlasNode {
+    /// Nom dans la langue de l'interface.
+    pub fn name_text(&self) -> &str {
+        if crate::i18n::english() { &self.name_en } else { &self.name }
+    }
+
+    /// Effets dans la langue de l'interface.
+    pub fn stats_text(&self) -> &[String] {
+        if crate::i18n::english() { &self.stats_en } else { &self.stats }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -119,9 +136,12 @@ fn key_of(index: &bundles::Index) -> String {
 
 fn build(index: &bundles::Index) -> Result<AtlasTree, String> {
     let read = |f: &str| index.read(f).map_err(|e| e.to_string());
-    let graph = parse_graph(&read(GRAPH)?).ok_or("graphe de l'Atlas illisible")?;
-    let passives = Dat::new(read(PASSIVES_FR).or_else(|_| read(PASSIVES))?).ok_or("table des passifs illisible")?;
-    let stats = Dat::new(read(STATS)?).ok_or("table des stats illisible")?;
+    let graph = parse_graph(&read(GRAPH)?).ok_or(tr!("graphe de l'Atlas illisible"))?;
+    // Noms en français quand le jeu les a, et en anglais.
+    let passives_en = Dat::new(read(PASSIVES)?).ok_or(tr!("table des passifs illisible"))?;
+    let passives_fr = read(PASSIVES_FR).ok().and_then(Dat::new);
+    let passives = passives_fr.as_ref().unwrap_or(&passives_en);
+    let stats = Dat::new(read(STATS)?).ok_or(tr!("table des stats illisible"))?;
     let utf16 = |raw: Vec<u8>| {
         let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         String::from_utf16_lossy(&units).trim_start_matches('\u{feff}').to_string()
@@ -132,10 +152,12 @@ fn build(index: &bundles::Index) -> Result<AtlasTree, String> {
     // Lignes des passifs de l'Atlas par identifiant de graphe.
     let rows: std::collections::HashMap<u16, usize> =
         (0..passives.rows).filter(|r| passives.string(*r, COL_ID).starts_with("Atlas")).map(|r| (passives.u16(r, COL_GRAPH), r)).collect();
+    let rows_en: std::collections::HashMap<u16, usize> =
+        (0..passives_en.rows).filter(|r| passives_en.string(*r, COL_ID).starts_with("Atlas")).map(|r| (passives_en.u16(r, COL_GRAPH), r)).collect();
     let total: usize = graph.iter().map(|(_, n)| n.len()).sum();
     let found = graph.iter().flat_map(|(_, n)| n).filter(|n| rows.contains_key(&(n.graph_id as u16))).count();
     if found * 10 < total * 9 {
-        return Err(format!("passifs de l'Atlas introuvables ({found} sur {total}) : le format des fichiers du jeu a changé"));
+        return Err(tr!("passifs de l'Atlas introuvables ({found} sur {total}) : le format des fichiers du jeu a changé", found, total));
     }
     let mut nodes = Vec::with_capacity(total);
     let mut by_graph = std::collections::HashMap::new();
@@ -166,6 +188,8 @@ fn build(index: &bundles::Index) -> Result<AtlasTree, String> {
                 orbit: n.orbit,
                 links: vec![],
                 stats: descriptions.describe(&values, "French"),
+                name_en: rows_en.get(&(n.graph_id as u16)).map(|r| passives_en.string(*r, COL_NAME)).unwrap_or_default(),
+                stats_en: descriptions.describe(&values, "English"),
             });
         }
     }
@@ -193,7 +217,7 @@ fn build(index: &bundles::Index) -> Result<AtlasTree, String> {
 
 /// Arbre depuis le cache, ou relu dans les fichiers du jeu s'ils ont changé.
 pub fn load(cache_dir: &Path, game_dir: &Path) -> Result<AtlasTree, String> {
-    let index = bundles::Index::open(game_dir).map_err(|e| format!("fichiers du jeu illisibles : {e}"))?;
+    let index = bundles::Index::open(game_dir).map_err(|e| tr!("fichiers du jeu illisibles : {e}", e))?;
     let key = key_of(&index);
     let file = cache_dir.join(CACHE);
     if let Some(tree) = std::fs::read_to_string(&file).ok().and_then(|s| serde_json::from_str::<AtlasTree>(&s).ok()).filter(|t| t.key == key) {
@@ -329,11 +353,11 @@ impl AtlasView {
             let r = (radius(n.kind) * self.zoom).clamp(1.5, 40.0);
             painter.circle_stroke(to_screen(Pos2::new(n.x, n.y)), r + 4.0, Stroke::new(1.5_f32, Color32::WHITE));
             let on = taken.contains(&i);
-            let name = if n.name.is_empty() { "Départ" } else { n.name.as_str() };
-            let note = (n.kind != 5).then_some(if on { "Posé" } else { "Pas posé" });
-            resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, name, GOLD, None, &n.stats, note));
+            let name = if n.name_text().is_empty() { tr!("Départ") } else { n.name_text() };
+            let note = (n.kind != 5).then_some(if on { tr!("Posé") } else { tr!("Pas posé") });
+            resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, name, GOLD, None, n.stats_text(), note));
         }
-        let legend = format!("{} passifs posés · glisser : déplacer · molette : zoom · double-clic : recadrer", allocated.len());
+        let legend = tr!("{n} passifs posés · glisser : déplacer · molette : zoom · double-clic : recadrer", n = allocated.len());
         let galley = painter.layout_no_wrap(legend, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);
         let pos = rect.left_top() + Vec2::new(8.0, 8.0);
         painter.rect_filled(Rect::from_min_size(pos, galley.size()).expand(5.0), 3.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));

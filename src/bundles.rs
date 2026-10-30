@@ -28,7 +28,7 @@ impl<'a> Reader<'a> {
         Reader { data, pos: 0 }
     }
     fn bytes(&mut self, n: usize) -> Res<&'a [u8]> {
-        let s = self.data.get(self.pos..self.pos + n).ok_or("fin de données inattendue")?;
+        let s = self.data.get(self.pos..self.pos + n).ok_or(tr!("fin de données inattendue"))?;
         self.pos += n;
         Ok(s)
     }
@@ -129,7 +129,7 @@ impl Source {
             let files = ggpk_bundles(&ggpk)?;
             return Ok(Source::Ggpk(ggpk, files));
         }
-        Err(format!("ni Bundles2 ni Content.ggpk dans {}", game_dir.display()).into())
+        Err(tr!("ni Bundles2 ni Content.ggpk dans {dir}", dir = game_dir.display()).into())
     }
 
     fn read(&self, name: &str) -> Res<Vec<u8>> {
@@ -140,7 +140,7 @@ impl Source {
                 Ok(raw)
             }
             Source::Ggpk(path, files) => {
-                let (offset, len) = *files.get(&name.to_lowercase()).ok_or_else(|| format!("absent de Content.ggpk : Bundles2/{name}"))?;
+                let (offset, len) = *files.get(&name.to_lowercase()).ok_or_else(|| tr!("absent de Content.ggpk : Bundles2/{name}", name))?;
                 let mut f = File::open(path)?;
                 f.seek(SeekFrom::Start(offset))?;
                 let mut raw = vec![0u8; len as usize];
@@ -201,7 +201,7 @@ fn ggpk_bundles(path: &Path) -> Res<HashMap<String, (u64, u64)>> {
     let mut f = File::open(path)?;
     let head = read_at(&mut f, 0, 28)?;
     if &head[4..8] != b"GGPK" {
-        return Err("Content.ggpk : en-tête GGPK absent".into());
+        return Err(tr!("Content.ggpk : en-tête GGPK absent").into());
     }
     let version = u32::from_le_bytes(head[8..12].try_into()?);
     let wide = version >= 4;
@@ -213,11 +213,11 @@ fn ggpk_bundles(path: &Path) -> Res<HashMap<String, (u64, u64)>> {
             Ok(GgpkRecord::Dir { children, .. }) => Some(children),
             _ => None,
         })
-        .ok_or("Content.ggpk : racine introuvable")?;
+        .ok_or(tr!("Content.ggpk : racine introuvable"))?;
     let bundles = children
         .into_iter()
         .find(|&c| matches!(ggpk_record(&mut f, c, wide), Ok(GgpkRecord::Dir { ref name, .. }) if name.eq_ignore_ascii_case("Bundles2")))
-        .ok_or("Content.ggpk : pas de dossier Bundles2")?;
+        .ok_or(tr!("Content.ggpk : pas de dossier Bundles2"))?;
     let mut files = HashMap::new();
     let mut stack = vec![(bundles, String::new())];
     while let Some((offset, prefix)) = stack.pop() {
@@ -296,7 +296,7 @@ impl Index {
 
     /// Comme `read`, en gardant les derniers bundles décompressés (plusieurs fichiers d'un même bundle).
     pub fn read_cached(&self, path: &str, cache: &mut Vec<(u32, Vec<u8>)>) -> Res<Vec<u8>> {
-        let e = self.entry(path).ok_or_else(|| format!("fichier absent de l'index : {path}"))?;
+        let e = self.entry(path).ok_or_else(|| tr!("fichier absent de l'index : {path}", path))?;
         if let Some(i) = cache.iter().position(|(b, _)| *b == e.bundle) {
             let (_, data) = &cache[i];
             return Ok(data[e.offset as usize..(e.offset + e.size) as usize].to_vec());
@@ -312,7 +312,7 @@ impl Index {
     }
 
     pub fn read(&self, path: &str) -> Res<Vec<u8>> {
-        let e = self.entry(path).ok_or_else(|| format!("fichier absent de l'index : {path}"))?;
+        let e = self.entry(path).ok_or_else(|| tr!("fichier absent de l'index : {path}", path))?;
         let name = &self.bundles[e.bundle as usize];
         let data = decompress_bundle(&self.source.read(&format!("{name}.bundle.bin"))?)?;
         Ok(data[e.offset as usize..(e.offset + e.size) as usize].to_vec())
@@ -334,7 +334,7 @@ fn read_paths(data: &[u8], out: &mut Vec<String>) -> Res<()> {
             continue;
         }
         let start = r.pos;
-        let end = data[start..].iter().position(|b| *b == 0).map(|i| start + i).ok_or("chaîne non terminée")?;
+        let end = data[start..].iter().position(|b| *b == 0).map(|i| start + i).ok_or(tr!("chaîne non terminée"))?;
         let mut s = String::from_utf8_lossy(&data[start..end]).into_owned();
         r.pos = end + 1;
         if let Some(prefix) = bases.get(index - 1) {
@@ -353,7 +353,7 @@ fn read_paths(data: &[u8], out: &mut Vec<String>) -> Res<()> {
 pub fn decode_dds(data: &[u8]) -> Res<image::RgbaImage> {
     let mut r = Reader::new(data);
     if r.bytes(4)? != b"DDS " {
-        return Err("pas un fichier DDS".into());
+        return Err(tr!("pas un fichier DDS").into());
     }
     let header = r.bytes(124)?;
     let u32_at = |o: usize| u32::from_le_bytes(header[o..o + 4].try_into().unwrap());
@@ -371,11 +371,11 @@ pub fn decode_dds(data: &[u8]) -> Res<image::RgbaImage> {
                 77 | 78 => ("bc3", 16),
                 98 | 99 => ("bc7", 16),
                 87 | 28 | 29 => ("rgba", 0),
-                other => return Err(format!("format DXGI {other} non pris en charge").into()),
+                other => return Err(tr!("format DXGI {other} non pris en charge", other).into()),
             }
         }
         _ if u32_at(84) == 32 => ("rgba", 0), // non compressé 32 bits
-        other => return Err(format!("format {:?} non pris en charge", String::from_utf8_lossy(other)).into()),
+        other => return Err(tr!("format {other} non pris en charge", other = format!("{:?}", String::from_utf8_lossy(other))).into()),
     };
     let mut img = image::RgbaImage::new(width as u32, height as u32);
     if format == "rgba" {

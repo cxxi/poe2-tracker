@@ -14,31 +14,31 @@ use crate::item::{Item, Rarity};
 /// (clé, libellé, motif, poids). Le poids traduit l'importance pour un lanceur de sorts de
 /// froid ; il sert à trancher, les écarts bruts restent affichés.
 const STATS: &[(&str, &str, &str, f64)] = &[
-    ("spell_lvl", "niv. sorts", r"^\+(\d+) to Level of all Spell Skills$", 10.0),
-    ("cold_lvl", "niv. sorts de froid", r"^\+(\d+) to Level of all Cold Spell Skills$", 8.0),
-    ("spell_dmg", "% dégâts de sort", r"^(\d+)% increased Spell Damage$", 0.15),
-    ("cold_dmg", "% dégâts de froid", r"^(\d+)% increased Cold Damage$", 0.12),
-    ("extra_dmg", "% dégâts en plus", r"^Gain (\d+)% of Damage as Extra \w+ Damage$", 0.3),
-    ("cast_speed", "% vitesse d'incantation", r"^(\d+)% increased Cast Speed$", 0.6),
-    ("spell_crit", "% critique des sorts", r"^(\d+)% increased Critical Hit Chance for Spells$", 0.08),
-    ("crit_dmg", "% dégâts critiques", r"^(\d+)% increased Critical Damage Bonus$", 0.08),
-    ("life", "vie", r"^\+(\d+) to maximum Life$", 0.12),
-    ("mana", "mana", r"^\+(\d+) to maximum Mana$", 0.04),
-    ("spirit", "esprit", r"^\+(\d+) to Spirit$", 0.3),
-    ("fire_res", "% rés. feu", r"^\+(\d+)% to Fire Resistance$", 0.15),
-    ("cold_res", "% rés. froid", r"^\+(\d+)% to Cold Resistance$", 0.15),
-    ("light_res", "% rés. foudre", r"^\+(\d+)% to Lightning Resistance$", 0.15),
-    ("chaos_res", "% rés. chaos", r"^\+(\d+)% to Chaos Resistance$", 0.1),
-    ("all_res", "% toutes rés.", r"^\+(\d+)% to all Elemental Resistances$", 0.45),
-    ("move", "% vitesse de déplacement", r"^(\d+)% increased Movement Speed$", 1.2),
-    ("int", "intelligence", r"^\+(\d+) to Intelligence$", 0.04),
-    ("str", "force", r"^\+(\d+) to Strength$", 0.03),
-    ("dex", "dextérité", r"^\+(\d+) to Dexterity$", 0.02),
-    ("all_attr", "tous attributs", r"^\+(\d+) to all Attributes$", 0.09),
-    ("mana_regen", "% régén. mana", r"^(\d+)% increased Mana Regeneration Rate$", 0.05),
+    ("spell_lvl", tkey!("niv. sorts"), r"^\+(\d+) to Level of all Spell Skills$", 10.0),
+    ("cold_lvl", tkey!("niv. sorts de froid"), r"^\+(\d+) to Level of all Cold Spell Skills$", 8.0),
+    ("spell_dmg", tkey!("% dégâts de sort"), r"^(\d+)% increased Spell Damage$", 0.15),
+    ("cold_dmg", tkey!("% dégâts de froid"), r"^(\d+)% increased Cold Damage$", 0.12),
+    ("extra_dmg", tkey!("% dégâts en plus"), r"^Gain (\d+)% of Damage as Extra \w+ Damage$", 0.3),
+    ("cast_speed", tkey!("% vitesse d'incantation"), r"^(\d+)% increased Cast Speed$", 0.6),
+    ("spell_crit", tkey!("% critique des sorts"), r"^(\d+)% increased Critical Hit Chance for Spells$", 0.08),
+    ("crit_dmg", tkey!("% dégâts critiques"), r"^(\d+)% increased Critical Damage Bonus$", 0.08),
+    ("life", tkey!("vie"), r"^\+(\d+) to maximum Life$", 0.12),
+    ("mana", tkey!("mana"), r"^\+(\d+) to maximum Mana$", 0.04),
+    ("spirit", tkey!("esprit"), r"^\+(\d+) to Spirit$", 0.3),
+    ("fire_res", tkey!("% rés. feu"), r"^\+(\d+)% to Fire Resistance$", 0.15),
+    ("cold_res", tkey!("% rés. froid"), r"^\+(\d+)% to Cold Resistance$", 0.15),
+    ("light_res", tkey!("% rés. foudre"), r"^\+(\d+)% to Lightning Resistance$", 0.15),
+    ("chaos_res", tkey!("% rés. chaos"), r"^\+(\d+)% to Chaos Resistance$", 0.1),
+    ("all_res", tkey!("% toutes rés."), r"^\+(\d+)% to all Elemental Resistances$", 0.45),
+    ("move", tkey!("% vitesse de déplacement"), r"^(\d+)% increased Movement Speed$", 1.2),
+    ("int", tkey!("intelligence"), r"^\+(\d+) to Intelligence$", 0.04),
+    ("str", tkey!("force"), r"^\+(\d+) to Strength$", 0.03),
+    ("dex", tkey!("dextérité"), r"^\+(\d+) to Dexterity$", 0.02),
+    ("all_attr", tkey!("tous attributs"), r"^\+(\d+) to all Attributes$", 0.09),
+    ("mana_regen", tkey!("% régén. mana"), r"^(\d+)% increased Mana Regeneration Rate$", 0.05),
 ];
 const DEFENCE: &[(&str, &str, f64)] =
-    &[("Energy Shield", "bouclier d'énergie", 0.08), ("Armour", "armure", 0.01), ("Evasion Rating", "évasion", 0.01)];
+    &[("Energy Shield", tkey!("bouclier d'énergie"), 0.08), ("Armour", tkey!("armure"), 0.01), ("Evasion Rating", tkey!("évasion"), 0.01)];
 
 static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| STATS.iter().map(|s| Regex::new(s.2).unwrap()).collect());
 
@@ -57,7 +57,7 @@ fn weights() -> impl Iterator<Item = f64> {
 }
 
 fn labels() -> impl Iterator<Item = &'static str> {
-    STATS.iter().map(|s| s.1).chain(DEFENCE.iter().map(|d| d.1))
+    STATS.iter().map(|s| crate::i18n::tr(s.1)).chain(DEFENCE.iter().map(|d| crate::i18n::tr(d.1)))
 }
 
 pub fn score_stats(st: &[f64]) -> f64 {
@@ -111,7 +111,7 @@ impl Comparison {
 }
 
 fn fmt_num(x: f64) -> String {
-    format!("{x}").replace('.', ",")
+    crate::i18n::decimal(format!("{x}"))
 }
 
 fn ratio_verdict(new: f64, old: f64) -> Verdict {
@@ -145,22 +145,22 @@ fn compare_flask(it: &Item, worn: &Item) -> (Verdict, Vec<Delta>) {
     let get = |i: &Item, k: &str| i.props.get(k).copied().unwrap_or(0.0);
     let (r_new, r_old) = (get(it, "recover"), get(worn, "recover"));
     let mut d = vec![delta(
-        format!("rend {} au lieu de {}{}", fmt_num(r_new), fmt_num(r_old), pct(r_new, r_old)),
+        tr!("rend {new} au lieu de {old}{pct}", new = fmt_num(r_new), old = fmt_num(r_old), pct = pct(r_new, r_old)),
         (r_new - r_old).signum() as i8,
     )];
     let (t_new, t_old) = (get(it, "recover_time"), get(worn, "recover_time"));
     if t_new != t_old {
-        d.push(delta(format!("en {} s au lieu de {} s", fmt_num(t_new), fmt_num(t_old)), (t_old - t_new).signum() as i8));
+        d.push(delta(tr!("en {new} s au lieu de {old} s", new = fmt_num(t_new), old = fmt_num(t_old)), (t_old - t_new).signum() as i8));
     }
     let (u_new, u_old) = (uses(it), uses(worn));
     if u_new != u_old {
-        d.push(delta(format!("{u_new} utilisations au lieu de {u_old}"), (u_new - u_old).signum() as i8));
+        d.push(delta(tr!("{new} utilisations au lieu de {old}", new = u_new, old = u_old), (u_new - u_old).signum() as i8));
     }
     for m in it.mods.iter().filter(|m| !worn.mods.contains(m)) {
-        d.push(delta(format!("en plus : {m}"), 0));
+        d.push(delta(tr!("en plus : {m}", m), 0));
     }
     for m in worn.mods.iter().filter(|m| !it.mods.contains(m)) {
-        d.push(delta(format!("en moins : {m}"), 0));
+        d.push(delta(tr!("en moins : {m}", m), 0));
     }
     let verdict = match ratio_verdict(r_new, r_old) {
         Verdict::Equal => {
@@ -176,13 +176,13 @@ fn compare_charm(it: &Item, worn: &Item) -> (Verdict, Vec<Delta>) {
     let dur = |i: &Item| i.props.get("duration").copied().unwrap_or(1.0);
     let mut d = Vec::new();
     if dur(it) != dur(worn) {
-        d.push(delta(format!("dure {} s au lieu de {} s", fmt_num(dur(it)), fmt_num(dur(worn))), (dur(it) - dur(worn)).signum() as i8));
+        d.push(delta(tr!("dure {new} s au lieu de {old} s", new = fmt_num(dur(it)), old = fmt_num(dur(worn))), (dur(it) - dur(worn)).signum() as i8));
     }
     if uses(it) != uses(worn) {
-        d.push(delta(format!("{} utilisations au lieu de {}", uses(it), uses(worn)), (uses(it) - uses(worn)).signum() as i8));
+        d.push(delta(tr!("{new} utilisations au lieu de {old}", new = uses(it), old = uses(worn)), (uses(it) - uses(worn)).signum() as i8));
     }
     for m in it.mods.iter().filter(|m| !worn.mods.contains(m)) {
-        d.push(delta(format!("en plus : {m}"), 1));
+        d.push(delta(tr!("en plus : {m}", m), 1));
     }
     let score = |i: &Item| dur(i) * uses(i).max(1.0);
     (ratio_verdict(score(it), score(worn)), d)
@@ -217,7 +217,7 @@ fn pct(new: f64, old: f64) -> String {
         return String::new();
     }
     let p = ((new / old - 1.0) * 100.0).round();
-    format!(" ({}{} %)", if p >= 0.0 { "+" } else { "−" }, p.abs())
+    format!(" ({}{})", if p >= 0.0 { "+" } else { "−" }, crate::i18n::percent(p.abs()))
 }
 
 /// Lignes « DPS » en tête du diagnostic et verdict imposé par les dégâts de l'arme : c'est la
@@ -241,11 +241,11 @@ fn weapon_rows(it: &Item, refs: &[&Item], focus: (f64, f64)) -> (Option<Verdict>
     let olds: Vec<Dps> = refs.iter().filter_map(|i| weapon_dps(i)).collect();
     let r1 = |x: f64| fmt_num((x * 10.0).round() / 10.0);
     if olds.is_empty() {
-        return (None, vec![delta(format!("DPS de l'arme : {}", r1(new.total())), 0)]);
+        return (None, vec![delta(tr!("DPS de l'arme : {dps}", dps = r1(new.total())), 0)]);
     }
     let old = olds.iter().fold(Dps::default(), |a, d| Dps { phys: a.phys + d.phys, ele: a.ele + d.ele });
     let mut rows = vec![delta(
-        format!("DPS {} au lieu de {}{}", r1(new.total()), r1(old.total()), pct(new.total(), old.total())),
+        tr!("DPS {new} au lieu de {old}{pct}", new = r1(new.total()), old = r1(old.total()), pct = pct(new.total(), old.total())),
         (new.total() - old.total()).signum() as i8,
     )];
     if new.phys > 0.0 || old.phys > 0.0 {
@@ -255,17 +255,17 @@ fn weapon_rows(it: &Item, refs: &[&Item], focus: (f64, f64)) -> (Option<Verdict>
         };
         let worn_range = refs.iter().find(|i| weapon_dps(i).is_some()).map(|i| range(i)).unwrap_or_default();
         rows.push(delta(
-            format!("physique {} au lieu de {} (DPS {} / {})", range(it), worn_range, r1(new.phys), r1(old.phys)),
+            tr!("physique {new} au lieu de {old} (DPS {new_dps} / {old_dps})", new = range(it), old = worn_range, new_dps = r1(new.phys), old_dps = r1(old.phys)),
             (new.phys - old.phys).signum() as i8,
         ));
     }
     if (new.ele - old.ele).abs() > 0.05 {
-        rows.push(delta(format!("élémentaire DPS {} au lieu de {}", r1(new.ele), r1(old.ele)), (new.ele - old.ele).signum() as i8));
+        rows.push(delta(tr!("élémentaire DPS {new} au lieu de {old}", new = r1(new.ele), old = r1(old.ele)), (new.ele - old.ele).signum() as i8));
     }
     let weighted = |d: &Dps| d.phys * focus.0 + d.ele * focus.1;
     if focus != (1.0, 1.0) {
-        let what = if focus.0 > focus.1 { "physiques" } else { "élémentaires" };
-        rows.push(delta(format!("le build mise sur les dégâts {what} : l'autre partie compte peu"), 0));
+        let text = if focus.0 > focus.1 { tr!("le build mise sur les dégâts physiques : l'autre partie compte peu") } else { tr!("le build mise sur les dégâts élémentaires : l'autre partie compte peu") };
+        rows.push(delta(text.into(), 0));
     }
     let verdict = match ratio_verdict(weighted(&new), weighted(&old)) {
         Verdict::Equal | Verdict::Unknown => None,
@@ -433,7 +433,7 @@ pub fn check_targets(it: &Item, step: &Step, slot: Slot, base_defences: impl Fn(
             } else {
                 Have::Missing
             };
-            out.push((format!("≈ {expected} {prop} au total"), state));
+            out.push((tr!("≈ {expected} {prop} au total", expected, prop), state));
         }
     }
     out.extend(step.targets_for(slot).filter(|t| !local.contains(&t.template.as_str())).map(|t| {
@@ -508,68 +508,79 @@ enum Fit {
     Off(String),
 }
 
-/// Nom français d'une classe d'objet, avec son article indéfini (« une baguette »).
-fn class_label(class: &str) -> (&str, &str) {
-    match class {
-        "Staff" => ("un", "bâton"),
-        "Warstaff" => ("un", "quarterstaff"),
-        "Wand" => ("une", "baguette"),
-        "Sceptre" => ("un", "sceptre"),
-        "Focus" => ("un", "focus"),
-        "Shield" => ("un", "bouclier"),
-        "Buckler" => ("une", "targe"),
-        "Bow" => ("un", "arc"),
-        "Crossbow" => ("une", "arbalète"),
-        "Quiver" => ("un", "carquois"),
-        "Spear" => ("une", "lance"),
-        "Talisman" => ("un", "talisman"),
-        "Dagger" => ("une", "dague"),
-        "Claw" => ("une", "griffe"),
-        "Flail" => ("un", "fléau"),
-        "One Hand Mace" => ("une", "masse à une main"),
-        "Two Hand Mace" => ("une", "masse à deux mains"),
-        "One Hand Sword" => ("une", "épée à une main"),
-        "Two Hand Sword" => ("une", "épée à deux mains"),
-        "One Hand Axe" => ("une", "hache à une main"),
-        "Two Hand Axe" => ("une", "hache à deux mains"),
+/// Nom d'une classe d'objet dans la langue, avec son article indéfini (« une baguette »), et
+/// seul (« baguette »).
+fn class_label(class: &str) -> (String, String) {
+    let (article, name) = match class {
+        "Staff" => ("un", tkey!("bâton")),
+        "Warstaff" => ("un", tkey!("quarterstaff")),
+        "Wand" => ("une", tkey!("baguette")),
+        "Sceptre" => ("un", tkey!("sceptre")),
+        "Focus" => ("un", tkey!("focus")),
+        "Shield" => ("un", tkey!("bouclier")),
+        "Buckler" => ("une", tkey!("targe")),
+        "Bow" => ("un", tkey!("arc")),
+        "Crossbow" => ("une", tkey!("arbalète")),
+        "Quiver" => ("un", tkey!("carquois")),
+        "Spear" => ("une", tkey!("lance")),
+        "Talisman" => ("un", tkey!("talisman")),
+        "Dagger" => ("une", tkey!("dague")),
+        "Claw" => ("une", tkey!("griffe")),
+        "Flail" => ("un", tkey!("fléau")),
+        "One Hand Mace" => ("une", tkey!("masse à une main")),
+        "Two Hand Mace" => ("une", tkey!("masse à deux mains")),
+        "One Hand Sword" => ("une", tkey!("épée à une main")),
+        "Two Hand Sword" => ("une", tkey!("épée à deux mains")),
+        "One Hand Axe" => ("une", tkey!("hache à une main")),
+        "Two Hand Axe" => ("une", tkey!("hache à deux mains")),
         c => ("un", c),
-    }
+    };
+    let name = crate::i18n::tr_dyn(name).to_string();
+    let article = match crate::i18n::english() {
+        true if name.starts_with(['a', 'e', 'i', 'o', 'u']) => "an",
+        true => "a",
+        false => article,
+    };
+    (format!("{article} {name}"), name)
 }
 
 fn element_label(element: &str) -> &str {
-    match element {
-        "fire" => "feu",
-        "cold" => "froid",
-        "lightning" => "foudre",
-        "chaos" => "chaos",
-        "physical" => "physique",
+    crate::i18n::tr_dyn(match element {
+        "fire" => tkey!("feu"),
+        "cold" => tkey!("froid"),
+        "lightning" => tkey!("foudre"),
+        "chaos" => tkey!("chaos"),
+        "physical" => tkey!("physique"),
         e => e,
-    }
+    })
 }
 
-const DEFENCE_LABELS: [&str; 3] = ["armure", "évasion", "bouclier d'énergie"];
+const DEFENCE_LABELS: [&str; 3] = [tkey!("armure"), tkey!("évasion"), tkey!("bouclier d'énergie")];
 
 fn defence_kinds(d: &[f64; 3]) -> Vec<usize> {
     (0..3).filter(|i| d[*i] > 0.0).collect()
 }
 
 fn defence_text(kinds: &[usize]) -> String {
-    kinds.iter().map(|i| DEFENCE_LABELS[*i]).collect::<Vec<_>>().join(" / ")
+    kinds.iter().map(|i| crate::i18n::tr(DEFENCE_LABELS[*i])).collect::<Vec<_>>().join(" / ")
 }
 
 /// Classe d'arme, élément d'un bâton ou d'une baguette, type de défense d'une pièce d'armure.
 fn base_fit(have: &BaseMeta, want: &BaseMeta, want_name: &str) -> Fit {
-    let (want_article, want_class) = class_label(&want.class);
+    let (want_a, want_class) = class_label(&want.class);
     if have.class != want.class {
-        let (article, class) = class_label(&have.class);
-        return Fit::Off(format!("le build vise {want_article} {want_class} ({want_name}), pas {article} {class}"));
+        let (have_a, _) = class_label(&have.class);
+        return Fit::Off(tr!("le build vise {want} ({name}), pas {have}", want = want_a, name = want_name, have = have_a));
     }
     if let (Some(h), Some(w)) = (&have.element, &want.element) {
         if h != w {
-            return Fit::Off(format!(
-                "{want_class} de {} : le build vise {want_article} {want_class} de {} ({want_name}), seul à avoir les mods de sorts de cet élément",
-                element_label(h),
-                element_label(w)
+            return Fit::Off(tr!(
+                "{class} de {have} : le build vise {want_a} de {want} ({name}), seul à avoir les mods de sorts de cet élément",
+                class = want_class,
+                have = element_label(h),
+                want_a,
+                want = element_label(w),
+                name = want_name
             ));
         }
     }
@@ -578,9 +589,9 @@ fn base_fit(have: &BaseMeta, want: &BaseMeta, want_name: &str) -> Fit {
         return Fit::Ok;
     }
     if !h.iter().any(|k| w.contains(k)) {
-        return Fit::Off(format!("base {} : le build vise {} ({want_name})", defence_text(&h), defence_text(&w)));
+        return Fit::Off(tr!("base {have} : le build vise {want} ({name})", have = defence_text(&h), want = defence_text(&w), name = want_name));
     }
-    Fit::Partial(format!("base {} : le build vise {} ({want_name})", defence_text(&h), defence_text(&w)))
+    Fit::Partial(tr!("base {have} : le build vise {want} ({name})", have = defence_text(&h), want = defence_text(&w), name = want_name))
 }
 
 /// Compare `it` à ce qui est suivi. `None` si l'objet ne se porte pas (devise…).
@@ -602,7 +613,7 @@ pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_bas
             against: vec![slot],
             against_name: it.title(),
             deltas: vec![],
-            notes: vec![format!("c'est ta pièce suivie ({})", slot.label().to_lowercase())],
+            notes: vec![tr!("c'est ta pièce suivie ({slot})", slot = slot.label().to_lowercase())],
             basis: String::new(),
         });
     }
@@ -631,7 +642,7 @@ pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_bas
                 None => {
                     let names: Vec<String> = worn_charms.iter().map(|(_, c)| c.base.clone()).collect();
                     return Some(Comparison::unknown(
-                        format!("nouveau type de charme (tu portes : {})", names.join(", ")),
+                        tr!("nouveau type de charme (tu portes : {charms})", charms = names.join(", ")),
                         worn_charms.iter().map(|(s, _)| *s).collect(),
                     ));
                 }
@@ -647,13 +658,13 @@ pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_bas
     let two_handed = gear.item(Slot::Weapon.in_set(set)).is_some_and(|w| gear::kind_of(&w.item_class) == Some(Kind::TwoHanded));
     if refs.is_empty() && target == Slot::Offhand.in_set(set) && two_handed {
         return Some(Comparison::unknown(
-            "ta main gauche est prise par ton arme à deux mains : il faudrait aussi changer d'arme".into(),
+            tr!("ta main gauche est prise par ton arme à deux mains : il faudrait aussi changer d'arme").into(),
             vec![Slot::Weapon.in_set(set)],
         ));
     }
     if refs.is_empty() {
         return Some(Comparison::unknown(
-            format!("rien de suivi en {} : Ctrl+Alt+C sur ta pièce pour l'enregistrer", target.label().to_lowercase()),
+            tr!("rien de suivi en {slot} : Ctrl+Alt+C sur ta pièce pour l'enregistrer", slot = target.label().to_lowercase()),
             vec![],
         ));
     }
@@ -661,7 +672,7 @@ pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_bas
     let against_name = refs.iter().map(|(_, i)| i.title()).collect::<Vec<_>>().join(" + ");
     let mut notes = Vec::new();
     if it.rarity == Rarity::Unique || refs.iter().any(|(_, i)| i.rarity == Rarity::Unique) {
-        notes.push("effets d'uniques non comptés".to_string());
+        notes.push(tr!("effets d'uniques non comptés").to_string());
     }
 
     let profile_slots: Vec<Slot> = match kind {
@@ -683,7 +694,7 @@ pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_bas
         compare_flask(it, &refs[0].1)
     } else if kind == Kind::Charm && refs[0].1.base != it.base {
         // Face à un charme d'un autre type (emplacement choisi) : pas de comparaison qui tienne.
-        notes.push(format!("autre type de charme ({})", refs[0].1.base));
+        notes.push(tr!("autre type de charme ({base})", base = refs[0].1.base));
         (Verdict::Unknown, vec![])
     } else if kind == Kind::Charm {
         compare_charm(it, &refs[0].1)
@@ -731,7 +742,7 @@ pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_bas
         match base_fit(have, want, name) {
             Fit::Off(why) => {
                 verdict = Verdict::Worse;
-                deltas.insert(0, Delta { text: format!("pas pour ce build : {why}"), sign: -1, headline: true, dps: false });
+                deltas.insert(0, Delta { text: tr!("pas pour ce build : {why}", why), sign: -1, headline: true, dps: false });
             }
             Fit::Partial(why) => {
                 if verdict == Verdict::Better {
@@ -743,7 +754,7 @@ pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_bas
         }
     }
     if build.is_some() && profile.is_none() && !matches!(kind, Kind::Charm | Kind::Single(Slot::LifeFlask | Slot::ManaFlask)) {
-        notes.push("le build ne précise rien pour cet emplacement : jugement générique".into());
+        notes.push(tr!("le build ne précise rien pour cet emplacement : jugement générique").into());
     }
     Some(Comparison { verdict, against, against_name, deltas, notes, basis })
 }

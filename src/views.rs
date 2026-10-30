@@ -34,10 +34,10 @@ impl SideTab {
 
     pub fn label(self) -> &'static str {
         match self {
-            SideTab::Diagnostic => "Diagnostic",
-            SideTab::Market => "Marché",
-            SideTab::Maps => "Maps",
-            SideTab::Bosses => "Boss",
+            SideTab::Diagnostic => tr!("Diagnostic"),
+            SideTab::Market => tr!("Marché"),
+            SideTab::Maps => tr!("Maps"),
+            SideTab::Bosses => tr!("Boss"),
         }
     }
 }
@@ -47,11 +47,11 @@ impl Tab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Tab::Equipment => "Équipement",
-            Tab::Stats => "Caractéristiques",
-            Tab::Skills => "Sorts",
-            Tab::Passives => "Talents",
-            Tab::Atlas => "Atlas",
+            Tab::Equipment => tr!("Équipement"),
+            Tab::Stats => tr!("Caractéristiques"),
+            Tab::Skills => tr!("Aptitudes"),
+            Tab::Passives => tr!("Talents"),
+            Tab::Atlas => tr!("Atlas"),
         }
     }
 }
@@ -61,7 +61,7 @@ pub fn step_selector(ui: &mut egui::Ui, steps: &[Step], selected: &mut Option<us
     let shown = selected.or(current).unwrap_or(0).min(steps.len().saturating_sub(1));
     let label = |i: usize| {
         let s = &steps[i].label;
-        if Some(i) == current { format!("{s} (actuelle)") } else { s.clone() }
+        if Some(i) == current { tr!("{step} (actuelle)", step = crate::guide::step_text(s)) } else { crate::guide::step_text(s) }
     };
     egui::ComboBox::from_id_salt("view_step").selected_text(RichText::new(label(shown)).color(GOLD)).show_ui(ui, |ui| {
         for i in 0..steps.len() {
@@ -81,33 +81,34 @@ const SPECIAL_GEM: Color32 = Color32::from_rgb(210, 125, 60);
 
 /// « Uncut Skill Gem · niv. 9 » : la gemme non taillée dont on tire cette gemme.
 fn uncut_text(info: &GemInfo) -> String {
+    let gem = crate::gametext::name(&format!("Uncut {} Gem", info.uncut)).into_owned();
     match info.uncut_level {
-        0 => format!("Uncut {} Gem", info.uncut),
-        n => format!("Uncut {} Gem · niv. {n}", info.uncut),
+        0 => gem,
+        n => tr!("{gem} · niv. {n}", gem, n),
     }
 }
 
 fn gem_tooltip(ui: &mut egui::Ui, name: &str, note: &str, info: Option<&GemInfo>) {
     ui.set_max_width(380.0);
-    ui.label(RichText::new(name).color(GOLD).strong());
+    ui.label(RichText::new(crate::gametext::name(name)).color(GOLD).strong());
     if !note.is_empty() {
         ui.label(RichText::new(note).color(Color32::GRAY).small());
     }
     if let Some(i) = info {
         let origin = match (i.lineage, i.special()) {
-            (true, _) => "Gemme de lignée : se trouve telle quelle, ne se taille pas".to_string(),
-            (false, true) => "Gemme spéciale : ne se taille pas dans une Uncut Support Gem".to_string(),
-            _ => format!("À tailler dans : {}", uncut_text(i)),
+            (true, _) => tr!("Gemme de lignée : se trouve telle quelle, ne se taille pas").to_string(),
+            (false, true) => tr!("Gemme spéciale : ne se taille pas dans une Gemme de soutien brute").to_string(),
+            _ => tr!("À tailler dans : {gem}", gem = uncut_text(i)),
         };
         ui.label(RichText::new(origin).color(if i.special() { SPECIAL_GEM } else { Color32::GRAY }).small());
         if !i.description.is_empty() {
             ui.add_space(4.0);
-            ui.label(RichText::new(&i.description).color(Color32::LIGHT_GRAY));
+            ui.label(RichText::new(crate::gametext::name(&i.description)).color(Color32::LIGHT_GRAY));
         }
         if !i.effects.is_empty() {
             ui.add_space(4.0);
             for e in &i.effects {
-                ui.label(RichText::new(e).color(Color32::from_rgb(136, 136, 255)));
+                ui.label(RichText::new(crate::gametext::line(e)).color(Color32::from_rgb(136, 136, 255)));
             }
         }
     }
@@ -140,9 +141,9 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
                     icon(ui, assets, &skill.name, 44.0).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&skill.name).color(GOLD).size(16.0).strong()).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
+                            ui.label(RichText::new(crate::gametext::name(&skill.name)).color(GOLD).size(16.0).strong()).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
                             if prev.is_some() && !before.contains(skill.name.as_str()) {
-                                ui.label(RichText::new("nouveau").color(GREEN).small().strong());
+                                ui.label(RichText::new(tr!("nouveau")).color(GREEN).small().strong());
                             }
                             // Set d'armes du sort, en bout de ligne.
                             if let Some(set) = skill.weapon_set {
@@ -150,9 +151,9 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
                             }
                         });
                         let (txt, col) = if skill.from_level > level {
-                            (format!("à partir du niveau {} (tu es niveau {level})", skill.from_level), Color32::from_rgb(220, 150, 90))
+                            (tr!("à partir du niveau {from} (tu es niveau {level})", from = skill.from_level, level), Color32::from_rgb(220, 150, 90))
                         } else {
-                            (format!("dès le niveau {}", skill.from_level), Color32::GRAY)
+                            (tr!("dès le niveau {from}", from = skill.from_level), Color32::GRAY)
                         };
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(txt).color(col).small());
@@ -164,20 +165,20 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
                         ui.with_layout(layout, |ui| {
                             for (name, lvl) in &skill.supports {
                                 let info = infos.and_then(|m| m.get(name));
-                                let note = format!("support dès le niveau {lvl}");
+                                let note = tr!("support dès le niveau {lvl}", lvl);
                                 ui.horizontal(|ui| {
                                     icon(ui, assets, name, 22.0).on_hover_ui(|ui| gem_tooltip(ui, name, &note, info));
                                     // Gemme spéciale (lignée…) : en couleur, pour la repérer.
                                     let special = info.is_some_and(|i| i.special());
-                                    let mut t = RichText::new(name).color(if special { SPECIAL_GEM } else { Color32::LIGHT_GRAY });
+                                    let mut t = RichText::new(crate::gametext::name(name)).color(if special { SPECIAL_GEM } else { Color32::LIGHT_GRAY });
                                     if *lvl > level {
                                         t = t.color(Color32::GRAY).italics();
                                     }
                                     ui.label(t).on_hover_ui(|ui| gem_tooltip(ui, name, &note, info));
                                     // Niveau de l'Uncut Support Gem à tailler.
                                     if let Some(n) = info.map(|i| i.uncut_level).filter(|n| *n > 0) {
-                                        ui.label(RichText::new(format!("niv. {n}")).color(Color32::GRAY).small())
-                                            .on_hover_text(format!("Uncut Support Gem de niveau {n} minimum"));
+                                        ui.label(RichText::new(tr!("niv. {level}", level = n)).color(Color32::GRAY).small())
+                                            .on_hover_text(tr!("Gemme de soutien brute de niveau {n} minimum", n));
                                     }
                                     ui.add_space(6.0);
                                 });
@@ -192,7 +193,7 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
         let dropped: Vec<&str> = prev.skills.iter().map(|s| s.name.as_str()).filter(|n| !now.contains(n)).collect();
         if !dropped.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("Abandonnés à cette étape : {}", dropped.join(", "))).color(Color32::GRAY));
+            ui.label(RichText::new(tr!("Abandonnés à cette étape : {gems}", gems = dropped.iter().map(|g| crate::gametext::name(g)).collect::<Vec<_>>().join(", "))).color(Color32::GRAY));
         }
     }
 }
@@ -202,9 +203,9 @@ fn set_badge(ui: &mut egui::Ui, set: u8) {
     let (text, color, hint) = match set {
         1 | 2 => {
             let roman = if set == 1 { "I" } else { "II" };
-            (format!("Set {roman}"), crate::ui::SET_COLORS[set as usize - 1], format!("À placer dans le set d'armes {roman} : le sort ne s'utilise qu'avec ce set, et profite de ses talents."))
+            (format!("Set {roman}"), crate::ui::SET_COLORS[set as usize - 1], tr!("À placer dans le set d'armes {roman} : l'aptitude ne s'utilise qu'avec ce set, et profite de ses talents.", roman))
         }
-        _ => ("Sets I et II".to_string(), GOLD_DIM, "À placer dans les deux sets d'armes.".to_string()),
+        _ => (tr!("Sets I et II").to_string(), GOLD_DIM, tr!("À placer dans les deux sets d'armes.").to_string()),
     };
     egui::Frame::new()
         .stroke(Stroke::new(1.0_f32, color))
@@ -258,9 +259,9 @@ pub struct TreeJewel {
 
 /// Les trois attributs : nom, couleur, icône « + » du jeu.
 const ATTRIBUTES: [(&str, Color32, &str); 3] = [
-    ("Force", Color32::from_rgb(205, 75, 60), "Art/2DArt/SkillIcons/passives/plusstrength.dds"),
-    ("Dextérité", Color32::from_rgb(95, 185, 85), "Art/2DArt/SkillIcons/passives/plusdexterity.dds"),
-    ("Intelligence", Color32::from_rgb(85, 135, 235), "Art/2DArt/SkillIcons/passives/plusintelligence.dds"),
+    (tkey!("Force"), Color32::from_rgb(205, 75, 60), "Art/2DArt/SkillIcons/passives/plusstrength.dds"),
+    (tkey!("Dextérité"), Color32::from_rgb(95, 185, 85), "Art/2DArt/SkillIcons/passives/plusdexterity.dds"),
+    (tkey!("Intelligence"), Color32::from_rgb(85, 135, 235), "Art/2DArt/SkillIcons/passives/plusintelligence.dds"),
 ];
 
 /// Points d'un arc de cercle de `a` à `b` autour de `center`, par le plus court chemin.
@@ -460,7 +461,7 @@ impl TreeView {
     ) {
         self.build(catalog);
         if self.nodes.is_empty() {
-            ui.put(rect, egui::Label::new(RichText::new("Arbre en cours de chargement…").color(Color32::GRAY)));
+            ui.put(rect, egui::Label::new(RichText::new(tr!("Arbre en cours de chargement…")).color(Color32::GRAY)));
             return;
         }
         // Passifs d'un set d'armes : ceux du set affiché comptent comme pris, ceux de l'autre
@@ -642,8 +643,8 @@ impl TreeView {
                 }
                 let (name, c, _) = ATTRIBUTES[attr_of(n)];
                 let chosen = overrides.contains_key(&n.id);
-                let why = if chosen { "ton choix" } else { "choix supposé d'après les gemmes du build" };
-                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &format!("+5 {name}"), c, None, &[], Some(&format!("{why} — clic droit pour changer"))));
+                let why = if chosen { tr!("ton choix") } else { tr!("choix supposé d'après les gemmes du build") };
+                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &format!("+5 {}", crate::i18n::tr(name)), c, None, &[], Some(&tr!("{why} — clic droit pour changer", why))));
             } else if let Some(j) = jewels.iter().find(|j| n.kind == 3 && j.node == n.skill) {
                 let tex = icons.get(&j.icon).cloned();
                 resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, tex.as_ref(), &j.name, j.color, Some(&j.base).filter(|b| !b.is_empty()).map(|b| b.as_str()), &j.lines, None));
@@ -658,14 +659,15 @@ impl TreeView {
         }
         // Légende sur fond, pour rester lisible au-dessus des nœuds.
         let nodes = if per_set == [0, 0] {
-            format!("{counted} nœuds à cette étape")
+            tr!("{counted} nœuds à cette étape", counted)
         } else {
             let common = step.passives.len() - per_set[0] - per_set[1];
-            format!("{common} communs + {} set I + {} set II (set {} affiché)", per_set[0], per_set[1], if set == 2 { "II" } else { "I" })
+            tr!("{common} communs + {one} set I + {two} set II (set {shown} affiché)", common, one = per_set[0], two = per_set[1], shown = if set == 2 { "II" } else { "I" })
         };
-        let legend = format!(
-            "{nodes}{} · glisser : déplacer · molette : zoom · double-clic : recadrer",
-            if prev.is_some() { format!(", dont {fresh_count} nouveaux en vert") } else { String::new() }
+        let legend = tr!(
+            "{nodes}{fresh} · glisser : déplacer · molette : zoom · double-clic : recadrer",
+            nodes,
+            fresh = if prev.is_some() { tr!(", dont {n} nouveaux en vert", n = fresh_count) } else { String::new() }
         );
         let galley = painter.layout_no_wrap(legend, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);
         let pos = rect.left_top() + Vec2::new(8.0, 8.0);
@@ -747,7 +749,7 @@ pub fn stats(
                 ui,
                 name_w,
                 22.0,
-                egui::Label::new(RichText::new(name).color(name_color).size(15.0)).truncate(),
+                egui::Label::new(RichText::new(crate::gametext::line(name)).color(name_color).size(15.0)).truncate(),
             );
             cells(ui);
         });
@@ -784,14 +786,14 @@ pub fn stats(
                 ui.set_max_width(col_w);
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(
-                    RichText::new(format!("{} %", fmt(eff)))
+                    RichText::new(crate::i18n::percent(fmt(eff)))
                         .color(color)
                         .size(15.0)
                         .strong(),
                 );
                 if (raw - eff).abs() >= 0.05 {
                     ui.label(
-                        RichText::new(format!("({} %)", fmt(raw)))
+                        RichText::new(format!("({})", crate::i18n::percent(fmt(raw))))
                             .color(Color32::from_gray(120))
                             .size(14.0),
                     );
@@ -809,17 +811,17 @@ pub fn stats(
         let hover = |ui: &mut egui::Ui, t: &Total| {
             breakdown(ui, t, " %");
             ui.separator();
-            ui.label(format!("Équipement : {} %", fmt(t.value)));
+            ui.label(tr!("Équipement : {n} %", n = fmt(t.value)));
             if quest > 0.0 {
-                ui.label(format!("Récompenses de quête : +{} %", fmt(quest)));
+                ui.label(tr!("Récompenses de quête : +{n} %", n = fmt(quest)));
             }
             if idx < 3 {
-                ui.label(format!("Pénalité ({}) : {} %", penalty.1, fmt(pen)));
+                ui.label(tr!("Pénalité ({when}) : {n} %", when = penalty.1, n = fmt(pen)));
             }
-            ui.label(format!("Plafond : {} %", fmt(RES_CAP)));
+            ui.label(tr!("Plafond : {n} %", n = fmt(RES_CAP)));
             let over = t.value + pen + quest - RES_CAP;
             if over > 0.0 {
-                ui.label(format!("{} % au-dessus du plafond", fmt(over)));
+                ui.label(tr!("{n} % au-dessus du plafond", n = fmt(over)));
             }
         };
         row(ui, name, &mut |ui| {
@@ -856,7 +858,7 @@ pub fn stats(
     };
 
     if worn.pieces == 0 {
-        ui.label(RichText::new("Aucune pièce suivie : Ctrl+Alt+C sur chaque pièce portée en jeu pour remplir la colonne « Porté ».").color(Color32::GRAY));
+        ui.label(RichText::new(tr!("Aucune pièce suivie : Ctrl+Alt+C sur chaque pièce portée en jeu pour remplir la colonne « Porté ».")).color(Color32::GRAY));
         ui.add_space(4.0);
     }
     // Titres des colonnes : fixes, le tableau défile dessous.
@@ -866,7 +868,7 @@ pub fn stats(
             ui,
             col_w,
             20.0,
-            egui::Label::new(RichText::new("Porté").color(crate::ui::GOLD).strong()),
+            egui::Label::new(RichText::new(tr!("Porté")).color(crate::ui::GOLD).strong()),
         );
         left_cell(
             ui,
@@ -886,22 +888,22 @@ pub fn stats(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            section(ui, "ATTRIBUTS");
-            total_row(ui, "Force", &|s| &s.attributes[0]);
-            total_row(ui, "Dextérité", &|s| &s.attributes[1]);
-            total_row(ui, "Intelligence", &|s| &s.attributes[2]);
-            section(ui, "VIE ET DÉFENSES");
-            total_row(ui, "Vie", &|s| &s.life);
-            total_row(ui, "Mana", &|s| &s.mana);
-            total_row(ui, "Esprit", &|s| &s.spirit);
-            total_row(ui, "Armure", &|s| &s.defences[0]);
-            total_row(ui, "Évasion", &|s| &s.defences[1]);
-            total_row(ui, "Bouclier d'énergie", &|s| &s.defences[2]);
-            section(ui, "RÉSISTANCES");
-            res_row(ui, "Feu", 0);
-            res_row(ui, "Froid", 1);
-            res_row(ui, "Foudre", 2);
-            res_row(ui, "Chaos", 3);
+            section(ui, tr!("ATTRIBUTS"));
+            total_row(ui, tr!("Force"), &|s| &s.attributes[0]);
+            total_row(ui, tr!("Dextérité"), &|s| &s.attributes[1]);
+            total_row(ui, tr!("Intelligence"), &|s| &s.attributes[2]);
+            section(ui, tr!("VIE ET DÉFENSES"));
+            total_row(ui, tr!("Vie"), &|s| &s.life);
+            total_row(ui, tr!("Mana"), &|s| &s.mana);
+            total_row(ui, tr!("Esprit"), &|s| &s.spirit);
+            total_row(ui, tr!("Armure"), &|s| &s.defences[0]);
+            total_row(ui, tr!("Score d'Évasion"), &|s| &s.defences[1]);
+            total_row(ui, tr!("Bouclier d'énergie"), &|s| &s.defences[2]);
+            section(ui, tr!("RÉSISTANCES"));
+            res_row(ui, tr!("Feu"), 0);
+            res_row(ui, tr!("Froid"), 1);
+            res_row(ui, tr!("Foudre"), 2);
+            res_row(ui, tr!("Chaos"), 3);
 
             // Autres mods : le texte du mod en nom, ses nombres dans chaque colonne.
             let empty: Vec<Line> = Vec::new();
@@ -954,7 +956,7 @@ pub fn stats(
                 }
             }
             if !worn.weapon_local.is_empty() {
-                section(ui, "PROPRE À L'ARME PORTÉE");
+                section(ui, tr!("PROPRE À L'ARME PORTÉE"));
                 for (slot, lines) in &worn.weapon_local {
                     ui.label(RichText::new(slot).color(crate::ui::GOLD_DIM));
                     for l in lines {

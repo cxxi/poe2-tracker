@@ -15,52 +15,52 @@ pub const MAX_LEN: usize = 250;
 /// Morceaux connus : (motif du modèle de stat, morceau de regex, nom lisible). Le premier motif
 /// contenu dans le modèle l'emporte.
 const KNOWN: &[(&str, &str, &str)] = &[
-    ("to Level of all Spell Skills", "all spell sk", "niveaux de tous les sorts"),
-    ("to Level of all Cold Spell", "cold spell sk", "niveaux des sorts de froid"),
-    ("to Level of all Fire Spell", "fire spell sk", "niveaux des sorts de feu"),
-    ("to Level of all Lightning Spell", "ning spell sk", "niveaux des sorts de foudre"),
-    ("to Level of all Chaos Spell", "chaos spell sk", "niveaux des sorts de chaos"),
-    ("to Level of all Physical Spell", "cal spell sk", "niveaux des sorts physiques"),
-    ("to Level of all Minion", "all minion sk", "niveaux des sbires"),
-    ("to Level of all Melee", "all melee sk", "niveaux de mêlée"),
-    ("to Level of all Projectile", "projectile sk", "niveaux des projectiles"),
-    ("increased Movement Speed", "movem", "vitesse de déplacement"),
-    ("to maximum Life", "maximum li", "vie"),
-    ("to maximum Mana", "maximum ma", "mana"),
-    ("to maximum Energy Shield", "maximum en", "bouclier d'énergie"),
-    ("to Spirit", "to spirit", "esprit"),
-    ("to all Elemental Resistances", "all ele", "toutes résistances"),
-    ("to Chaos Resistance", "chaos res", "résistance au chaos"),
-    ("increased Spell Damage", "spell dam", "dégâts des sorts"),
-    ("increased Cast Speed", "cast sp", "vitesse d'incantation"),
-    ("increased Attack Speed", "attack sp", "vitesse d'attaque"),
-    ("Critical Hit Chance for Spells", "e for spells", "critique des sorts"),
-    ("Critical Spell Damage Bonus", "spell damage b", "dégâts critiques des sorts"),
-    ("Critical Damage Bonus", "damage bonus", "dégâts critiques"),
-    ("increased Critical Hit Chance", "crit.*chance$", "chance de critique"),
-    ("Damage as Extra", "as extra", "dégâts en plus"),
-    ("increased Physical Damage", "ed phys", "dégâts physiques"),
-    ("increased Cold Damage", "ed cold d", "dégâts de froid"),
-    ("increased Fire Damage", "ed fire d", "dégâts de feu"),
-    ("increased Lightning Damage", "ed light", "dégâts de foudre"),
-    ("increased Chaos Damage", "ed chaos d", "dégâts de chaos"),
-    ("increased Elemental Damage", "ed elem", "dégâts élémentaires"),
-    ("Cold Damage to Attacks", "cold damage to a", "froid ajouté aux attaques"),
-    ("Fire Damage to Attacks", "fire damage to a", "feu ajouté aux attaques"),
-    ("Lightning Damage to Attacks", "ning damage to a", "foudre ajoutée aux attaques"),
-    ("Physical Damage to Attacks", "cal damage to a", "physique ajouté aux attaques"),
-    ("increased Armour", "ed armour", "% d'armure"),
-    ("increased Evasion", "ed evasion", "% d'évasion"),
-    ("increased Energy Shield", "ed energy", "% de bouclier d'énergie"),
-    ("to Armour", "to armour", "armure"),
-    ("to Evasion Rating", "to evasion", "évasion"),
-    ("Mana Regeneration Rate", "mana regen", "régénération de mana"),
-    ("Life Regeneration", "life regen", "régénération de vie"),
-    ("to Intelligence", "to int", "intelligence"),
-    ("to Strength", "to str", "force"),
-    ("to Dexterity", "to dex", "dextérité"),
-    ("to all Attributes", "all attr", "tous les attributs"),
-    ("Rarity of Items", "rarity", "rareté"),
+    ("to Level of all Spell Skills", "all spell sk", tkey!("niveaux de tous les sorts")),
+    ("to Level of all Cold Spell", "cold spell sk", tkey!("niveaux des sorts de froid")),
+    ("to Level of all Fire Spell", "fire spell sk", tkey!("niveaux des sorts de feu")),
+    ("to Level of all Lightning Spell", "ning spell sk", tkey!("niveaux des sorts de foudre")),
+    ("to Level of all Chaos Spell", "chaos spell sk", tkey!("niveaux des sorts de chaos")),
+    ("to Level of all Physical Spell", "cal spell sk", tkey!("niveaux des sorts physiques")),
+    ("to Level of all Minion", "all minion sk", tkey!("niveaux des sbires")),
+    ("to Level of all Melee", "all melee sk", tkey!("niveaux de mêlée")),
+    ("to Level of all Projectile", "projectile sk", tkey!("niveaux des projectiles")),
+    ("increased Movement Speed", "movem", tkey!("vitesse de déplacement")),
+    ("to maximum Life", "maximum li", tkey!("vie")),
+    ("to maximum Mana", "maximum ma", tkey!("mana")),
+    ("to maximum Energy Shield", "maximum en", tkey!("bouclier d'énergie")),
+    ("to Spirit", "to spirit", tkey!("esprit")),
+    ("to all Elemental Resistances", "all ele", tkey!("toutes résistances")),
+    ("to Chaos Resistance", "chaos res", tkey!("résistance au chaos")),
+    ("increased Spell Damage", "spell dam", tkey!("dégâts des sorts")),
+    ("increased Cast Speed", "cast sp", tkey!("vitesse d'incantation")),
+    ("increased Attack Speed", "attack sp", tkey!("vitesse d'attaque")),
+    ("Critical Hit Chance for Spells", "e for spells", tkey!("critique des sorts")),
+    ("Critical Spell Damage Bonus", "spell damage b", tkey!("dégâts critiques des sorts")),
+    ("Critical Damage Bonus", "damage bonus", tkey!("dégâts critiques")),
+    ("increased Critical Hit Chance", "crit.*chance$", tkey!("chance de critique")),
+    ("Damage as Extra", "as extra", tkey!("dégâts en plus")),
+    ("increased Physical Damage", "ed phys", tkey!("dégâts physiques")),
+    ("increased Cold Damage", "ed cold d", tkey!("dégâts de froid")),
+    ("increased Fire Damage", "ed fire d", tkey!("dégâts de feu")),
+    ("increased Lightning Damage", "ed light", tkey!("dégâts de foudre")),
+    ("increased Chaos Damage", "ed chaos d", tkey!("dégâts de chaos")),
+    ("increased Elemental Damage", "ed elem", tkey!("dégâts élémentaires")),
+    ("Cold Damage to Attacks", "cold damage to a", tkey!("froid ajouté aux attaques")),
+    ("Fire Damage to Attacks", "fire damage to a", tkey!("feu ajouté aux attaques")),
+    ("Lightning Damage to Attacks", "ning damage to a", tkey!("foudre ajoutée aux attaques")),
+    ("Physical Damage to Attacks", "cal damage to a", tkey!("physique ajouté aux attaques")),
+    ("increased Armour", "ed armour", tkey!("% d'armure")),
+    ("increased Evasion", "ed evasion", tkey!("% d'évasion")),
+    ("increased Energy Shield", "ed energy", tkey!("% de bouclier d'énergie")),
+    ("to Armour", "to armour", tkey!("armure")),
+    ("to Evasion Rating", "to evasion", tkey!("évasion")),
+    ("Mana Regeneration Rate", "mana regen", tkey!("régénération de mana")),
+    ("Life Regeneration", "life regen", tkey!("régénération de vie")),
+    ("to Intelligence", "to int", tkey!("intelligence")),
+    ("to Strength", "to str", tkey!("force")),
+    ("to Dexterity", "to dex", tkey!("dextérité")),
+    ("to all Attributes", "all attr", tkey!("tous les attributs")),
+    ("Rarity of Items", "rarity", tkey!("rareté")),
 ];
 
 /// Résistances élémentaires simples : regroupées en un seul morceau.
@@ -69,7 +69,7 @@ const RESISTANCES: [(&str, &str); 3] = [("to Fire Resistance", "fi"), ("to Cold 
 /// Morceau de regex et nom lisible pour un modèle de stat (« #% increased Cast Speed »).
 fn piece(template: &str) -> (String, String) {
     if let Some((_, re, name)) = KNOWN.iter().find(|(k, _, _)| template.contains(k)) {
-        return (re.to_string(), name.to_string());
+        return (re.to_string(), crate::i18n::tr(name).to_string());
     }
     // Inconnu : les deux derniers mots du mod, sans les nombres.
     let words: Vec<&str> = template.split_whitespace().filter(|w| w.chars().any(char::is_alphabetic)).collect();
@@ -112,7 +112,7 @@ pub fn build(step: &Step) -> (String, Vec<String>) {
     for (template, _) in order {
         let p = if template == RES {
             let re = if elements.len() == 1 { format!("{}.+res", elements[0]) } else { format!("({}).+res", elements.join("|")) };
-            (re, "résistances élémentaires".to_string())
+            (re, tr!("résistances élémentaires").to_string())
         } else {
             piece(template)
         };

@@ -1,5 +1,13 @@
 # Nouveautés
 
+## 0.4.0
+
+- Langue de l'interface au choix dans les réglages : français ou anglais (par défaut celle du système). Tout ce que l'app affiche suit ce choix ; le jeu reste lu en anglais (Ctrl+C, trade, poe.ninja).
+- En français, les textes du jeu sont traduits avec les traductions officielles lues dans les fichiers du jeu : noms des objets, uniques, gemmes, runes, monnaies, zones, classes et ascendances, et lignes de mods (diagnostic, détail des cases, annonces, recommandations du build, caractéristiques, pierres de téléportation, passifs). Une ligne non reconnue reste en anglais.
+- Alt maintenu dans l'app : tout passe dans l'autre langue le temps de l'appui. La barre du bas rappelle ce raccourci, à part de ceux du jeu.
+- Vocabulaire aligné sur la version française du jeu : Bague, Flacon, Main secondaire, Armure, Score d'Évasion, Aptitudes, Pierre de téléportation, Noyaux d'âme, Gemmes brutes.
+- Route de leveling, arbre de l'Atlas et nouveautés dans les deux langues ; dates, pourcentages et nombres décimaux écrits selon la langue.
+
 ## 0.3.0
 
 - Diagnostic refait pour répondre à « je l'équipe ? » : la pièce entière (agrandie selon la place), et en haut à droite la réponse (mieux, moins bien, à voir, unique du build) avec l'écart de score face à ta pièce. Deux bandeaux, « Comparer à l'équipé » et « Comparer au build », ouvrent la comparaison ligne à ligne en grand, sur toute la fenêtre.

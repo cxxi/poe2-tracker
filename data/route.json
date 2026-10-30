@@ -26,7 +26,9 @@
    "what": "Tuer Beira of the Rotten Pack (boss optionnel de Clearfell)",
    "reward": "+10% Cold Resistance",
    "kind": "resist",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Kill Beira of the Rotten Pack (optional boss in Clearfell)",
+   "reward_en": "+10% Cold Resistance"
   },
   {
    "id": "a1_passive_crowbell",
@@ -38,7 +40,9 @@
    "what": "Tuer The Crowbell (boss optionnel, Hunting Grounds)",
    "reward": "+2 Passive Skill Points (+2 points de set d'armes)",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Kill The Crowbell (optional boss, Hunting Grounds)",
+   "reward_en": "+2 Passive Skill Points (+2 weapon set points)"
   },
   {
    "id": "a1_spirit_king_mists",
@@ -50,7 +54,9 @@
    "what": "Freythorn (zone optionnelle) : tuer The King in the Mists",
    "reward": "+30 Spirit (+ Uncut Spirit Gem)",
    "kind": "spirit",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Freythorn (optional zone): kill The King in the Mists",
+   "reward_en": "+30 Spirit (+ Uncut Spirit Gem)"
   },
   {
    "id": "a1_passive_lute",
@@ -63,7 +69,9 @@
    "what": "Trouver le luth d'Una (Ogham Farmlands) et le rapporter à Una",
    "reward": "+2 Passive Skill Points (Book of Specialisation)",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Find Una's lute (Ogham Farmlands) and bring it back to Una",
+   "reward_en": "+2 Passive Skill Points (Book of Specialisation)"
   },
   {
    "id": "a1_life_candlemass",
@@ -75,7 +83,9 @@
    "what": "Tuer Candlemass, the Living Rite (Ogham Manor)",
    "reward": "+20 maximum Life",
    "kind": "life",
-   "importance": "recommended"
+   "importance": "recommended",
+   "what_en": "Kill Candlemass, the Living Rite (Ogham Manor)",
+   "reward_en": "+20 maximum Life"
   },
   {
    "id": "a2_asc_sekhemas_barya",
@@ -87,7 +97,9 @@
    "what": "Tuer Balbala (Traitor's Passage) pour Balbala's Barya",
    "reward": "Clé du premier Trial of the Sekhemas",
    "kind": "ascendancy",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Kill Balbala (Traitor's Passage) for Balbala's Barya",
+   "reward_en": "Key to the first Trial of the Sekhemas"
   },
   {
    "id": "a2_asc_sekhemas",
@@ -99,7 +111,9 @@
    "what": "Trial of the Sekhemas (depuis l'Ardura Caravan) avec Balbala's Barya, puis autel d'ascension",
    "reward": "+2 Ascendancy Points (1re ascension)",
    "kind": "ascendancy",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Trial of the Sekhemas (from the Ardura Caravan) with Balbala's Barya, then the ascendancy altar",
+   "reward_en": "+2 Ascendancy Points (1st ascension)"
   },
   {
    "id": "a2_passive_kabala",
@@ -111,7 +125,9 @@
    "what": "Tuer Kabala, Constrictor Queen (Keth)",
    "reward": "+2 Passive Skill Points",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Kill Kabala, Constrictor Queen (Keth)",
+   "reward_en": "+2 Passive Skill Points"
   },
   {
    "id": "a2_charm_relics",
@@ -125,7 +141,9 @@
    "what": "Reliques Kabala (Keth) + Sun Clan (Bone Pits) à l'autel de Valley of the Titans",
    "reward": "+1 Charm Slot (+30% charges ou +30% durée, modifiable)",
    "kind": "other",
-   "importance": "recommended"
+   "importance": "recommended",
+   "what_en": "Kabala (Keth) + Sun Clan (Bone Pits) relics at the Valley of the Titans altar",
+   "reward_en": "+1 Charm Slot (+30% charges or +30% duration, changeable)"
   },
   {
    "id": "a2_passive_final_letter",
@@ -138,7 +156,9 @@
    "what": "Ramasser Final Letter sur un cadavre à Deshar, la donner à Shambrin",
    "reward": "+2 Passive Skill Points (Book of Specialisation)",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Pick up the Final Letter from a corpse in Deshar, give it to Shambrin",
+   "reward_en": "+2 Passive Skill Points (Book of Specialisation)"
   },
   {
    "id": "a2_res_garukhan",
@@ -150,7 +170,9 @@
    "what": "Spires of Deshar : activer le sanctuaire des Sisters of Garukhan",
    "reward": "+10% Lightning Resistance",
    "kind": "resist",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Spires of Deshar: activate the Sisters of Garukhan shrine",
+   "reward_en": "+10% Lightning Resistance"
   },
   {
    "id": "a3_passive_silverfist",
@@ -162,7 +184,9 @@
    "what": "Tuer Mighty Silverfist (Jungle Ruins)",
    "reward": "+2 Passive Skill Points",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Kill Mighty Silverfist (Jungle Ruins)",
+   "reward_en": "+2 Passive Skill Points"
   },
   {
    "id": "a3_venom_choice",
@@ -175,7 +199,9 @@
    "what": "Venom Crypts : prendre le Venom Vial sur un cadavre, le donner à Servi",
    "reward": "Choix définitif : +25% Stun Threshold / +30% Ailment Threshold / +25% Mana Regeneration",
    "kind": "other",
-   "importance": "recommended"
+   "importance": "recommended",
+   "what_en": "Venom Crypts: take the Venom Vial from a corpse, give it to Servi",
+   "reward_en": "Permanent choice: +25% Stun Threshold / +30% Ailment Threshold / +25% Mana Regeneration"
   },
   {
    "id": "a3_asc_chaos",
@@ -189,7 +215,9 @@
    "what": "Tuer Xyclucian (Chimeral Wetlands) → Chimeral Inscribed Ultimatum, faire le Trial of Chaos (Temple of Chaos)",
    "reward": "+2 Ascendancy Points (2e ascension si les Sekhemas sont faits)",
    "kind": "ascendancy",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Kill Xyclucian (Chimeral Wetlands) → Chimeral Inscribed Ultimatum, run the Trial of Chaos (Temple of Chaos)",
+   "reward_en": "+2 Ascendancy Points (2nd ascension if the Sekhemas are done)"
   },
   {
    "id": "a3_res_blackjaw",
@@ -201,7 +229,9 @@
    "what": "Tuer Blackjaw, the Remnant (Jiquani's Machinarium)",
    "reward": "+10% Fire Resistance",
    "kind": "resist",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Kill Blackjaw, the Remnant (Jiquani's Machinarium)",
+   "reward_en": "+10% Fire Resistance"
   },
   {
    "id": "a3_spirit_ignagduk",
@@ -213,7 +243,9 @@
    "what": "Azak Bog (zone optionnelle) : tuer Ignagduk, the Bog Witch",
    "reward": "+30 Spirit (+ Spirit Gem)",
    "kind": "spirit",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Azak Bog (optional zone): kill Ignagduk, the Bog Witch",
+   "reward_en": "+30 Spirit (+ Spirit Gem)"
   },
   {
    "id": "a3_passive_sacrificial_heart",
@@ -225,7 +257,9 @@
    "what": "Aggorat : récupérer le Sacrificial Heart et l'offrir à l'autel",
    "reward": "+2 Passive Skill Points",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Aggorat: retrieve the Sacrificial Heart and offer it at the altar",
+   "reward_en": "+2 Passive Skill Points"
   },
   {
    "id": "a4_res_blind_beast",
@@ -237,7 +271,9 @@
    "what": "Isle of Kin : tuer The Blind Beast (quête optionnelle)",
    "reward": "Rune (récompense incertaine en 0.5)",
    "kind": "other",
-   "importance": "recommended"
+   "importance": "recommended",
+   "what_en": "Isle of Kin: kill The Blind Beast (optional quest)",
+   "reward_en": "Rune (uncertain reward in 0.5)"
   },
   {
    "id": "a4_passive_omniphobia",
@@ -251,7 +287,9 @@
    "what": "Dark Mists : tuer Omniphobia (Journey's End), rendre le Mist-shrouded Tome à Tujen",
    "reward": "+2 Passive Skill Points",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Dark Mists: kill Omniphobia (Journey's End), return the Mist-shrouded Tome to Tujen",
+   "reward_en": "+2 Passive Skill Points"
   },
   {
    "id": "a4_shark_fin",
@@ -265,7 +303,9 @@
    "what": "Tuer The Great White One (Whakapanu Island), rapporter l'aileron à Kaimana (Ngakanu/Kingsmarch)",
    "reward": "Choix définitif : Kaom's Lesson (+30% Armour/Evasion/ES) ou Rakiata's Lesson",
    "kind": "other",
-   "importance": "recommended"
+   "importance": "recommended",
+   "what_en": "Kill The Great White One (Whakapanu Island), bring the fin back to Kaimana (Ngakanu/Kingsmarch)",
+   "reward_en": "Permanent choice: Kaom's Lesson (+30% Armour/Evasion/ES) or Rakiata's Lesson"
   },
   {
    "id": "a4_mana_silent_hall",
@@ -277,7 +317,9 @@
    "what": "Eye of Hinekora : interagir avec le tombeau de Navali (Silent Hall)",
    "reward": "+5% maximum Mana",
    "kind": "mana",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Eye of Hinekora: interact with Navali's tomb (Silent Hall)",
+   "reward_en": "+5% maximum Mana"
   },
   {
    "id": "a4_tattoos_halls",
@@ -289,7 +331,9 @@
    "what": "Halls of the Dead : réussir les 3 épreuves (Tawhoa, Tasalio, Ngamahu)",
    "reward": "3 choix définitifs : +5% Lightning/Cold/Fire Resistance ou +5 Dex/Int/Str",
    "kind": "resist|attribute",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Halls of the Dead: complete the 3 trials (Tawhoa, Tasalio, Ngamahu)",
+   "reward_en": "3 permanent choices: +5% Lightning/Cold/Fire Resistance or +5 Dex/Int/Str"
   },
   {
    "id": "a4_passive_yama",
@@ -301,7 +345,9 @@
    "what": "Trial of the Ancestors : vaincre Yama the White (Tattoo of Hinekora)",
    "reward": "+2 Passive Skill Points",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Trial of the Ancestors: defeat Yama the White (Tattoo of Hinekora)",
+   "reward_en": "+2 Passive Skill Points"
   },
   {
    "id": "a4_flask_goddess",
@@ -313,7 +359,9 @@
    "what": "Abandoned Prison : statue Goddess of Justice",
    "reward": "+30% Life ou Mana Recovery from Flasks (modifiable)",
    "kind": "other",
-   "importance": "recommended"
+   "importance": "recommended",
+   "what_en": "Abandoned Prison: Goddess of Justice statue",
+   "reward_en": "+30% Life or Mana Recovery from Flasks (changeable)"
   },
   {
    "id": "p1_passive_oswin",
@@ -325,7 +373,9 @@
    "what": "Wolvenhold : tuer Oswin, the Dread Warden (Warden's Ledger)",
    "reward": "+2 Passive Skill Points",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Wolvenhold: kill Oswin, the Dread Warden (Warden's Ledger)",
+   "reward_en": "+2 Passive Skill Points"
   },
   {
    "id": "p2_passive_akthi_anundr",
@@ -337,7 +387,9 @@
    "what": "Khari Crossing : tuer Akthi & Anundr, puis parler à Risu",
    "reward": "+2 Passive Skill Points",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Khari Crossing: kill Akthi & Anundr, then talk to Risu",
+   "reward_en": "+2 Passive Skill Points"
   },
   {
    "id": "p2_life_molten_gift",
@@ -349,7 +401,9 @@
    "what": "Skullmaw Stairway (sous-zone de Khari Crossing) : Molten Shrine → Molten One's Gift",
    "reward": "+5% maximum Life",
    "kind": "life",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Skullmaw Stairway (sub-zone of Khari Crossing): Molten Shrine → Molten One's Gift",
+   "reward_en": "+5% maximum Life"
   },
   {
    "id": "p2_boon_qimah",
@@ -361,7 +415,9 @@
    "what": "Qimah : activer un des Seven Pillars (Orbala)",
    "reward": "Choix modifiable (+5% all Elemental Resistances, +5 attributs, +3% vitesse…) ; éviter le pilier +5% XP",
    "kind": "resist|attribute",
-   "importance": "recommended"
+   "importance": "recommended",
+   "what_en": "Qimah: activate one of the Seven Pillars (Orbala)",
+   "reward_en": "Changeable choice (+5% all Elemental Resistances, +5 attributes, +3% speed…); avoid the +5% XP pillar"
   },
   {
    "id": "p3_spirit_lythara",
@@ -373,7 +429,9 @@
    "what": "Kriar Village : tuer Lythara, the Wayward Spear (Gemcrust Skull)",
    "reward": "+40 Spirit",
    "kind": "spirit",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Kriar Village: kill Lythara, the Wayward Spear (Gemcrust Skull)",
+   "reward_en": "+40 Spirit"
   },
   {
    "id": "p3_passive_yeti",
@@ -385,7 +443,9 @@
    "what": "Howling Caves : tuer The Abominable Yeti (book via Hilda selon un guide)",
    "reward": "+2 Passive Skill Points",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "Howling Caves: kill The Abominable Yeti (book via Hilda according to one guide)",
+   "reward_en": "+2 Passive Skill Points"
   },
   {
    "id": "p3_unique_madox",
@@ -397,7 +457,9 @@
    "what": "Kriar Peaks : parler à Elder Madox",
    "reward": "Un objet unique gratuit (au choix)",
    "kind": "other",
-   "importance": "recommended"
+   "importance": "recommended",
+   "what_en": "Kriar Peaks: talk to Elder Madox",
+   "reward_en": "A free unique item (your pick)"
   },
   {
    "id": "end_passive_hooded_one",
@@ -409,7 +471,9 @@
    "what": "Après les 3 interludes : parler au Hooded One à Kingsmarch (Siege of Oriath)",
    "reward": "+2 Passive Skill Points (Book of Specialisation)",
    "kind": "passive",
-   "importance": "must"
+   "importance": "must",
+   "what_en": "After the 3 interludes: talk to the Hooded One in Kingsmarch (Siege of Oriath)",
+   "reward_en": "+2 Passive Skill Points (Book of Specialisation)"
   }
  ]
 }

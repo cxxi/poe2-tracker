@@ -11,7 +11,7 @@ use regex::Regex;
 
 use serde::Deserialize;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct Reward {
     pub id: String,
     pub act: u32,
@@ -25,6 +25,23 @@ pub struct Reward {
     pub kind: String,
     /// `must`, `recommended` ou `story` (obligatoire de toute façon).
     pub importance: String,
+    /// Textes anglais de `what` et `reward`.
+    #[serde(default)]
+    pub what_en: String,
+    #[serde(default)]
+    pub reward_en: String,
+}
+
+impl Reward {
+    /// Ce qu'il faut faire, dans la langue de l'interface.
+    pub fn what_text(&self) -> &str {
+        if crate::i18n::english() && !self.what_en.is_empty() { &self.what_en } else { &self.what }
+    }
+
+    /// La récompense, dans la langue de l'interface.
+    pub fn reward_text(&self) -> &str {
+        if crate::i18n::english() && !self.reward_en.is_empty() { &self.reward_en } else { &self.reward }
+    }
 }
 
 #[derive(Deserialize)]
@@ -118,16 +135,16 @@ pub fn match_received<'a>(rewards: &'a [Reward], done: &BTreeSet<String>, area: 
 /// bénédictions de Qimah, jamais.
 pub fn modifiable_options(id: &str) -> &'static [(&'static str, &'static str)] {
     match id {
-        "a2_charm_relics" => &[("Charges", "30% increased Charm Charges gained"), ("Durée", "30% increased Charm Effect Duration")],
-        "a4_flask_goddess" => &[("Vie", "30% increased Life Recovery from Flasks"), ("Mana", "30% increased Mana Recovery from Flasks")],
+        "a2_charm_relics" => &[(tkey!("Charges"), "30% increased Charm Charges gained"), (tkey!("Durée"), "30% increased Charm Effect Duration")],
+        "a4_flask_goddess" => &[(tkey!("Vie"), "30% increased Life Recovery from Flasks"), (tkey!("Mana"), "30% increased Mana Recovery from Flasks")],
         "p2_boon_qimah" => &[
-            ("Rés. élémentaires", "+5% to all Elemental Resistances"),
-            ("Attributs", "+5 to all Attributes"),
-            ("Défenses", "15% increased Global Defences"),
-            ("Recharge", "12% increased Cooldown Recovery Rate"),
-            ("Présence", "20% increased Presence Area of Effect"),
-            ("Vitesse", "3% increased Movement Speed"),
-            ("Expérience", "5% increased Experience gain"),
+            (tkey!("Rés. élémentaires"), "+5% to all Elemental Resistances"),
+            (tkey!("Attributs"), "+5 to all Attributes"),
+            (tkey!("Défenses"), "15% increased Global Defences"),
+            (tkey!("Recharge"), "12% increased Cooldown Recovery Rate"),
+            (tkey!("Présence"), "20% increased Presence Area of Effect"),
+            (tkey!("Vitesse"), "3% increased Movement Speed"),
+            (tkey!("Expérience"), "5% increased Experience gain"),
         ],
         _ => &[],
     }
@@ -213,8 +230,8 @@ mod tests {
     #[test]
     fn received_lines_are_matched_by_kind_and_area() {
         let r = vec![
-            Reward { id: "a".into(), act: 1, areas: vec!["G1_11".into()], zone: String::new(), what: String::new(), reward: String::new(), kind: "passive".into(), importance: "must".into() },
-            Reward { id: "b".into(), act: 1, areas: vec!["G1_town".into()], zone: String::new(), what: String::new(), reward: String::new(), kind: "passive".into(), importance: "must".into() },
+            Reward { id: "a".into(), act: 1, areas: vec!["G1_11".into()], zone: String::new(), what: String::new(), reward: String::new(), kind: "passive".into(), importance: "must".into(), ..Default::default() },
+            Reward { id: "b".into(), act: 1, areas: vec!["G1_town".into()], zone: String::new(), what: String::new(), reward: String::new(), kind: "passive".into(), importance: "must".into(), ..Default::default() },
         ];
         let mut done = BTreeSet::new();
         let text = "2 Passive Skill Points.";

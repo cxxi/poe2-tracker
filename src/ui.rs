@@ -6,6 +6,7 @@ use eframe::egui::{
     TextureHandle, Vec2,
 };
 
+use crate::gametext;
 use crate::gear::Slot;
 use crate::item::{Item, Rarity};
 
@@ -86,9 +87,9 @@ pub fn set_tabs(ui: &mut egui::Ui, center: Pos2, height: f32, id: &str, set: &mu
         };
         painter.text(r.center(), Align2::CENTER_CENTER, &label, font.clone(), color);
         let resp = resp.on_hover_text(match (marked[i], colored) {
-            (true, _) => "Un unique du build manque dans ce set",
-            (false, true) => "Passifs de ce set entourés de sa couleur",
-            (false, false) => "Set d'armes affiché",
+            (true, _) => tr!("Un unique du build manque dans ce set"),
+            (false, true) => tr!("Passifs de ce set entourés de sa couleur"),
+            (false, false) => tr!("Set d'armes affiché"),
         });
         if resp.clicked() && !on {
             *set = n;
@@ -219,7 +220,7 @@ pub fn blocked_slot(ui: &mut egui::Ui, rect: Rect, slot: Slot, why: Blocked, fra
                 paint_texture(painter, rect, tex, Color32::from_white_alpha(45));
             }
             if hovered {
-                resp.on_hover_text("Occupée par ton arme à deux mains");
+                resp.on_hover_text(tr!("Occupée par ton arme à deux mains"));
             }
         }
         Blocked::ClosedCharm(blocker) => {
@@ -227,7 +228,7 @@ pub fn blocked_slot(ui: &mut egui::Ui, rect: Rect, slot: Slot, why: Blocked, fra
                 paint_texture(painter, rect, tex, Color32::WHITE);
             }
             if hovered {
-                resp.on_hover_text("Ta ceinture n'ouvre pas cet emplacement de charme (clic : ce que le build y prévoit)");
+                resp.on_hover_text(tr!("Ta ceinture n'ouvre pas cet emplacement de charme (clic : ce que le build y prévoit)"));
             }
         }
     }
@@ -303,13 +304,13 @@ pub fn slot(
                     // Rien à comparer : seulement ce que le build recommande ici.
                     Some(b) => {
                         resp.clone().on_hover_ui(|ui| {
-                            ui.label(RichText::new(format!("{} : non suivi — Ctrl+Alt+C sur ta pièce en jeu", slot.label())).color(Color32::GRAY).small());
+                            ui.label(RichText::new(tr!("{slot} : non suivi — Ctrl+Alt+C sur ta pièce en jeu", slot = slot.label())).color(Color32::GRAY).small());
                             ui.separator();
                             build_card(ui, b);
                         });
                     }
                     None => {
-                        resp.clone().on_hover_text(format!("{} : non suivi — Ctrl+Alt+C sur ta pièce en jeu", slot.label()));
+                        resp.clone().on_hover_text(tr!("{slot} : non suivi — Ctrl+Alt+C sur ta pièce en jeu", slot = slot.label()));
                     }
                 }
             }
@@ -341,7 +342,7 @@ pub fn slot(
             painter.circle_filled(corner, size * 0.55, Color32::from_black_alpha(210));
             painter.circle_stroke(corner, size * 0.55, Stroke::new(if b.hovered() { 2.0_f32 } else { 1.0 }, color));
             painter.text(corner, Align2::CENTER_CENTER, "✕", FontId::proportional(size * 0.7), color);
-            clear = b.on_hover_text("Ne plus suivre cette pièce").clicked();
+            clear = b.on_hover_text(tr!("Ne plus suivre cette pièce")).clicked();
         }
     } else {
         ui.data_mut(|d| d.remove::<f64>(since_id));
@@ -367,14 +368,14 @@ pub fn slot(
                 egui::Frame::new().inner_margin(8).show(ui, |ui| {
                     ui.set_width(worn_width(ui, w).max(300.0).min(520.0));
                     worn_column(ui, w);
-                    click_hint(ui, "Clic : comparer avec le build", w.score);
+                    click_hint(ui, tr!("Clic : comparer avec le build"), w.score);
                 });
             });
         }
     }
     if item.is_some() {
         resp.context_menu(|ui| {
-            if ui.button("Ne plus suivre cette pièce").clicked() {
+            if ui.button(tr!("Ne plus suivre cette pièce")).clicked() {
                 action = SlotAction::Clear;
                 ui.close_menu();
             }
@@ -450,7 +451,7 @@ pub fn rune_lines(ui: &mut egui::Ui, lines: &[RuneLine]) {
             }
             // Nom dans sa couleur, prix (et effets) dans celle des prix du reste de l'app.
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add(egui::Label::new(RichText::new(&r.name).color(r.color)).selectable(false));
+            ui.add(egui::Label::new(RichText::new(gametext::name(&r.name)).color(r.color)).selectable(false));
             if !r.rest.is_empty() {
                 ui.add(egui::Label::new(RichText::new(&r.rest).color(Color32::from_rgb(225, 220, 210))).selectable(false));
             }
@@ -475,7 +476,7 @@ fn rune_tip_body(ui: &mut egui::Ui, r: &RuneLine) {
             ui.add(egui::Image::new((tex.id(), s * k)));
         }
         ui.vertical(|ui| {
-            ui.label(RichText::new(&r.name).color(GOLD).size(16.0).strong());
+            ui.label(RichText::new(gametext::name(&r.name)).color(GOLD).size(16.0).strong());
             if !r.kind.is_empty() {
                 ui.label(RichText::new(&r.kind).color(Color32::GRAY));
             }
@@ -485,11 +486,11 @@ fn rune_tip_body(ui: &mut egui::Ui, r: &RuneLine) {
         ui.add_space(4.0);
         ui.label(RichText::new(category).color(Color32::GRAY).small());
         for l in lines {
-            ui.label(RichText::new(l).color(MOD_COLOR));
+            ui.label(RichText::new(gametext::line(l)).color(MOD_COLOR));
         }
     }
     if r.effects.is_empty() {
-        ui.label(RichText::new("Effets inconnus (catalogue pas encore chargé)").color(Color32::GRAY).small());
+        ui.label(RichText::new(tr!("Effets inconnus (catalogue pas encore chargé)")).color(Color32::GRAY).small());
     }
 }
 
@@ -560,8 +561,8 @@ impl BuildCard {
 /// Colonne « recommandé par le build » de la fiche d'une pièce.
 pub fn build_card(ui: &mut egui::Ui, b: &BuildCard) {
     ui.set_max_width(320.0);
-    ui.label(RichText::new("RECOMMANDÉ PAR LE BUILD").color(GOLD_DIM).small().strong());
-    ui.label(RichText::new(&b.step).color(Color32::GRAY).small());
+    ui.label(RichText::new(tr!("RECOMMANDÉ PAR LE BUILD")).color(GOLD_DIM).small().strong());
+    ui.label(RichText::new(crate::guide::step_text(&b.step)).color(Color32::GRAY).small());
     ui.add_space(4.0);
     // Illustration de la pièce recommandée, à sa taille en jeu au plus.
     if let Some(tex) = &b.image {
@@ -588,16 +589,16 @@ pub fn build_card_head(ui: &mut egui::Ui, b: &BuildCard) {
         ui.label(RichText::new(&b.base).color(Color32::LIGHT_GRAY));
     }
     if let Some(d) = b.base_defences {
-        let parts: Vec<String> = ["Armour", "Evasion Rating", "Energy Shield"]
+        let parts: Vec<String> = [tr!("Armure"), tr!("Score d'Évasion"), tr!("Bouclier d'énergie")]
             .iter()
             .zip(d)
             .filter(|(_, v)| *v > 0.0)
             .map(|(n, v)| format!("{n} {v:.0}"))
             .collect();
-        ui.label(RichText::new(format!("Base : {}", parts.join(" · "))).color(Color32::GRAY).small());
+        ui.label(RichText::new(tr!("Base : {defences}", defences = parts.join(" · "))).color(Color32::GRAY).small());
     }
     for line in &b.implicits {
-        ui.label(RichText::new(format!("Implicite : {line}")).color(Color32::from_rgb(136, 136, 255)).small());
+        ui.label(RichText::new(tr!("Implicite : {line}", line)).color(Color32::from_rgb(136, 136, 255)).small());
     }
 }
 
@@ -609,7 +610,7 @@ pub fn build_card_lines(ui: &mut egui::Ui, b: &BuildCard) {
     target_lines(ui, &b.lines);
     if !b.runes.is_empty() {
         ui.add_space(4.0);
-        ui.label(RichText::new("Runes :").color(Color32::GRAY).small());
+        ui.label(RichText::new(tr!("Runes :")).color(Color32::GRAY).small());
         rune_lines(ui, &b.runes);
     }
 }
@@ -628,7 +629,7 @@ pub fn target_lines(ui: &mut egui::Ui, lines: &[(String, crate::compare::Have)])
         let font = egui::TextStyle::Body.resolve(ui.style());
         let mut job = egui::text::LayoutJob::default();
         job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), color));
-        job.append(line, 0.0, egui::TextFormat::simple(font, Color32::from_rgb(136, 136, 255)));
+        job.append(&gametext::line(line), 0.0, egui::TextFormat::simple(font, Color32::from_rgb(136, 136, 255)));
         ui.label(job);
     }
 }
@@ -700,6 +701,11 @@ pub fn circle_image(painter: &egui::Painter, tex: egui::TextureId, center: Pos2,
 /// d'effets, note en petit. Largeur et polices fixes, calculées sur le contenu (au plus 420 px) :
 /// la fiche ne dépend ni du zoom ni de la place laissée par le bord de l'écran.
 pub fn node_tip(ui: &mut egui::Ui, icon: Option<&TextureHandle>, title: &str, color: Color32, after: Option<&str>, lines: &[String], note: Option<&str>) {
+    let title = gametext::name(title);
+    let title = title.as_ref();
+    let after = after.map(gametext::name);
+    let after = after.as_deref();
+    let lines: Vec<String> = lines.iter().map(|l| gametext::line(l).into_owned()).collect();
     let text_w = |t: &str, size: f32| ui.fonts(|f| f.layout_no_wrap(t.to_string(), FontId::proportional(size), Color32::WHITE).size().x);
     let head = icon.map_or(0.0, |_| 48.0) + text_w(title, 16.0) + after.map_or(0.0, |a| 8.0 + text_w(a, 14.0));
     let body = lines.iter().map(|l| text_w(l, 14.0)).chain(note.map(|n| text_w(n, 12.0))).fold(head, f32::max);
@@ -714,7 +720,7 @@ pub fn node_tip(ui: &mut egui::Ui, icon: Option<&TextureHandle>, title: &str, co
                 ui.label(RichText::new(a).color(Color32::GRAY).size(14.0));
             }
         });
-        for l in lines {
+        for l in &lines {
             ui.label(RichText::new(l).color(MOD_COLOR).size(14.0));
         }
         if let Some(n) = note {
@@ -729,7 +735,7 @@ pub fn wanted_tip(ui: &mut egui::Ui, uniques: &[&WantedUnique], step: &str) {
     egui::Frame::new().inner_margin(8).show(ui, |ui| {
         let width = uniques.iter().map(|u| worn_width(ui, &u.view)).fold(300.0_f32, f32::max).min(520.0);
         ui.set_width(width);
-        ui.label(RichText::new(format!("UNIQUE ATTENDU · {step}")).color(GOLD_DIM).small().strong());
+        ui.label(RichText::new(tr!("UNIQUE ATTENDU · {step}", step)).color(GOLD_DIM).small().strong());
         ui.add_space(4.0);
         for (i, u) in uniques.iter().enumerate() {
             if i > 0 {
@@ -741,7 +747,7 @@ pub fn wanted_tip(ui: &mut egui::Ui, uniques: &[&WantedUnique], step: &str) {
                 worn_mods(ui, &u.view);
             }
             ui.separator();
-            ui.label(RichText::new("AU MARCHÉ").color(GOLD_DIM).small().strong());
+            ui.label(RichText::new(tr!("AU MARCHÉ")).color(GOLD_DIM).small().strong());
             ui.label(RichText::new(&u.price.0).color(u.price.1).size(16.0).strong());
             if let Some(b) = &u.basis {
                 ui.label(RichText::new(b).color(Color32::GRAY).small());
@@ -763,6 +769,10 @@ pub fn item_header(ui: &mut egui::Ui, id: &str, image: Option<&TextureHandle>, t
 #[allow(clippy::too_many_arguments)]
 /// `tall_image` : l'image prend toute la hauteur du texte (en-tête agrandi du diagnostic).
 pub fn item_header_scaled(ui: &mut egui::Ui, id: &str, image: Option<&TextureHandle>, title: &str, color: Color32, after: Option<&str>, lines: Vec<egui::WidgetText>, badge: Option<(&str, Color32)>, scale: f32, tall_image: bool) -> Rect {
+    // Noms du jeu (type de base, unique) dans la langue de l'interface.
+    let title = gametext::name(title);
+    let after = after.map(gametext::name);
+    let (title, after) = (title.as_ref(), after.as_deref());
     let text_h_id = ui.id().with(("item_header", id));
     let text_h: f32 = ui.data(|d| d.get_temp(text_h_id)).unwrap_or(80.0 * scale);
     let img_h = if tall_image { text_h.max(64.0 * scale) } else { text_h.clamp(64.0 * scale, 96.0 * scale) };
@@ -842,9 +852,9 @@ pub fn worn_runes(ui: &mut egui::Ui, w: &WornView, width: f32) {
         rune_lines(ui, &w.runes);
     }
     if w.empty_sockets > 0 {
-        ui.label(RichText::new(format!("{} châsse(s) vide(s)", w.empty_sockets)).color(EMPTY_SOCKET).strong());
+        ui.label(RichText::new(trn!(w.empty_sockets, "{n} châsse vide", "{n} châsses vides")).color(EMPTY_SOCKET).strong());
         if !w.suggestions.is_empty() {
-            ui.label(RichText::new("Pour ton build :").color(Color32::GRAY).small());
+            ui.label(RichText::new(tr!("Pour ton build :")).color(Color32::GRAY).small());
             rune_lines(ui, &w.suggestions);
         }
     }
@@ -877,7 +887,7 @@ pub fn header_lines_full(colored: &[Vec<(String, Color32)>], props: &[Parts], ma
     };
     let implicit_job = |l: &str| {
         let mut job = egui::text::LayoutJob::default();
-        job.append(l, 0.0, egui::TextFormat::simple(font.clone(), MOD_COLOR));
+        job.append(&gametext::implicit(l), 0.0, egui::TextFormat::simple(font.clone(), MOD_COLOR));
         job
     };
     colored
@@ -906,12 +916,15 @@ pub fn body_scale(ui: &egui::Ui) -> f32 {
 /// Mods de la pièce équipée (blanc : visés par le build, gris : non), précédés d'une marque s'il y en a.
 pub fn worn_mods(ui: &mut egui::Ui, w: &WornView) {
     let font = egui::TextStyle::Body.resolve(ui.style());
-    for (mark, color, line) in &w.mods {
+    // Lignes coupées en deux par le jeu : recollées si c'est ainsi qu'elles se traduisent.
+    let texts: Vec<String> = w.mods.iter().map(|(_, _, l)| l.clone()).collect();
+    for (i, line) in gametext::lines(&texts) {
+        let (mark, color, _) = &w.mods[i];
         let mut job = egui::text::LayoutJob::default();
         if !mark.is_empty() {
             job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), *color));
         }
-        job.append(line, 0.0, egui::TextFormat::simple(font.clone(), *color));
+        job.append(&line, 0.0, egui::TextFormat::simple(font.clone(), *color));
         ui.label(job);
     }
 }
@@ -922,7 +935,7 @@ pub fn click_hint(ui: &mut egui::Ui, text: &str, score: Option<u32>) {
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(2.0);
-    click_band(ui, text, score.map(|s| ("score", format!("{s} %"), score_color(s))), true, false);
+    click_band(ui, text, score.map(|s| (tr!("score"), crate::i18n::percent(s), score_color(s))), true, false);
 }
 /// Une puce d'un bandeau à puces : le côté de l'emplacement, sa valeur (écart, score), et si
 /// elle s'ouvre.
@@ -1049,14 +1062,15 @@ pub fn score_color(score: u32) -> Color32 {
 }
 
 /// Ce que mesure le score de correspondance (au survol).
-pub const SCORE_HELP: &str = "Correspondance au build : mods, implicites et runes visés, chacun à sa part de la valeur visée. \
-    Au-delà de 100 % une fois tout atteint.";
+fn score_help() -> &'static str {
+    tr!("Correspondance au build : mods, implicites et runes visés, chacun à sa part de la valeur visée. Au-delà de 100 % une fois tout atteint.")
+}
 
 /// Bloc « correspondance » du détail, en bas de la colonne équipée (en face du marché).
 pub fn score_block(ui: &mut egui::Ui, score: u32) {
-    ui.label(RichText::new("CORRESPONDANCE AU BUILD").color(GOLD_DIM).small().strong()).on_hover_text(SCORE_HELP);
-    ui.label(RichText::new(format!("{score} %")).color(score_color(score)).size(16.0 * body_scale(ui)).strong()).on_hover_text(SCORE_HELP);
-    ui.label(RichText::new("mods, implicites et runes visés").color(Color32::GRAY).small());
+    ui.label(RichText::new(tr!("CORRESPONDANCE AU BUILD")).color(GOLD_DIM).small().strong()).on_hover_text(score_help());
+    ui.label(RichText::new(crate::i18n::percent(score)).color(score_color(score)).size(16.0 * body_scale(ui)).strong()).on_hover_text(score_help());
+    ui.label(RichText::new(tr!("mods, implicites et runes visés")).color(Color32::GRAY).small());
 }
 
 /// Largeur naturelle de la colonne d'une pièce équipée : sa ligne la plus longue (en-tête avec
@@ -1065,12 +1079,12 @@ pub fn worn_width(ui: &egui::Ui, w: &WornView) -> f32 {
     let text_w = |t: &str, size: f32| ui.fonts(|f| f.layout_no_wrap(t.to_string(), FontId::proportional(size), Color32::WHITE).size().x);
     let small = HEADER_LINE_SIZE;
     let joined = |p: &Parts| p.iter().map(|(t, _)| t.as_str()).collect::<String>();
-    let title = text_w(&w.title, 17.0) + w.after.as_deref().map_or(0.0, |a| 8.0 + text_w(a, 13.5));
-    let header = w.props.iter().map(|p| text_w(&joined(p), small)).chain(w.implicits.iter().map(|l| text_w(l, small))).fold(title, f32::max);
+    let title = text_w(&gametext::name(&w.title), 17.0) + w.after.as_deref().map_or(0.0, |a| 8.0 + text_w(&gametext::name(a), 13.5));
+    let header = w.props.iter().map(|p| text_w(&joined(p), small)).chain(w.implicits.iter().map(|l| text_w(&gametext::implicit(l), small))).fold(title, f32::max);
     // Image (au plus 80 px) et son écart avec le texte.
     let header = header + w.image.as_ref().map_or(0.0, |_| 90.0);
-    let mods = w.mods.iter().map(|(m, _, l)| text_w(&format!("{m}  {l}"), 14.0)).fold(0.0_f32, f32::max);
-    let runes = w.runes.iter().chain(&w.suggestions).map(|r| 30.0 + text_w(&format!("{}{}", r.name, r.rest), 14.0)).fold(0.0_f32, f32::max);
+    let mods = w.mods.iter().map(|(m, _, l)| text_w(&format!("{m}  {}", gametext::line(l)), 14.0)).fold(0.0_f32, f32::max);
+    let runes = w.runes.iter().chain(&w.suggestions).map(|r| 30.0 + text_w(&format!("{}{}", gametext::name(&r.name), r.rest), 14.0)).fold(0.0_f32, f32::max);
     header.max(mods).max(runes) + 8.0
 }
 
@@ -1091,7 +1105,7 @@ const TOO_HIGH: &str = "\u{2060}";
 /// « Niveau requis 62 », le chiffre en blanc, ou en rouge s'il dépasse le niveau du personnage.
 pub fn req_level_parts(level: u32, character: u32) -> Parts {
     let n = if level > character { format!("{TOO_HIGH}{level}") } else { level.to_string() };
-    vec![("Niveau requis ".into(), false), (n, false)]
+    vec![(tr!("Niveau requis ").into(), false), (n, false)]
 }
 
 pub fn prop_line_sized(parts: &[(String, bool)], size: f32) -> egui::text::LayoutJob {
@@ -1121,11 +1135,11 @@ pub fn item_title(it: &Item) -> (&str, Option<&str>) {
 pub fn verdict_style(v: crate::compare::Verdict) -> (&'static str, Color32) {
     use crate::compare::Verdict;
     match v {
-        Verdict::Better => ("▲ MIEUX", Color32::from_rgb(90, 200, 90)),
-        Verdict::Worse => ("▼ MOINS BIEN", Color32::from_rgb(225, 80, 70)),
-        Verdict::Equal => ("= ÉQUIVALENT", Color32::from_rgb(170, 170, 170)),
-        Verdict::Unknown => ("? À VOIR", Color32::from_rgb(225, 170, 60)),
-        Verdict::Same => ("● ÉQUIPÉ", Color32::from_rgb(100, 150, 230)),
+        Verdict::Better => (tr!("▲ MIEUX"), Color32::from_rgb(90, 200, 90)),
+        Verdict::Worse => (tr!("▼ MOINS BIEN"), Color32::from_rgb(225, 80, 70)),
+        Verdict::Equal => (tr!("= ÉQUIVALENT"), Color32::from_rgb(170, 170, 170)),
+        Verdict::Unknown => (tr!("? À VOIR"), Color32::from_rgb(225, 170, 60)),
+        Verdict::Same => (tr!("● ÉQUIPÉ"), Color32::from_rgb(100, 150, 230)),
     }
 }
 
@@ -1485,7 +1499,7 @@ pub fn sparkline(ui: &mut egui::Ui, data: &[f64], color: Color32) {
 pub fn price_chart(ui: &mut egui::Ui, rect: Rect, points: &[(String, f64)], color: Color32, fmt: &dyn Fn(f64) -> String) {
     let painter = ui.painter_at(rect.expand(2.0));
     if points.len() < 2 {
-        painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Pas assez de points pour une courbe", egui::FontId::proportional(13.0), Color32::GRAY);
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, tr!("Pas assez de points pour une courbe"), egui::FontId::proportional(13.0), Color32::GRAY);
         return;
     }
     let small = egui::FontId::proportional(11.5);
@@ -1502,8 +1516,9 @@ pub fn price_chart(ui: &mut egui::Ui, rect: Rect, points: &[(String, f64)], colo
         painter.hline(plot.x_range(), y(v), grid);
         painter.text(egui::pos2(plot.left() - 6.0, y(v)), egui::Align2::RIGHT_CENTER, fmt(v), small.clone(), Color32::GRAY);
     }
-    // « 2026-10-30 » -> « 30/10 ».
+    // « 2026-10-30 » -> « 30/10 » (« 10/30 » en anglais).
     let day = |d: &str| match (d.get(8..10), d.get(5..7)) {
+        (Some(dd), Some(mm)) if crate::i18n::english() => format!("{mm}/{dd}"),
         (Some(dd), Some(mm)) => format!("{dd}/{mm}"),
         _ => d.to_string(),
     };

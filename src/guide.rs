@@ -185,10 +185,11 @@ pub fn parse_uniques(lua: &str) -> Vec<(String, UniqueText)> {
             let tail = (0..shortest - head).take_while(|k| words.iter().all(|w| w[w.len() - 1 - k] == words[0][words[0].len() - 1 - k])).count();
             if choices.len() > 1 && head + tail > 0 {
                 let w = &words[0];
-                let merged = [&w[..head], &["[au choix]"], &w[w.len() - tail..]].concat().join(" ");
+                let any = tr!("[au choix]");
+                let merged = [&w[..head], &[any], &w[w.len() - tail..]].concat().join(" ");
                 // Rite of Passage : PoB liste un esprit par variante, mais en jeu il est tiré au
                 // hasard à chaque utilisation (« Possessed by a random Spirit… »).
-                let merged = merged.replace("Spirit Of The [au choix]", "a random Spirit");
+                let merged = merged.replace(&format!("Spirit Of The {any}"), "a random Spirit");
                 text.mods.insert(at.min(text.mods.len()), merged);
             } else {
                 for (k, (_, l)) in choices.into_iter().enumerate() {
@@ -535,6 +536,15 @@ pub fn split_name(name: &str) -> (Option<String>, String) {
     }
 }
 
+/// Étiquette d'étape dans la langue de l'interface (« Niv. 1-21 » devient « Lvl 1-21 ») ; les
+/// étiquettes restent en français dans les données, où elles servent de clés.
+pub fn step_text(label: &str) -> String {
+    match label.strip_prefix("Niv. ") {
+        Some(rest) if crate::i18n::english() => format!("Lvl {rest}"),
+        _ => label.to_string(),
+    }
+}
+
 /// Tranche de niveaux d'une étape « Niv. 1-21 » (« Niv. 22+ » : jusqu'à la fin de la campagne).
 pub fn level_range(label: &str) -> Option<(u32, u32)> {
     let c = LEVEL_LABEL.captures(label)?;
@@ -662,11 +672,11 @@ pub fn new_at_level(step: &Step, old: u32, new: u32) -> Vec<String> {
     let mut out = Vec::new();
     for s in &step.skills {
         if old < s.from_level && s.from_level <= new {
-            out.push(format!("sort {}", s.describe()));
+            out.push(tr!("aptitude {skill}", skill = s.describe()));
         }
         for (name, lvl) in &s.supports {
             if s.from_level <= old && old < *lvl && *lvl <= new {
-                out.push(format!("support {name} sur {}", s.name));
+                out.push(tr!("support {name} sur {skill}", name, skill = s.name));
             }
         }
     }
@@ -688,19 +698,19 @@ pub fn diff_steps(old: Option<&Step>, new: &Step, catalog: &Catalog) -> Vec<Stri
     let old_names: HashSet<&str> = old.map(|o| o.skills.iter().map(|s| s.name.as_str()).collect()).unwrap_or_default();
     let added: Vec<String> = new.skills.iter().filter(|s| !old_names.contains(s.name.as_str())).map(Skill::describe).collect();
     if !added.is_empty() {
-        lines.push(format!("Nouveaux sorts : {}", added.join(" ; ")));
+        lines.push(tr!("Nouvelles aptitudes : {skills}", skills = added.join(" ; ")));
     }
     if let Some(old) = old {
         let new_names: HashSet<&str> = new.skills.iter().map(|s| s.name.as_str()).collect();
         let removed: Vec<&str> = old.skills.iter().map(|s| s.name.as_str()).filter(|n| !new_names.contains(n)).collect();
         if !removed.is_empty() {
-            lines.push(format!("Sorts abandonnés : {}", removed.join(", ")));
+            lines.push(tr!("Aptitudes abandonnées : {skills}", skills = removed.join(", ")));
         }
         for s in &new.skills {
             if let Some(prev) = old.skills.iter().find(|o| o.name == s.name) {
                 let names = |sk: &Skill| sk.supports.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
                 if names(prev) != names(s) {
-                    lines.push(format!("Supports de {} : {}", s.name, names(s).join(", ")));
+                    lines.push(tr!("Supports de {skill} : {supports}", skill = s.name, supports = names(s).join(", ")));
                 }
             }
         }
@@ -709,11 +719,11 @@ pub fn diff_steps(old: Option<&Step>, new: &Step, catalog: &Catalog) -> Vec<Stri
     let fresh: Vec<&Passive> = new.passives.iter().filter(|id| !old_ids.contains(id.as_str())).filter_map(|id| catalog.passives.get(id)).collect();
     let notables: Vec<&str> = fresh.iter().filter(|p| p.notable && !p.ascendancy).map(|p| p.name.as_str()).collect();
     if !notables.is_empty() {
-        lines.push(format!("Notables à prendre : {}", notables.join(", ")));
+        lines.push(tr!("Notables à prendre : {names}", names = notables.join(", ")));
     }
     let asc: Vec<&str> = fresh.iter().filter(|p| p.notable && p.ascendancy).map(|p| p.name.as_str()).collect();
     if !asc.is_empty() {
-        lines.push(format!("Ascendance : {}", asc.join(", ")));
+        lines.push(tr!("Ascendance : {names}", names = asc.join(", ")));
     }
     lines
 }
@@ -792,9 +802,9 @@ mod tests {
         assert_eq!(step_for(&ulf, 4, 1, 60).unwrap().label, "Niv. 22+");
         assert_eq!(step_for(&ulf, 6, 2, 80).unwrap().label, "GIGA Olrovasara");
         assert_eq!(step_for(&ulf, 6, 9, 80).unwrap().label, "GIGA Olrovasara");
-        assert_eq!(new_at_level(&steps[0], 14, 15), vec!["sort Bonestorm"]);
+        assert_eq!(new_at_level(&steps[0], 14, 15), vec!["aptitude Bonestorm"]);
         let diff = diff_steps(Some(&steps[0]), &steps[1], &Catalog::default());
-        assert_eq!(diff, vec!["Nouveaux sorts : Ice Nova", "Sorts abandonnés : Contagion, Bonestorm"]);
+        assert_eq!(diff, vec!["Nouvelles aptitudes : Ice Nova", "Aptitudes abandonnées : Contagion, Bonestorm"]);
     }
 
     #[test]

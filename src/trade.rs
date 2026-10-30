@@ -702,9 +702,9 @@ impl Estimate {
     /// Confiance en mots : bonne (75 % et plus), moyenne (50 % et plus), faible.
     pub fn confidence(&self) -> &'static str {
         match self.confidence_pct() {
-            75.. => "bonne",
-            50.. => "moyenne",
-            _ => "faible",
+            75.. => tr!("bonne"),
+            50.. => tr!("moyenne"),
+            _ => tr!("faible"),
         }
     }
 }
@@ -735,7 +735,7 @@ impl Trade {
         if matches!(r.get(&it.raw), Some(Estimate::Done { .. })) {
             return; // déjà estimé
         }
-        r.insert(it.raw.clone(), Estimate::Pending("en file d'attente".into()));
+        r.insert(it.raw.clone(), Estimate::Pending(tr!("en file d'attente").into()));
         let _ = self.tx.send(it.clone());
     }
 
@@ -743,9 +743,9 @@ impl Trade {
     /// faite reste affichée jusqu'à ce que la nouvelle la remplace d'un coup.
     pub fn request_again(&self, it: &Item) {
         if matches!(self.get(it), Some(Estimate::Done { .. })) {
-            self.refreshing.lock().unwrap().insert(it.raw.clone(), "en file d'attente".into());
+            self.refreshing.lock().unwrap().insert(it.raw.clone(), tr!("en file d'attente").into());
         } else {
-            self.results.lock().unwrap().insert(it.raw.clone(), Estimate::Pending("en file d'attente".into()));
+            self.results.lock().unwrap().insert(it.raw.clone(), Estimate::Pending(tr!("en file d'attente").into()));
         }
         let _ = self.tx.send(it.clone());
     }
@@ -784,7 +784,7 @@ fn worker(rx: Receiver<Item>, shared: Shared, refreshing: Arc<Mutex<HashMap<Stri
             if let Some(old) = queue.pop_front() {
                 // Une estimation relancée garde l'ancienne.
                 if refreshing.lock().unwrap().remove(&old.raw).is_none() {
-                    set(&shared, &ctx, &old.raw, Estimate::Failed("ignoré : trop d'objets copiés d'affilée".into()));
+                    set(&shared, &ctx, &old.raw, Estimate::Failed(tr!("ignoré : trop d'objets copiés d'affilée").into()));
                 }
             }
         }
@@ -866,7 +866,7 @@ fn throttle(limit: &Limiter, report: &dyn Fn(String)) {
     let wait = limit.wait();
     if !wait.is_zero() {
         *WAIT_UNTIL.lock().unwrap() = Some(Instant::now() + wait);
-        report("limite de l'API de trade : attente".into());
+        report(tr!("limite de l'API de trade : attente").into());
         std::thread::sleep(wait);
         *WAIT_UNTIL.lock().unwrap() = None;
     }
@@ -885,12 +885,12 @@ fn send(limit: &mut Limiter, report: &dyn Fn(String), req: impl Fn() -> Result<u
                 let secs: u64 = resp.header("retry-after").and_then(|v| v.parse().ok()).unwrap_or(60);
                 limit.record(resp.header("x-rate-limit-ip"), None);
                 limit.blocked_until = Some(Instant::now() + Duration::from_secs(secs));
-                report(format!("limite de l'API de trade dépassée : attente {secs} s"));
+                report(tr!("limite de l'API de trade dépassée : attente {secs} s", secs));
             }
-            Err(e) => return Err(format!("API de trade : {e}")),
+            Err(e) => return Err(tr!("API de trade : {e}", e)),
         }
     }
-    Err("API de trade : limite toujours dépassée".into())
+    Err(tr!("API de trade : limite toujours dépassée").into())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -908,14 +908,14 @@ fn estimate(
     let base_only = crit.is_empty();
     let cat = category(&it.item_class).unwrap_or("");
     if base_only && (it.rarity == Rarity::Magic || it.item_level == 0) && equipment_filters(it).is_empty() {
-        return Err("aucun mod reconnu pour chercher des objets comparables".into());
+        return Err(tr!("aucun mod reconnu pour chercher des objets comparables").into());
     }
     let search_url = format!("{API}/search/poe2/{league_path}");
     let search = |dropped: usize, instant: bool, limit: &mut Limiter| {
         report(match (dropped, instant) {
-            (0, true) => "recherche d'objets comparables (achat immédiat)…".into(),
-            (n, true) => format!("recherche élargie, {n} mod(s) lâché(s) (achat immédiat)…"),
-            (_, false) => "recherche parmi les annonces en ligne…".into(),
+            (0, true) => tr!("recherche d'objets comparables (achat immédiat)…").into(),
+            (n, true) => trn!(n, "recherche élargie, {n} mod lâché (achat immédiat)…", "recherche élargie, {n} mods lâchés (achat immédiat)…"),
+            (_, false) => tr!("recherche parmi les annonces en ligne…").into(),
         });
         let body = query(it, &crit, dropped, instant);
         send(limit, &report, || ureq::post(&search_url).set("User-Agent", USER_AGENT).timeout(Duration::from_secs(20)).send_json(body.clone()))
@@ -937,7 +937,7 @@ fn estimate(
     // Le site rend 10 annonces par lecture : jusqu'à 3 lectures (limite bien plus large que celle
     // des recherches).
     for (n, chunk) in hashes.chunks(10).enumerate() {
-        report(if n == 0 { "lecture des annonces…".into() } else { format!("lecture des annonces ({}/{})…", n + 1, hashes.len().div_ceil(10)) });
+        report(if n == 0 { tr!("lecture des annonces…").into() } else { tr!("lecture des annonces ({n}/{of})…", n = n + 1, of = hashes.len().div_ceil(10)) });
         let fetch_url = format!("{API}/fetch/{}?query={id}", chunk.join(","));
         let listings = send(fetch_limit, &report, || ureq::get(&fetch_url).set("User-Agent", USER_AGENT).timeout(Duration::from_secs(20)).call())?;
         let data = prices.data.lock().unwrap();
@@ -999,6 +999,30 @@ fn estimate(
         criteria.push(format!("base {} de niveau d'objet {} ou plus", it.base, it.item_level));
     }
     Ok(Estimate::Done { total, prices_ex, relaxed, url, criteria, instant, base_only, listings: found, score, widened })
+}
+
+static TOTAL_LIFE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+([\d.]+) vie au total$").unwrap());
+static TOTAL_RES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+([\d.]+)% résistances élémentaires au total$").unwrap());
+
+/// Un critère de recherche tel qu'enregistré (en français, gardé avec l'estimation), dans la
+/// langue de l'interface, et s'il a été lâché par la recherche élargie.
+pub fn criterion_text(c: &str) -> (String, bool) {
+    let (c, dropped) = match c.strip_suffix(" (lâché, sa place reste exigée)") {
+        Some(c) => (c, true),
+        None => (c, false),
+    };
+    let text = if let Some(m) = TOTAL_LIFE.captures(c) {
+        tr!("+{n} vie au total", n = &m[1])
+    } else if let Some(m) = TOTAL_RES.captures(c) {
+        tr!("+{n}% résistances élémentaires au total", n = &m[1])
+    } else if let Some(base) = c.strip_prefix("même base : ") {
+        tr!("même base : {base}", base)
+    } else if let Some((base, level)) = c.strip_prefix("base ").and_then(|r| r.strip_suffix(" ou plus")).and_then(|r| r.rsplit_once(" de niveau d'objet ")) {
+        tr!("base {base} de niveau d'objet {level} ou plus", base, level)
+    } else {
+        c.to_string()
+    };
+    (text, dropped)
 }
 
 #[cfg(test)]

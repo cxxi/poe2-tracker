@@ -70,8 +70,8 @@ fn check_against(current: &str) -> Result<State, String> {
         return Ok(State::UpToDate);
     }
     let find = |name: &str| r.assets.iter().find(|a| a.name == name).map(|a| a.browser_download_url.clone());
-    let url = find(asset_name()).ok_or("binaire absent de la version publiée")?;
-    let sha_url = find(&format!("{}.sha256", asset_name())).ok_or("empreinte absente de la version publiée")?;
+    let url = find(asset_name()).ok_or(tr!("binaire absent de la version publiée"))?;
+    let sha_url = find(&format!("{}.sha256", asset_name())).ok_or(tr!("empreinte absente de la version publiée"))?;
     Ok(State::Available { version: r.tag_name.trim_start_matches('v').to_string(), url, sha_url })
 }
 
@@ -87,7 +87,7 @@ fn download_verified(url: &str, sha_url: &str) -> Result<Vec<u8>, String> {
     let expected = String::from_utf8_lossy(&download(sha_url)?).split_whitespace().next().unwrap_or_default().to_lowercase();
     let actual: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
     if expected != actual {
-        return Err("empreinte incorrecte : téléchargement corrompu, rien n'a été remplacé".into());
+        return Err(tr!("empreinte incorrecte : téléchargement corrompu, rien n'a été remplacé").into());
     }
     Ok(data)
 }
@@ -98,7 +98,7 @@ fn install(url: &str, sha_url: &str) -> Result<(), String> {
     let data = download_verified(url, sha_url)?;
     let tmp = std::env::temp_dir().join(format!("poe2-tracker-update-{}", std::process::id()));
     std::fs::write(&tmp, &data).map_err(|e| e.to_string())?;
-    let result = self_replace::self_replace(&tmp).map_err(|e| format!("remplacement impossible : {e}"));
+    let result = self_replace::self_replace(&tmp).map_err(|e| tr!("remplacement impossible : {e}", e));
     let _ = std::fs::remove_file(&tmp);
     result
 }

@@ -189,7 +189,7 @@ fn read_steps(files: Vec<BuildFile>) -> Res<(Steps, Vec<(String, Vec<u8>)>)> {
         })
         .collect();
     if steps.is_empty() {
-        return Err("aucune étape de build reconnue sur cette page".into());
+        return Err(tr!("aucune étape de build reconnue sur cette page").into());
     }
     steps.sort_by(|a, b| step_order(&a.1.name).cmp(&step_order(&b.1.name)));
     Ok((steps, extras))
@@ -227,7 +227,7 @@ fn slug(name: &str) -> String {
 /// Fichiers .build contenus dans un fichier .build ou une archive .zip.
 pub fn read_build_files(name: &str, data: Vec<u8>) -> Res<Vec<BuildFile>> {
     if name.to_lowercase().ends_with(".zip") || data.starts_with(b"PK") {
-        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("archive illisible : {e}"))?;
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| tr!("archive illisible : {e}", e))?;
         let mut out = Vec::new();
         for i in 0..zip.len() {
             let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
@@ -317,7 +317,7 @@ fn mobalytics_query(query: &str, variables: serde_json::Value) -> Res<serde_json
         .set("User-Agent", USER_AGENT)
         .timeout(Duration::from_secs(30))
         .send_json(serde_json::json!({ "query": query, "variables": variables }))
-        .map_err(|e| format!("Mobalytics injoignable : {e}"))?
+        .map_err(|e| tr!("Mobalytics injoignable : {e}", e))?
         .into_json()
         .map_err(|e| e.to_string())
 }
@@ -329,12 +329,12 @@ fn mobalytics_document(page_url: &str) -> Res<(serde_json::Value, &'static str)>
     } else if let Some(c) = MOBA_PUBLIC.captures(page_url) {
         ("userGeneratedDocumentBySlug", "Poe2UserGeneratedDocumentInputBySlug", serde_json::json!({ "slug": &c[1], "type": "builds", "widgetsOverride": [] }))
     } else {
-        return Err("lien Mobalytics non reconnu (attendu : mobalytics.gg/poe-2/builds/… ou …/profile/<auteur>/builds/…)".into());
+        return Err(tr!("lien Mobalytics non reconnu (attendu : mobalytics.gg/poe-2/builds/… ou …/profile/<auteur>/builds/…)").into());
     };
     let query = format!("query Build($input: {input_type}!) {{ game: poe2 {{ documents {{ {field}(input: $input) {{ {MOBA_DOC} }} }} }} }} {MOBA_AFFIXES}");
     let resp = mobalytics_query(&query, serde_json::json!({ "input": input }))?;
     if resp["data"]["game"]["documents"][field]["data"]["id"].as_str().is_none() {
-        return Err("build introuvable sur Mobalytics (lien ou format changé ?)".into());
+        return Err(tr!("build introuvable sur Mobalytics (lien ou format changé ?)").into());
     }
     Ok((resp, field))
 }
@@ -353,7 +353,7 @@ fn fetch_mobalytics(page_url: &str) -> Res<Vec<BuildFile>> {
         .filter_map(|v| Some((v["id"].as_str()?, v["title"].as_str()?)))
         .collect();
     if variants.is_empty() {
-        return Err("aucune variante sur ce build Mobalytics".into());
+        return Err(tr!("aucune variante sur ce build Mobalytics").into());
     }
     const EXPORT: &str = "query Export($input: Poe2UserGeneratedDocumentInputById!, $variantId: String!) { poe2 { documents { userGeneratedDocumentById(input: $input) { error data { exportToGame(variantId: $variantId) } } } } }";
     let mut files = Vec::new();
@@ -807,7 +807,7 @@ fn download(url: &str) -> Res<Vec<u8>> {
         .timeout(Duration::from_secs(60))
         .call()
         .map_err(|e| match e {
-            ureq::Error::Status(403, _) => "le site refuse l'accès aux logiciels (403)".to_string(),
+            ureq::Error::Status(403, _) => tr!("le site refuse l'accès aux logiciels (403)").to_string(),
             e => e.to_string(),
         })?;
     let mut buf = Vec::new();
@@ -824,7 +824,7 @@ pub fn fetch_url(url: &str) -> Res<Vec<BuildFile>> {
         return fetch_mobalytics(url);
     }
     if lower.contains("maxroll.gg") {
-        return Err("Maxroll n'est pas encore pris en charge : lien Mobalytics ou Kami-labs".into());
+        return Err(tr!("Maxroll n'est pas encore pris en charge : lien Mobalytics ou Kami-labs").into());
     }
     if lower.ends_with(".build") || lower.ends_with(".zip") {
         let name = url.rsplit('/').next().unwrap_or("build.zip").to_string();
@@ -855,7 +855,7 @@ pub fn fetch_url(url: &str) -> Res<Vec<BuildFile>> {
         urls.sort();
         urls.dedup();
         if urls.is_empty() {
-            return Err("pas de fichier de build sur cette page Kami-labs".into());
+            return Err(tr!("pas de fichier de build sur cette page Kami-labs").into());
         }
         let mut files = Vec::new();
         for u in urls {
@@ -865,7 +865,7 @@ pub fn fetch_url(url: &str) -> Res<Vec<BuildFile>> {
         files.extend(runes);
         return Ok(files);
     }
-    Err("lien non pris en charge : page d'un build Mobalytics ou Kami-labs".into())
+    Err(tr!("lien non pris en charge : page d'un build Mobalytics ou Kami-labs").into())
 }
 
 #[cfg(test)]

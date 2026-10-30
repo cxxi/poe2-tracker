@@ -328,9 +328,9 @@ impl Coach {
         self.attributing = true;
         self.touch();
         if changed {
-            vec![line(FeedKind::Character, format!("Personnage : {name}"), vec![])]
+            vec![line(FeedKind::Character, tr!("Personnage : {name}", name), vec![])]
         } else if !was_confirmed {
-            vec![line(FeedKind::Character, format!("Personnage confirmé : {name}"), vec![])]
+            vec![line(FeedKind::Character, tr!("Personnage confirmé : {name}", name), vec![])]
         } else {
             vec![]
         }
@@ -390,7 +390,7 @@ impl Coach {
                 self.deaths_here = 0;
                 self.awaiting_login = true;
                 self.confirmed = false;
-                vec![line(FeedKind::Session, "Le jeu vient d'être lancé.".into(), vec![])]
+                vec![line(FeedKind::Session, tr!("Le jeu vient d'être lancé.").into(), vec![])]
             }
             Event::Area { code, level, act, .. } => {
                 if self.area.as_deref() != Some(code) {
@@ -412,11 +412,11 @@ impl Coach {
                     match guess {
                         Some(name) => {
                             if self.state.active.as_deref() != Some(&name) {
-                                out.push(line(FeedKind::Character, format!("Personnage probable : {name} (à confirmer)"), vec![]));
+                                out.push(line(FeedKind::Character, tr!("Personnage probable : {name} (à confirmer)", name), vec![]));
                             }
                             self.state.active = Some(name);
                         }
-                        None => out.push(line(FeedKind::Character, "Personnage non reconnu : il sera identifié au prochain niveau, récompense ou mort".into(), vec![])),
+                        None => out.push(line(FeedKind::Character, tr!("Personnage non reconnu : il sera identifié au prochain niveau, récompense ou mort").into(), vec![])),
                     }
                 }
                 self.touch();
@@ -436,7 +436,7 @@ impl Coach {
                 if old.as_ref().is_some_and(|o| o.label == new.label) {
                     return out;
                 }
-                let head = format!("{} atteinte (zone {code}, niveau {level})", new.label);
+                let head = tr!("{step} atteinte (zone {code}, niveau {level})", step = guide::step_text(&new.label), code, level);
                 out.push(line(FeedKind::Step, head, guide::diff_steps(old.as_ref(), &new, &self.catalog)));
                 out
             }
@@ -461,7 +461,7 @@ impl Coach {
                 if planned.is_empty() {
                     return vec![];
                 }
-                vec![line(FeedKind::Ascendancy, format!("{name} : ordre prévu → {}", planned.join(" > ")), vec![])]
+                vec![line(FeedKind::Ascendancy, tr!("{name} : ordre prévu → {order}", name, order = planned.join(" > ")), vec![])]
             }
             Event::Level { character, .. } | Event::Death { character, .. } if self.state.party.contains(character) => vec![],
             Event::Received { character: Some(name), .. } if self.state.party.contains(name) => vec![],
@@ -477,15 +477,15 @@ impl Coach {
                 // Build découpé par tranches de niveaux : nouvelle étape en montant de niveau.
                 if let Some(new) = self.current_step().cloned() {
                     if old_step.as_ref().is_some_and(|o| o.label != new.label) {
-                        let head = format!("{} atteinte (niveau {level})", new.label);
+                        let head = tr!("{step} atteinte (niveau {level})", step = guide::step_text(&new.label), level);
                         out.push(line(FeedKind::Step, head, guide::diff_steps(old_step.as_ref(), &new, &self.catalog)));
                     }
                 }
                 let details = self
                     .current_step()
-                    .map(|s| guide::new_at_level(s, old, *level).into_iter().map(|g| format!("Le guide ({}) ajoute : {g}", s.label)).collect())
+                    .map(|s| guide::new_at_level(s, old, *level).into_iter().map(|g| tr!("Le guide ({step}) ajoute : {g}", step = guide::step_text(&s.label), g)).collect())
                     .unwrap_or_default();
-                out.push(line(FeedKind::Level, format!("Niveau {level}"), details));
+                out.push(line(FeedKind::Level, tr!("Niveau {level}", level), details));
                 out
             }
             Event::Received { character, text } => {
@@ -511,11 +511,11 @@ impl Coach {
                         }
                     }
                     if c.done.insert(r.id.clone()) {
-                        out.push(line(FeedKind::Reward, format!("Fait : {} ({})", r.reward, r.what), vec![]));
+                        out.push(line(FeedKind::Reward, tr!("Fait : {reward} ({what})", reward = r.reward_text(), what = r.what_text()), vec![]));
                     }
                 } else if let Some(r) = route::match_received(&self.route, &c.done, area.as_deref(), act, text, self.live) {
                     c.done.insert(r.id.clone());
-                    out.push(line(FeedKind::Reward, format!("Fait : {} ({})", r.reward, r.what), vec![]));
+                    out.push(line(FeedKind::Reward, tr!("Fait : {reward} ({what})", reward = r.reward_text(), what = r.what_text()), vec![]));
                 }
                 out
             }
@@ -527,8 +527,8 @@ impl Coach {
                 }
                 self.deaths_here += 1;
                 let zone = self.zone.clone().unwrap_or_else(|| "?".into());
-                let extra = if self.deaths_here > 1 { format!(" ({}e mort ici)", self.deaths_here) } else { String::new() };
-                out.push(line(FeedKind::Death, format!("Mort dans {zone}{extra}"), vec![]));
+                let extra = if self.deaths_here > 1 { tr!(" ({n}e mort ici)", n = self.deaths_here) } else { String::new() };
+                out.push(line(FeedKind::Death, tr!("Mort dans {zone}{extra}", zone, extra), vec![]));
                 out
             }
             Event::Afk { .. } | Event::Atlas { .. } | Event::Device => vec![],
@@ -544,7 +544,7 @@ impl Coach {
                     self.state.active = self.state.characters.iter().max_by_key(|(_, c)| c.last_seen).map(|(n, _)| n.clone());
                     self.confirmed = false;
                 }
-                vec![line(FeedKind::Character, format!("Coéquipier : {character}"), vec![])]
+                vec![line(FeedKind::Character, tr!("Coéquipier : {character}", character), vec![])]
             }
         }
     }
@@ -552,11 +552,11 @@ impl Coach {
     /// Résumé en une ligne pour l'interface.
     pub fn summary(&self) -> String {
         match self.character() {
-            None => "personnage pas encore détecté (il faut une montée de niveau dans le journal)".into(),
+            None => tr!("personnage pas encore détecté (il faut une montée de niveau dans le journal)").into(),
             // Le nom et l'étape sont déjà dans les listes du haut.
             Some((_, c)) => {
-                let zone = self.zone.as_deref().unwrap_or("zone inconnue");
-                format!("{} · niveau {} · {zone}", c.class, c.level)
+                let zone = self.zone.as_deref().unwrap_or(tr!("zone inconnue"));
+                tr!("{class} · niveau {level} · {zone}", class = crate::gametext::name(&c.class), level = c.level, zone = crate::gametext::name(zone))
             }
         }
     }

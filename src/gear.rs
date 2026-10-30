@@ -59,29 +59,29 @@ impl Slot {
 
     pub fn label(self) -> &'static str {
         match self {
-            Slot::Weapon2 => "Arme (set II)",
-            Slot::Offhand2 => "Main gauche (set II)",
-            Slot::Weapon => "Arme",
-            Slot::Offhand => "Main gauche",
-            Slot::Helmet => "Casque",
-            Slot::Body => "Torse",
-            Slot::Gloves => "Gants",
-            Slot::Boots => "Bottes",
-            Slot::Belt => "Ceinture",
-            Slot::Amulet => "Amulette",
-            Slot::RingLeft | Slot::RingRight => "Anneau",
-            Slot::LifeFlask => "Fiole de vie",
-            Slot::ManaFlask => "Fiole de mana",
-            Slot::Charm1 | Slot::Charm2 | Slot::Charm3 => "Charme",
+            Slot::Weapon2 => tr!("Arme (set II)"),
+            Slot::Offhand2 => tr!("Main secondaire (set II)"),
+            Slot::Weapon => tr!("Arme"),
+            Slot::Offhand => tr!("Main secondaire"),
+            Slot::Helmet => tr!("Casque"),
+            Slot::Body => tr!("Armure@torse"),
+            Slot::Gloves => tr!("Gants"),
+            Slot::Boots => tr!("Bottes"),
+            Slot::Belt => tr!("Ceinture"),
+            Slot::Amulet => tr!("Amulette"),
+            Slot::RingLeft | Slot::RingRight => tr!("Bague"),
+            Slot::LifeFlask => tr!("Flacon de vie"),
+            Slot::ManaFlask => tr!("Flacon de mana"),
+            Slot::Charm1 | Slot::Charm2 | Slot::Charm3 => tr!("Charme"),
         }
     }
 
     /// Côté d'un emplacement parmi plusieurs du même type (anneaux, charmes).
     pub fn side(self) -> Option<&'static str> {
         match self {
-            Slot::RingLeft | Slot::Charm1 => Some("gauche"),
-            Slot::Charm2 => Some("centre"),
-            Slot::RingRight | Slot::Charm3 => Some("droite"),
+            Slot::RingLeft | Slot::Charm1 => Some(tr!("gauche")),
+            Slot::Charm2 => Some(tr!("centre")),
+            Slot::RingRight | Slot::Charm3 => Some(tr!("droite")),
             Slot::Weapon | Slot::Offhand => Some("set I"),
             Slot::Weapon2 | Slot::Offhand2 => Some("set II"),
             _ => None,
@@ -91,17 +91,14 @@ impl Slot {
     /// Libellé avec le côté : « Anneau gauche », « Charme du centre ».
     pub fn place(self) -> String {
         match self {
-            Slot::RingRight => "Anneau droit".into(),
-            Slot::Charm1 => "Charme de gauche".into(),
-            Slot::Charm2 => "Charme du centre".into(),
-            Slot::Charm3 => "Charme de droite".into(),
-            Slot::Weapon => "Arme (set I)".into(),
-            Slot::Offhand => "Main gauche (set I)".into(),
-            Slot::Weapon2 | Slot::Offhand2 => self.label().into(),
-            s => match s.side() {
-                Some(side) => format!("{} {side}", s.label()),
-                None => s.label().into(),
-            },
+            Slot::RingLeft => tr!("Bague gauche").into(),
+            Slot::RingRight => tr!("Bague droite").into(),
+            Slot::Charm1 => tr!("Charme de gauche").into(),
+            Slot::Charm2 => tr!("Charme du centre").into(),
+            Slot::Charm3 => tr!("Charme de droite").into(),
+            Slot::Weapon => tr!("Arme (set I)").into(),
+            Slot::Offhand => tr!("Main secondaire (set I)").into(),
+            s => s.label().into(),
         }
     }
 }
@@ -268,7 +265,7 @@ impl Gear {
         }
         let untracked: Vec<&str> = self.untracked().into_iter().map(export_label).collect();
         if !untracked.is_empty() {
-            out.push_str(&format!("- Emplacements non renseignés : {}\n", untracked.join(", ")));
+            out.push_str(&format!("- {}\n", tr!("Emplacements non renseignés : {slots}", slots = untracked.join(", "))));
         }
         for slot in Slot::ALL.into_iter().chain(Slot::SET2) {
             if let Some(raw) = self.slots.get(&slot) {
@@ -282,11 +279,11 @@ impl Gear {
 /// Libellé d'export : les deux anneaux et les trois charmes restent distincts.
 fn export_label(slot: Slot) -> &'static str {
     match slot {
-        Slot::RingLeft => "Anneau gauche",
-        Slot::RingRight => "Anneau droit",
-        Slot::Charm1 => "Charme 1",
-        Slot::Charm2 => "Charme 2",
-        Slot::Charm3 => "Charme 3",
+        Slot::RingLeft => tr!("Bague gauche"),
+        Slot::RingRight => tr!("Bague droite"),
+        Slot::Charm1 => tr!("Charme 1"),
+        Slot::Charm2 => tr!("Charme 2"),
+        Slot::Charm3 => tr!("Charme 3"),
         s => s.label(),
     }
 }
@@ -357,9 +354,9 @@ mod tests {
         g.equip(&ring("Ring B", 40));
         let text = g.export("Équipement de Bob", &["Classe : Warrior".into()]);
         assert!(text.starts_with("# Équipement de Bob\n\n- Classe : Warrior\n"));
-        assert!(text.contains("## Anneau gauche\n\n```\nItem Class: Rings"));
-        assert!(text.contains("## Anneau droit"));
-        assert!(text.contains("Emplacements non renseignés : Arme, Main gauche, Casque"));
+        assert!(text.contains("## Bague gauche\n\n```\nItem Class: Rings"));
+        assert!(text.contains("## Bague droite"));
+        assert!(text.contains("Emplacements non renseignés : Arme, Main secondaire, Casque"));
         assert!(!item::is_item_text(&text)); // jamais pris pour une copie d'objet
     }
 

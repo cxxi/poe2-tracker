@@ -112,11 +112,11 @@ pub enum Group {
 impl Group {
     pub fn label(self) -> &'static str {
         match self {
-            Group::Damage => "Dégâts et vitesse",
-            Group::Gems => "Niveaux de gemmes",
-            Group::Resources => "Vie, mana et récupération",
-            Group::Defence => "Défense",
-            Group::Other => "Autres",
+            Group::Damage => tr!("Dégâts et vitesse"),
+            Group::Gems => tr!("Niveaux de gemmes"),
+            Group::Resources => tr!("Vie, mana et récupération"),
+            Group::Defence => tr!("Défense"),
+            Group::Other => tr!("Autres"),
         }
     }
 }
@@ -296,12 +296,12 @@ fn local_defences(base: [f64; 3], mods: &[String]) -> [f64; 3] {
 /// personnage en tient lieu), -60 % dans l'endgame. Avec ce qui l'explique.
 pub fn res_penalty(max_act: u32, level: u32) -> (f64, String) {
     match max_act {
-        0 | 1 => (0.0, "acte 1".into()),
-        2..=4 => (-10.0 * (max_act - 1) as f64, format!("acte {max_act}")),
-        5 if level < 54 => (-30.0, "interludes".into()),
-        5 if level < 60 => (-40.0, "interludes, zones 54-59".into()),
-        5 if level < 65 => (-50.0, "interludes, zones 60-64".into()),
-        _ => (-60.0, "endgame".into()),
+        0 | 1 => (0.0, tr!("acte 1").into()),
+        2..=4 => (-10.0 * (max_act - 1) as f64, tr!("acte {act}", act = max_act)),
+        5 if level < 54 => (-30.0, tr!("interludes").into()),
+        5 if level < 60 => (-40.0, tr!("interludes, zones 54-59").into()),
+        5 if level < 65 => (-50.0, tr!("interludes, zones 60-64").into()),
+        _ => (-60.0, tr!("endgame").into()),
     }
 }
 
@@ -433,8 +433,8 @@ pub fn sheet_of(pieces: &[Piece]) -> Sheet {
     let mut lines: BTreeMap<String, Line> = BTreeMap::new();
     for p in pieces {
         let name = match p.slot {
-            Slot::RingLeft => "Anneau gauche",
-            Slot::RingRight => "Anneau droit",
+            Slot::RingLeft => tr!("Bague gauche"),
+            Slot::RingRight => tr!("Bague droite"),
             s => s.label(),
         };
         let shown = match p.base_defences {

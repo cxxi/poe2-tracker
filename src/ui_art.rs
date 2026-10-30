@@ -46,7 +46,7 @@ fn prepare(cache: &Path, game_dir: &Path) -> Result<Vec<(Part, ColorImage)>, Str
     let missing: Vec<Part> = Part::ALL.into_iter().filter(|p| !dir.join(format!("{}.png", p.file())).exists()).collect();
     if !missing.is_empty() {
         let index = bundles::Index::open(&game_dir)
-            .map_err(|e| format!("archives du jeu illisibles ({}) : {e}", game_dir.display()))?;
+            .map_err(|e| tr!("archives du jeu illisibles ({dir}) : {e}", dir = game_dir.display(), e))?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         for part in missing {
             let data = index.read(&format!("{DIR}{}.dds", part.file())).map_err(|e| e.to_string())?;

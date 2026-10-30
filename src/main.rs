@@ -6,6 +6,8 @@
 // Sous Windows, pas de console noire à côté de la fenêtre.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[macro_use]
+mod i18n;
 mod art;
 mod atlas;
 mod augments;
@@ -17,6 +19,7 @@ mod coach;
 mod dat;
 mod compare;
 mod desktop;
+mod gametext;
 mod gear;
 mod gem_info;
 mod guide;
@@ -80,6 +83,8 @@ struct Config {
     open_on_copy: bool,
     /// Onglet Boss (expérimental) : les boss d'endgame affrontés.
     boss_tab: bool,
+    /// Langue de l'interface (« fr », « en » ; vide = celle du système).
+    lang: String,
 }
 
 impl Default for Config {
@@ -90,6 +95,7 @@ impl Default for Config {
             auto_estimate: true,
             open_on_copy: true,
             boss_tab: false,
+            lang: String::new(),
         }
     }
 }
@@ -274,6 +280,7 @@ struct SettingsDraft {
     auto_update: bool,
     market_min_ex: f64,
     boss_tab: bool,
+    lang: i18n::Lang,
     /// Choix du dossier du jeu en cours (fenêtre du système).
     picking: Option<Receiver<Option<PathBuf>>>,
 }
@@ -288,6 +295,7 @@ impl SettingsDraft {
             auto_update: stored.auto_update,
             market_min_ex: stored.market_min_ex,
             boss_tab: stored.boss_tab,
+            lang: i18n::base(),
             picking: None,
         }
     }
@@ -305,16 +313,16 @@ struct Welcome {
 /// Dossier des données propres à un personnage (équipement suivi, historique).
 /// Nom d'une map : celui affiché par le jeu, sinon son code sans « Map ».
 fn run_name(r: &mapping::Run) -> String {
-    r.zone.clone().unwrap_or_else(|| r.code.trim_start_matches("Map").to_string())
+    r.zone.as_deref().map(|z| gametext::name(z).into_owned()).unwrap_or_else(|| r.code.trim_start_matches("Map").to_string())
 }
 
 /// Tier du waystone d'après le niveau de zone (65 = T1… 80 = T16), « boss » pour une arène.
 fn run_tier(r: &mapping::Run) -> String {
     match r.kind {
-        mapping::RunKind::Boss => "boss".into(),
-        mapping::RunKind::Map if r.level > 80 => format!("T16+ · niv {}", r.level),
+        mapping::RunKind::Boss => tr!("boss").into(),
+        mapping::RunKind::Map if r.level > 80 => tr!("T16+ · niv {level}", level = r.level),
         mapping::RunKind::Map if r.level >= 65 => format!("T{}", r.level - 64),
-        mapping::RunKind::Map => format!("niv {}", r.level),
+        mapping::RunKind::Map => tr!("niv {level}", level = r.level),
     }
 }
 
@@ -367,15 +375,15 @@ fn icon_count(ui: &mut egui::Ui, icons: &mut passive_icons::PassiveIcons, icon: 
 /// synchroniser les apps d'un groupe, chacun ne voit que sa propre présence.
 fn time_note(r: &mapping::Run) -> &'static str {
     if r.group {
-        "En groupe : c'est ton propre temps passé dans la map (hors repaire et AFK), pas la durée de la map pour tout le groupe."
+        tr!("En groupe : c'est ton propre temps passé dans la map (hors repaire et AFK), pas la durée de la map pour tout le groupe.")
     } else {
-        "Temps passé dans la map, hors repaire et AFK."
+        tr!("Temps passé dans la map, hors repaire et AFK.")
     }
 }
 
 /// « solo » ou « en groupe », à la suite du nom de la map.
 fn group_label(r: &mapping::Run) -> RichText {
-    RichText::new(if r.group { "en groupe" } else { "solo" }).color(Color32::GRAY).size(13.5)
+    RichText::new(if r.group { tr!("en groupe") } else { tr!("solo") }).color(Color32::GRAY).size(13.5)
 }
 
 /// En-tête et mods d'un waystone, en petit.
@@ -384,25 +392,22 @@ fn waystone_lines(ui: &mut egui::Ui, w: &mapping::Waystone) {
         ui.label(RichText::new(w.stats.join(" · ")).color(Color32::LIGHT_GRAY).size(13.5));
     }
     for m in &w.mods {
-        ui.label(RichText::new(m).color(Color32::from_rgb(140, 150, 230)).size(13.5));
+        ui.label(RichText::new(gametext::line(m)).color(Color32::from_rgb(140, 150, 230)).size(13.5));
     }
 }
 
 /// Mécanique d'une arène de boss d'après son code (noms du Marché).
 fn boss_mechanic(code: &str) -> &'static str {
-    [("Ritual", "Rituel"), ("Delirium", "Délire"), ("Abyss", "Abîme"), ("Expedition", "Expédition"), ("Chayula", "Brèche"), ("Breach", "Brèche")]
+    [("Ritual", tkey!("Rituel")), ("Delirium", tkey!("Délire")), ("Abyss", tkey!("Abîme")), ("Expedition", tkey!("Expédition")), ("Chayula", tkey!("Brèche")), ("Breach", tkey!("Brèche"))]
         .iter()
         .find(|(k, _)| code.contains(k))
-        .map_or("boss de l'Atlas", |(_, v)| *v)
+        .map_or(tr!("boss de l'Atlas"), |(_, v)| i18n::tr(v))
 }
 
-fn plural(n: u32, word: &str) -> String {
-    format!("{n} {word}{}", if n > 1 { "s" } else { "" })
-}
-
-/// Date et heure d'une map (heure du log) : « 29 oct. 02:37 ».
+/// Date et heure d'une map (heure du log) : « 29 oct. 02:37 » (« Oct 29 02:37 » en anglais).
 fn date_text(t: i64) -> String {
     const MONTHS: [&str; 12] = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+    const MONTHS_EN: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     // Jour civil depuis le nombre de jours depuis 1970 (calendrier grégorien).
     let z = t.div_euclid(86_400) + 719_468;
     let doe = z.rem_euclid(146_097);
@@ -412,7 +417,12 @@ fn date_text(t: i64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let secs = t.rem_euclid(86_400);
-    format!("{day} {} {:02}:{:02}", MONTHS[month as usize - 1], secs / 3600, secs / 60 % 60)
+    let time = format!("{:02}:{:02}", secs / 3600, secs / 60 % 60);
+    if i18n::english() {
+        format!("{} {day} {time}", MONTHS_EN[month as usize - 1])
+    } else {
+        format!("{day} {} {time}", MONTHS[month as usize - 1])
+    }
 }
 
 /// Chronomètre : « 4:07 », « 1:02:45 ».
@@ -471,10 +481,10 @@ fn short_source(url: &str) -> String {
 fn kind_label(it: &Item) -> String {
     match gear::kind_of(&it.item_class) {
         Some(gear::Kind::Single(s)) => s.label().to_string(),
-        Some(gear::Kind::TwoHanded) => "Arme à deux mains".to_string(),
-        Some(gear::Kind::Ring) => "Anneau".to_string(),
-        Some(gear::Kind::Charm) => "Charme".to_string(),
-        None => it.item_class.clone(),
+        Some(gear::Kind::TwoHanded) => tr!("Arme à deux mains").to_string(),
+        Some(gear::Kind::Ring) => tr!("Bague").to_string(),
+        Some(gear::Kind::Charm) => tr!("Charme").to_string(),
+        None => gametext::name(&it.item_class).into_owned(),
     }
 }
 
@@ -523,6 +533,8 @@ fn start_coach(ctx: egui::Context, config: &Config, files: Vec<PathBuf>, cache: 
 
 impl App {
     fn new(cc: &eframe::CreationContext, dirs: ProjectDirs, mut stored: Config, config: Config) -> App {
+        // Langue de l'interface avant tout texte (nouveautés, fil d'événements rejoué).
+        i18n::set(i18n::Lang::from_code(&stored.lang).unwrap_or_else(i18n::Lang::system));
         // Nouveautés depuis la dernière version vue. Les installations d'avant ce suivi ont déjà
         // validé l'accueil : elles viennent au plus tard de la 0.2.3. Première installation : rien.
         let seen = match (&stored.seen_version, stored.welcomed) {
@@ -536,6 +548,7 @@ impl App {
             stored.save(&dirs);
         }
         style(&cc.egui_ctx);
+        gametext::start(cc.egui_ctx.clone(), dirs.cache_dir().to_path_buf(), config.game_dir.clone());
         let (tx, rx) = channel();
         capture::spawn(tx, cc.egui_ctx.clone());
         let leagues = leagues::Leagues::start(&cc.egui_ctx, dirs.cache_dir().to_path_buf());
@@ -674,6 +687,7 @@ impl App {
         let cache = self.dirs.cache_dir().to_path_buf();
         self.ui_art = ui_art::UiArt::new(ctx, cache.clone(), self.config.game_dir.clone());
         self.passive_icons = passive_icons::PassiveIcons::new(ctx, cache.clone(), self.config.game_dir.clone());
+        gametext::start(ctx.clone(), cache.clone(), self.config.game_dir.clone());
         let files = self.builds.active().map(|b| self.builds.files(&b.id)).unwrap_or_default();
         let (coach_rx, log_rx) = start_coach(ctx.clone(), &self.config, files, cache, self.data_dir.join("state.json"));
         (self.coach, self.coach_rx, self.log_rx) = (None, coach_rx, log_rx);
@@ -695,32 +709,32 @@ impl App {
         let first = !self.stored.welcomed;
         let mut done = false;
         let mut cancel = false;
-        let title = if first { "Bienvenue dans poe2-tracker" } else { "Dossier du jeu" };
+        let title = if first { tr!("Bienvenue dans poe2-tracker") } else { tr!("Dossier du jeu") };
         // Premier lancement : on ne ferme qu'avec « Commencer ».
         let (_, closed) = ui::modal(ctx, "welcome", title, !first, 600.0, |ui| {
                 if first {
-                    ui.label("poe2-tracker accompagne ta partie sans jamais toucher au jeu : il lit seulement son journal et ce que tu copies avec Ctrl+C.");
+                    ui.label(tr!("poe2-tracker accompagne ta partie sans jamais toucher au jeu : il lit seulement son journal et ce que tu copies avec Ctrl+C."));
                     ui.add_space(8.0);
                 }
-                ui.label(RichText::new("Dossier d'installation de Path of Exile 2").color(ui::GOLD).strong());
+                ui.label(RichText::new(tr!("Dossier d'installation de Path of Exile 2")).color(ui::GOLD).strong());
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.welcome.path).desired_width(380.0).hint_text("dossier qui contient « logs »"));
-                    if ui.add_enabled(self.welcome.picking.is_none(), egui::Button::new("Parcourir…")).clicked() {
+                    ui.add(egui::TextEdit::singleline(&mut self.welcome.path).desired_width(380.0).hint_text(tr!("dossier qui contient « logs »")));
+                    if ui.add_enabled(self.welcome.picking.is_none(), egui::Button::new(tr!("Parcourir…"))).clicked() {
                         let (tx, rx) = channel();
                         let ctx = ctx.clone();
                         std::thread::spawn(move || {
-                            let _ = tx.send(rfd::FileDialog::new().set_title("Dossier de Path of Exile 2").pick_folder());
+                            let _ = tx.send(rfd::FileDialog::new().set_title(tr!("Dossier de Path of Exile 2")).pick_folder());
                             ctx.request_repaint();
                         });
                         self.welcome.picking = Some(rx);
                     }
-                    if ui.button("Rechercher").clicked() {
+                    if ui.button(tr!("Rechercher")).clicked() {
                         match paths::detect() {
                             Some(d) => {
                                 self.welcome.path = d.display().to_string();
                                 self.welcome.message = None;
                             }
-                            None => self.welcome.message = Some("Introuvable aux emplacements habituels (Steam, version autonome) : indique-le avec « Parcourir ».".into()),
+                            None => self.welcome.message = Some(tr!("Introuvable aux emplacements habituels (Steam, version autonome) : indique-le avec « Parcourir ».").into()),
                         }
                     }
                 });
@@ -728,24 +742,24 @@ impl App {
                     let (mark, color) = if ok { ("✔", Color32::from_rgb(120, 200, 120)) } else { ("✘", Color32::from_rgb(230, 110, 90)) };
                     ui.label(RichText::new(format!("{mark}  {what}{}", if ok { String::new() } else { format!(" — {missing}") })).color(color));
                 };
-                line(ui, check.log, "Journal du jeu (logs/Client.txt)", "pas de personnage, de route de leveling ni de fil d'événements");
-                line(ui, check.assets, "Images du jeu (Bundles2 ou Content.ggpk)", "pas de fond ni d'icônes de l'arbre");
+                line(ui, check.log, tr!("Journal du jeu (logs/Client.txt)"), tr!("pas de personnage, de route de leveling ni de fil d'événements"));
+                line(ui, check.assets, tr!("Images du jeu (Bundles2 ou Content.ggpk)"), tr!("pas de fond ni d'icônes de l'arbre"));
                 if !check.log && !check.assets {
-                    ui.label(RichText::new("Jeu introuvable ici. Le diagnostic des objets (Ctrl+C) marche quand même.").color(Color32::from_rgb(230, 110, 90)));
+                    ui.label(RichText::new(tr!("Jeu introuvable ici. Le diagnostic des objets (Ctrl+C) marche quand même.")).color(Color32::from_rgb(230, 110, 90)));
                 }
                 if let Some(m) = &self.welcome.message {
                     ui.label(RichText::new(m).color(Color32::GRAY));
                 }
                 if first {
                     ui.add_space(10.0);
-                    ui.label(RichText::new("En jeu").color(ui::GOLD).strong());
-                    ui.label("•  Ctrl+C sur un objet : diagnostic (comparaison avec ta pièce, valeur au marché, verdict).");
-                    ui.label("•  Ctrl+Alt+C sur une pièce que tu portes : elle rejoint l'équipement suivi, base des comparaisons.");
-                    ui.label("•  En bas : la route de leveling (points de passif, résistances…), cochée toute seule au fil de la campagne.");
+                    ui.label(RichText::new(tr!("En jeu")).color(ui::GOLD).strong());
+                    ui.label(tr!("•  Ctrl+C sur un objet : diagnostic (comparaison avec ta pièce, valeur au marché, verdict)."));
+                    ui.label(tr!("•  Ctrl+Alt+C sur une pièce que tu portes : elle rejoint l'équipement suivi, base des comparaisons."));
+                    ui.label(tr!("•  En bas : la route de leveling (points de passif, résistances…), cochée toute seule au fil de la campagne."));
                     ui.add_space(10.0);
-                    ui.label(RichText::new("Build (facultatif)").color(ui::GOLD).strong());
-                    ui.label("Sans build, le diagnostic compare simplement à tes pièces. Avec un build (lien Kami-labs ou fichier .build du planificateur), les verdicts suivent ses objectifs et les onglets Sorts et Talents (ascendance comprise) s'ouvrent.");
-                    if ui.button("Ajouter un build…").clicked() {
+                    ui.label(RichText::new(tr!("Build (facultatif)")).color(ui::GOLD).strong());
+                    ui.label(tr!("Sans build, le diagnostic compare simplement à tes pièces. Avec un build (lien Kami-labs ou fichier .build du planificateur), les verdicts suivent ses objectifs et les onglets Aptitudes et Talents (ascendance comprise) s'ouvrent."));
+                    if ui.button(tr!("Ajouter un build…")).clicked() {
                         self.add_build.open = true;
                         self.add_build.message = None;
                     }
@@ -754,10 +768,10 @@ impl App {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(RichText::new(if first { "Commencer" } else { "Valider" }).color(ui::GOLD).strong()).clicked() {
+                        if ui.button(RichText::new(if first { tr!("Commencer") } else { tr!("Valider") }).color(ui::GOLD).strong()).clicked() {
                             done = true;
                         }
-                        if !first && ui.button("Annuler").clicked() {
+                        if !first && ui.button(tr!("Annuler")).clicked() {
                             cancel = true;
                         }
                     });
@@ -910,12 +924,12 @@ impl App {
         let (kind, effects) = match self.augments.get().and_then(|c| c.augments.iter().find(|a| a.name == name).cloned()) {
             Some(a) => {
                 let kind = match a.kind.as_str() {
-                    "Rune" => "Rune",
-                    "SoulCore" => "Noyau d'âme",
-                    "Idol" => "Idole",
+                    "Rune" => tr!("Rune"),
+                    "SoulCore" => tr!("Noyau d'âme"),
+                    "Idol" => tr!("Idole"),
                     k => k,
                 };
-                let kind = if a.level > 0 { format!("{kind} · niveau {}", a.level) } else { kind.to_string() };
+                let kind = if a.level > 0 { tr!("{kind} · niveau {level}", kind, level = a.level) } else { kind.to_string() };
                 let effects = match class.and_then(|c| a.effect_for(c)) {
                     Some(e) => vec![(e.category.clone(), e.text.clone())],
                     None => a.effects.iter().map(|e| (e.category.clone(), e.text.clone())).collect(),
@@ -943,7 +957,7 @@ impl App {
         let mut implicits = catalog.as_ref().and_then(|c| c.implicits.get(&base).cloned()).unwrap_or_default();
         // Compétence accordée par la base (bâton, baguette…), comme sur la fiche de la pièce.
         if let (Some(skills), Some(coach)) = (catalog.as_ref().and_then(|c| c.skills.get(&base)), self.coach.as_ref()) {
-            implicits.extend(skills.iter().map(|id| format!("Compétence : {}", coach.catalog().gem(id))));
+            implicits.extend(skills.iter().map(|id| format!("{}{}", tr!("Octroie l'Aptitude : "), coach.catalog().gem(id))));
         }
         let image = match &unique {
             Some(u) => self.assets.texture_unique(u),
@@ -1059,29 +1073,29 @@ impl App {
             match found {
                 Some((base, ex, n)) => {
                     price = Some((format!("≈ {}", self.fmt_price(ex)), green));
-                    basis = Some(if n < prices::MIN_LISTINGS { format!("{n} annonces seulement, cours de poe.ninja") } else { format!("{n} annonces, cours de poe.ninja") });
-                    link = Some((uniques::trade_url(&league, u, Some(&base)), "Chercher sur le trade ↗"));
+                    basis = Some(if n < prices::MIN_LISTINGS { tr!("{n} annonces seulement, cours de poe.ninja", n) } else { trn!(n, "{n} annonce, cours de poe.ninja", "{n} annonces, cours de poe.ninja") });
+                    link = Some((uniques::trade_url(&league, u, Some(&base)), tr!("Chercher sur le trade ↗")));
                 }
                 None => {
-                    price = Some(("pas de prix au marché".into(), Color32::GRAY));
-                    link = Some((uniques::trade_url(&league, u, None), "Chercher sur le trade ↗"));
+                    price = Some((tr!("pas de prix au marché").into(), Color32::GRAY));
+                    link = Some((uniques::trade_url(&league, u, None), tr!("Chercher sur le trade ↗")));
                 }
             }
         } else if let Some(r) = &rare {
-            let fallback = (uniques::base_trade_url(&league, &r.base), "Chercher la base sur le trade ↗");
+            let fallback = (uniques::base_trade_url(&league, &r.base), tr!("Chercher la base sur le trade ↗"));
             match self.trade.get(r) {
                 Some(e @ trade::Estimate::Done { .. }) => {
                     let trade::Estimate::Done { total, url, relaxed, .. } = &e else { unreachable!() };
                     price = Some(match e.value_ex() {
                         Some(ex) => (format!("≈ {}", self.fmt_price(ex)), ui::confidence_color(e.confidence_pct())),
-                        None => ("pas assez d'annonces pour estimer".into(), Color32::GRAY),
+                        None => (tr!("pas assez d'annonces pour estimer").into(), Color32::GRAY),
                     });
-                    let mut b = if *total == 1 { "1 annonce comparable".to_string() } else { format!("{total} annonces comparables") };
+                    let mut b = trn!(*total, "{n} annonce comparable", "{n} annonces comparables");
                     if *relaxed > 0 {
-                        b.push_str(&format!(" · recherche élargie ({relaxed} mod{} en moins)", if *relaxed > 1 { "s" } else { "" }));
+                        b.push_str(&trn!(*relaxed, " · recherche élargie ({n} mod en moins)", " · recherche élargie ({n} mods en moins)"));
                     }
                     basis = Some(b);
-                    link = Some((url.clone(), "Voir les annonces sur le trade ↗"));
+                    link = Some((url.clone(), tr!("Voir les annonces sur le trade ↗")));
                 }
                 Some(trade::Estimate::Pending(msg)) => {
                     pending = true;
@@ -1094,19 +1108,19 @@ impl App {
                 }
                 None => {
                     if !self.stored.trade_prices {
-                        price = Some(("estimation sur le trade coupée dans les réglages".into(), Color32::GRAY));
+                        price = Some((tr!("estimation sur le trade coupée dans les réglages").into(), Color32::GRAY));
                     }
                     link = Some(fallback);
                 }
             }
         }
         let title = match (&step, mode) {
-            (_, DetailMode::DiagWorn) => format!("{} · comparé à ta pièce", slot.place()),
-            (Some(s), _) => format!("{} · {}", slot.place(), s.label),
+            (_, DetailMode::DiagWorn) => tr!("{place} · comparé à ta pièce", place = slot.place()),
+            (Some(s), _) => format!("{} · {}", slot.place(), guide::step_text(&s.label)),
             (None, _) => slot.place(),
         };
-        let left_title = if mode == DetailMode::Worn { "ACTUELLEMENT ÉQUIPÉ" } else { "PIÈCE DIAGNOSTIQUÉE" };
-        let right_title = if mode == DetailMode::DiagWorn { "ACTUELLEMENT ÉQUIPÉ" } else { "RECOMMANDÉ PAR LE BUILD" };
+        let left_title = if mode == DetailMode::Worn { tr!("ACTUELLEMENT ÉQUIPÉ") } else { tr!("PIÈCE DIAGNOSTIQUÉE") };
+        let right_title = if mode == DetailMode::DiagWorn { tr!("ACTUELLEMENT ÉQUIPÉ") } else { tr!("RECOMMANDÉ PAR LE BUILD") };
 
         // Modale sur la zone d'équipement (fond assombri, un clic à côté la ferme), ajustée à son
         // contenu : hauteur mesurée au dernier affichage, largeur de chaque colonne d'après ses
@@ -1187,8 +1201,8 @@ impl App {
             .iter()
             .map(|l| {
                 worn.as_ref()?;
-                if let Some(skill) = l.strip_prefix("Compétence : ") {
-                    let same = worn_implicits.iter().any(|w| w.strip_prefix("Compétence : ").is_some_and(|n| n.contains(skill)));
+                if let Some(skill) = l.strip_prefix(tr!("Octroie l'Aptitude : ")) {
+                    let same = worn_implicits.iter().any(|w| w.strip_prefix(tr!("Octroie l'Aptitude : ")).is_some_and(|n| n.contains(skill)));
                     return Some(if same { good } else { missing });
                 }
                 let (tpl, want) = trade::template(l);
@@ -1232,25 +1246,26 @@ impl App {
             let lines_w = |ls: &[String], size: f32| ls.iter().map(|l| text_w(l, size)).fold(0.0_f32, f32::max);
             let joined = |p: &ui::Parts| p.iter().map(|(t, _)| t.as_str()).collect::<String>();
             let head_w = |title: &str, after: Option<&str>, def: &ui::Parts, props: &[ui::Parts], imp: &[String]| {
-                let t = text_w(title, 17.0) + after.map_or(0.0, |a| 8.0 + text_w(a, 13.5));
+                let t = text_w(&gametext::name(title), 17.0) + after.map_or(0.0, |a| 8.0 + text_w(&gametext::name(a), 13.5));
                 let props_w = props.iter().map(|p| text_w(&joined(p), small)).fold(0.0_f32, f32::max);
-                90.0 + t.max(text_w(&joined(def), small)).max(props_w).max(lines_w(imp, small))
+                let imp: Vec<String> = imp.iter().map(|l| gametext::implicit(l).into_owned()).collect();
+                90.0 + t.max(text_w(&joined(def), small)).max(props_w).max(lines_w(&imp, small))
             };
-            let rune_w = |rs: &[ui::RuneLine]| rs.iter().map(|r| 26.0 + text_w(&format!("{}{}", r.name, r.rest), body)).fold(0.0_f32, f32::max);
+            let rune_w = |rs: &[ui::RuneLine]| rs.iter().map(|r| 26.0 + text_w(&format!("{}{}", gametext::name(&r.name), r.rest), body)).fold(0.0_f32, f32::max);
             let left = match &worn {
-                Some(w) => ui::worn_width(ui, w).max(text_w("CORRESPONDANCE AU BUILD", small)),
-                None => head_w("Pas suivie", Some("Ctrl+Alt+C sur ta pièce en jeu"), &vec![], &[], &[]),
+                Some(w) => ui::worn_width(ui, w).max(text_w(tr!("CORRESPONDANCE AU BUILD"), small)),
+                None => head_w(tr!("Pas suivie"), Some(tr!("Ctrl+Alt+C sur ta pièce en jeu")), &vec![], &[], &[]),
             };
             let right = match (&worn_side, &card) {
                 (Some(ws), _) => {
-                    let lines: Vec<String> = ws.lines.iter().map(|(_, _, l)| format!("✗  {l}")).chain(ws.notes.iter().cloned()).collect();
+                    let lines: Vec<String> = ws.lines.iter().map(|(_, _, l)| format!("✗  {}", gametext::line(l))).chain(ws.notes.iter().cloned()).collect();
                     head_w(&ws.name, ws.after.as_deref(), &vec![], &ws.props, &ws.implicits).max(lines_w(&lines, body)).max(rune_w(&ws.runes)) + 14.0
                 }
                 (None, Some(b)) => {
                     let title = unique.as_deref().unwrap_or(&b.base);
                     let mut targets: Vec<String> = match &unique_text {
-                        Some(t) => t.mods.iter().map(|m| format!("✗  {m}")).collect(),
-                        None => b.lines.iter().map(|(l, _)| format!("✗  {l}")).collect(),
+                        Some(t) => t.mods.iter().map(|m| format!("✗  {}", gametext::line(m))).collect(),
+                        None => b.lines.iter().map(|(l, _)| format!("✗  {}", gametext::line(l))).collect(),
                     };
                     targets.extend(build_buffs.iter().cloned());
                     let market = [price.as_ref().map(|(t, _)| text_w(t, 16.0)).unwrap_or(0.0), basis.as_deref().map_or(0.0, |t| text_w(t, small)), link.as_ref().map_or(0.0, |(_, t)| text_w(t, body) + 20.0)];
@@ -1259,7 +1274,7 @@ impl App {
                         .max(rune_w(&b.runes))
                         .max(market.into_iter().fold(0.0_f32, f32::max))
                 }
-                (None, None) => text_w("Rien de recommandé", 17.0) + 90.0,
+                (None, None) => text_w(tr!("Rien de recommandé"), 17.0) + 90.0,
             };
             // Le titre (et sa croix) doit tenir sur la largeur des deux colonnes.
             let min_total = text_w(&title, 17.0) + 40.0;
@@ -1338,7 +1353,7 @@ impl App {
                             };
                             cell(ui, left_w, &mut |ui| match &worn {
                                 Some(w) => ui::worn_header_scaled(ui, "detail_worn", w, k),
-                                None => ui::item_header_scaled(ui, "detail_worn", None, "Pas suivie", dim, Some("Ctrl+Alt+C sur ta pièce en jeu"), vec![], None, k, false),
+                                None => ui::item_header_scaled(ui, "detail_worn", None, tr!("Pas suivie"), dim, Some(tr!("Ctrl+Alt+C sur ta pièce en jeu")), vec![], None, k, false),
                             });
                             // Un rare n'a pas de nom fixe : son type de base en tient lieu.
                             let build_tex = card.as_ref().and_then(|b| b.image.as_ref());
@@ -1359,7 +1374,7 @@ impl App {
                                 (None, None, Some(b)) if !b.base.is_empty() => {
                                     ui::item_header_scaled(ui, "detail_build", build_tex, &b.base, ui::rarity_color(rec_rarity), None, build_lines.clone(), None, k, false)
                                 }
-                                _ => ui::item_header_scaled(ui, "detail_build", build_tex, "Rien de recommandé", dim, None, vec![], None, k, false),
+                                _ => ui::item_header_scaled(ui, "detail_build", build_tex, tr!("Rien de recommandé"), dim, None, vec![], None, k, false),
                             });
                             if (tallest - head_h).abs() > 0.5 {
                                 ui.data_mut(|d| d.insert_temp(head_h_id, tallest));
@@ -1385,7 +1400,7 @@ impl App {
                                         if let Some((m, c)) = mark {
                                             job.append(&format!("{m}  "), 0.0, egui::TextFormat::simple(font.clone(), *c));
                                         }
-                                        job.append(text, 0.0, egui::TextFormat::simple(font.clone(), *color));
+                                        job.append(&gametext::line(text), 0.0, egui::TextFormat::simple(font.clone(), *color));
                                         ui.label(job);
                                     }
                                     for n in &ws.notes {
@@ -1396,7 +1411,7 @@ impl App {
                                 // Effet du charme, puis les mods : ceux de l'unique tels quels (plages
                                 // de valeurs du jeu), sinon ceux que vise le build.
                                 for l in &build_buffs {
-                                    ui.label(RichText::new(l).color(mod_color));
+                                    ui.label(RichText::new(gametext::line(l)).color(mod_color));
                                 }
                                 match (&unique_text, &card) {
                                     // Unique : ses mods (plages du jeu), comparés à la pièce portée.
@@ -1409,9 +1424,9 @@ impl App {
                                                 Some(&part) => {
                                                     let (mark, color) = match_mark(part);
                                                     job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), color));
-                                                    job.append(m, 0.0, egui::TextFormat::simple(font.clone(), color));
+                                                    job.append(&gametext::line(m), 0.0, egui::TextFormat::simple(font.clone(), color));
                                                 }
-                                                None => job.append(m, 0.0, egui::TextFormat::simple(font.clone(), mod_color)),
+                                                None => job.append(&gametext::line(m), 0.0, egui::TextFormat::simple(font.clone(), mod_color)),
                                             }
                                             ui.label(job);
                                         }
@@ -1423,9 +1438,9 @@ impl App {
                                             match target_line(have) {
                                                 Some((mark, color)) => {
                                                     job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), color));
-                                                    job.append(l, 0.0, egui::TextFormat::simple(font.clone(), color));
+                                                    job.append(&gametext::line(l), 0.0, egui::TextFormat::simple(font.clone(), color));
                                                 }
-                                                None => job.append(l, 0.0, egui::TextFormat::simple(font.clone(), mod_color)),
+                                                None => job.append(&gametext::line(l), 0.0, egui::TextFormat::simple(font.clone(), mod_color)),
                                             }
                                             ui.label(job);
                                         }
@@ -1485,7 +1500,7 @@ impl App {
                                 if !right_has {
                                     return;
                                 }
-                                ui.label(RichText::new("AU MARCHÉ").color(ui::GOLD_DIM).small().strong());
+                                ui.label(RichText::new(tr!("AU MARCHÉ")).color(ui::GOLD_DIM).small().strong());
                                 if let Some((text, color)) = &price {
                                     ui.horizontal(|ui| {
                                         if pending {
@@ -1545,7 +1560,7 @@ impl App {
         }
         // Implicites et compétences données par la pièce.
         let implicits: Vec<String> = it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m.clone())
-            .chain(it.granted_skills.iter().map(|s| format!("Compétence : {s}")))
+            .chain(it.granted_skills.iter().map(|s| format!("{}{s}", tr!("Octroie l'Aptitude : "))))
             .collect();
         // Mods de la pièce telle qu'elle est (la comparaison est côté recommandation) : en blanc
         // ceux que le build vise, en gris les autres.
@@ -1603,8 +1618,8 @@ impl App {
                     })
                     .collect();
                 for want in &b.implicits {
-                    parts.push(if let Some(skill) = want.strip_prefix("Compétence : ") {
-                        if implicits.iter().any(|h| h.strip_prefix("Compétence : ").is_some_and(|n| n.contains(skill))) { 1.0 } else { 0.0 }
+                    parts.push(if let Some(skill) = want.strip_prefix(tr!("Octroie l'Aptitude : ")) {
+                        if implicits.iter().any(|h| h.strip_prefix(tr!("Octroie l'Aptitude : ")).is_some_and(|n| n.contains(skill))) { 1.0 } else { 0.0 }
                     } else {
                         let (tpl, w) = trade::template(want);
                         implicits.iter().map(|h| trade::template(h)).find(|(t, _)| *t == tpl).map_or(0.0, |(_, h)| ratio(h.unwrap_or(0.0), w))
@@ -1770,7 +1785,7 @@ impl App {
         }
         if let Some(b) = self.builds.active() {
             let name = b.name.clone();
-            self.say(format!("Build actif : {name}"));
+            self.say(tr!("Build actif : {name}", name));
         }
     }
 
@@ -1779,7 +1794,7 @@ impl App {
             Ok(meta) => {
                 let id = meta.id.clone();
                 self.activate_build(&id);
-                self.add_build.message = Some((true, format!("« {} » ajouté et activé", meta.name)));
+                self.add_build.message = Some((true, tr!("« {name} » ajouté et activé", name = meta.name)));
                 self.add_build.url.clear();
             }
             Err(e) => self.add_build.message = Some((false, e)),
@@ -1848,17 +1863,17 @@ impl App {
             let label = match (&current_char, confirmed) {
                 (Some(n), true) => RichText::new(n.clone()).color(ui::GOLD),
                 (Some(n), false) => RichText::new(format!("{n} ?")).color(ui::GOLD).italics(),
-                (None, _) => RichText::new("personnage ?").color(Color32::GRAY),
+                (None, _) => RichText::new(tr!("personnage ?")).color(Color32::GRAY),
             };
             let resp = egui::ComboBox::from_id_salt("character_select").width(width(0)).truncate().selected_text(label).show_ui(ui, |ui| {
                 for (name, class, level) in &chars {
-                    if ui.selectable_label(current_char.as_ref() == Some(name), format!("{name} — {class} niv. {level}")).clicked() {
+                    if ui.selectable_label(current_char.as_ref() == Some(name), tr!("{name} — {class} niv. {level}", name, class = gametext::name(class), level)).clicked() {
                         picked = Some(name.clone());
                     }
                 }
             });
             if !confirmed && has_character {
-                resp.response.on_hover_text("Personnage supposé d'après le journal du jeu : à confirmer");
+                resp.response.on_hover_text(tr!("Personnage supposé d'après le journal du jeu : à confirmer"));
             }
             });
         }
@@ -1872,7 +1887,7 @@ impl App {
         let current = self.builds.active().map(|b| b.name.clone());
         let selected = match &current {
             Some(n) => RichText::new(n).color(ui::GOLD),
-            None => RichText::new("aucun build").color(Color32::GRAY),
+            None => RichText::new(tr!("aucun build")).color(Color32::GRAY),
         };
         let mut chosen: Option<String> = None;
         // Cadre de la liste des builds : le bouton de lien prend exactement sa hauteur.
@@ -1881,13 +1896,13 @@ impl App {
             let combo = egui::ComboBox::from_id_salt("build_select").width(width(1)).truncate().selected_text(selected.clone()).show_ui(ui, |ui| {
             for b in self.builds.list() {
                 let active = self.builds.active().is_some_and(|a| a.id == b.id);
-                if ui.selectable_label(active, &b.name).on_hover_text(format!("source : {}", b.source)).clicked() {
+                if ui.selectable_label(active, &b.name).on_hover_text(tr!("source : {source}", source = b.source)).clicked() {
                     chosen = Some(b.id.clone());
                 }
             }
         })
         .response
-        .on_hover_text(current.as_deref().unwrap_or("aucun build"));
+        .on_hover_text(current.as_deref().unwrap_or(tr!("aucun build")));
             combo_rect = Some(combo.rect);
         });
 
@@ -1910,7 +1925,7 @@ impl App {
                     }
                 })
                 .response
-                .on_hover_text("Ligue de ce personnage, pour les prix du marché (le journal du jeu ne la donne pas)");
+                .on_hover_text(tr!("Ligue de ce personnage, pour les prix du marché (le journal du jeu ne la donne pas)"));
             });
         }
 
@@ -1918,7 +1933,7 @@ impl App {
         if let Some(shown_label) = &shown_step {
             in_zone(ui, 3, &mut |ui| {
             let preview = self.step_preview.is_some();
-            let mut text = RichText::new(if preview { format!("{shown_label} (aperçu)") } else { shown_label.clone() }).color(ui::GOLD);
+            let mut text = RichText::new(if preview { tr!("{step} (aperçu)", step = guide::step_text(shown_label)) } else { guide::step_text(shown_label) }).color(ui::GOLD);
             if preview {
                 text = text.italics();
             }
@@ -1929,7 +1944,7 @@ impl App {
                 .show_ui(ui, |ui| {
                     for label in &all_steps {
                         let current = progress.as_ref() == Some(label);
-                        let name = if current { format!("{label} (actuelle)") } else { label.clone() };
+                        let name = if current { tr!("{step} (actuelle)", step = guide::step_text(label)) } else { guide::step_text(label) };
                         if ui.selectable_label(Some(label) == shown_step.as_ref(), name).clicked() {
                             step_pick = Some(label.clone());
                         }
@@ -1937,9 +1952,9 @@ impl App {
                 })
                 .response
                 .on_hover_text(if preview {
-                    "Étape vue en aperçu : reviens sur l'étape « (actuelle) » pour suivre ta progression"
+                    tr!("Étape vue en aperçu : reviens sur l'étape « (actuelle) » pour suivre ta progression")
                 } else {
-                    "Étape du build : en endgame, choisis la variante que tu joues ; les autres s'affichent en aperçu"
+                    tr!("Étape du build : en endgame, choisis la variante que tu joues ; les autres s'affichent en aperçu")
                 });
             });
         }
@@ -1950,8 +1965,8 @@ impl App {
         });
         if let Some(url) = link {
             let hint = match &shown_step {
-                Some(step) => format!("Ouvrir le build sur son site, à l'étape {step}"),
-                None => "Ouvrir le build sur son site".to_string(),
+                Some(step) => tr!("Ouvrir le build sur son site, à l'étape {step}", step = guide::step_text(step)),
+                None => tr!("Ouvrir le build sur son site").to_string(),
             };
             // Même hauteur et même ligne que les listes.
             let (zone, _) = ui.allocate_exact_size(Vec2::new(link_w, height), egui::Sense::hover());
@@ -1968,7 +1983,7 @@ impl App {
                 .clicked();
             if clicked {
                 if let Err(e) = desktop::open_url(&url) {
-                    self.say(format!("Impossible d'ouvrir le navigateur : {e}"));
+                    self.say(tr!("Impossible d'ouvrir le navigateur : {e}", e));
                 }
             }
         }
@@ -2003,25 +2018,25 @@ impl App {
                 ui.label(RichText::new(format!("v{}", updater::VERSION)).color(Color32::from_gray(90)).small());
             }
             State::Available { version, .. } => {
-                let button = egui::Button::new(RichText::new(format!("⬆  Version {version} disponible — mettre à jour")).color(Color32::from_rgb(120, 200, 120)));
-                if ui.add(button).on_hover_text(format!("Tu as la version {}", updater::VERSION)).clicked() {
+                let button = egui::Button::new(RichText::new(tr!("⬆  Version {version} disponible — mettre à jour", version)).color(Color32::from_rgb(120, 200, 120)));
+                if ui.add(button).on_hover_text(tr!("Tu as la version {version}", version = updater::VERSION)).clicked() {
                     self.updater.install(ui.ctx());
                 }
             }
             State::Downloading { version } => {
-                ui.label(RichText::new(format!("téléchargement de la version {version}…")).color(Color32::GRAY));
+                ui.label(RichText::new(tr!("téléchargement de la version {version}…", version)).color(Color32::GRAY));
                 ui.spinner();
             }
             State::Ready { version } => {
-                if ui.button(RichText::new(format!("Version {version} installée — redémarrer")).color(Color32::from_rgb(120, 200, 120))).clicked() {
+                if ui.button(RichText::new(tr!("Version {version} installée — redémarrer", version)).color(Color32::from_rgb(120, 200, 120))).clicked() {
                     match updater::restart() {
                         Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
-                        Err(e) => self.say(format!("Redémarrage impossible : {e} (relance l'app à la main)")),
+                        Err(e) => self.say(tr!("Redémarrage impossible : {e} (relance l'app à la main)", e)),
                     }
                 }
             }
             State::Failed(e) => {
-                ui.label(RichText::new("mise à jour impossible").color(Color32::from_rgb(230, 120, 100))).on_hover_text(e);
+                ui.label(RichText::new(tr!("mise à jour impossible")).color(Color32::from_rgb(230, 120, 100))).on_hover_text(e);
             }
         }
     }
@@ -2032,23 +2047,23 @@ impl App {
         let count = self.gear.slots.len();
         let character = self.coach.as_ref().and_then(|c| c.character().map(|(n, s)| (n.to_string(), s.class.clone(), s.level)));
         let title = match &character {
-            Some((name, ..)) => format!("Équipement de {name} (Path of Exile 2)"),
-            None => "Équipement (Path of Exile 2)".to_string(),
+            Some((name, ..)) => tr!("Équipement de {name} (Path of Exile 2)", name),
+            None => tr!("Équipement (Path of Exile 2)").to_string(),
         };
         let mut context = Vec::new();
         if let Some((_, class, level)) = &character {
-            context.push(format!("Classe : {class}, niveau {level}"));
+            context.push(tr!("Classe : {class}, niveau {level}", class, level));
         }
         if !self.league.is_empty() {
-            context.push(format!("Ligue : {}", self.league));
+            context.push(tr!("Ligue : {league}", league = self.league));
         }
         if let Some(b) = self.builds.active() {
-            let step = self.judging_step().map(|s| format!(" (étape : {})", s.label));
-            context.push(format!("Build suivi : {}{}", b.name, step.unwrap_or_default()));
+            let step = self.judging_step().map(|s| tr!(" (étape : {step})", step = guide::step_text(&s.label)));
+            context.push(tr!("Build suivi : {name}{step}", name = b.name, step = step.unwrap_or_default()));
         }
-        context.push("Texte des pièces tel que copié en jeu (Ctrl+Alt+C), en anglais".into());
+        context.push(tr!("Texte des pièces tel que copié en jeu (Ctrl+Alt+C), en anglais").into());
         ctx.copy_text(self.gear.export(&title, &context));
-        self.say(format!("Équipement copié dans le presse-papier ({count} pièce(s))"));
+        self.say(trn!(count, "Équipement copié dans le presse-papier ({n} pièce)", "Équipement copié dans le presse-papier ({n} pièces)"));
     }
 
     /// Nouveautés : après une mise à jour (versions arrivées depuis la dernière vue), ou depuis
@@ -2065,7 +2080,7 @@ impl App {
             }
         }
         let (mut save, mut cancel) = (false, false);
-        let (_, closed) = ui::modal(ctx, "settings", "Réglages", true, 620.0, |ui| {
+        let (_, closed) = ui::modal(ctx, "settings", tr!("Réglages"), true, 620.0, |ui| {
             // Tableau : intitulé (et son explication en petit) à gauche, réglage à droite.
             let label = |ui: &mut egui::Ui, title: &str, hint: &str| {
                 ui.vertical(|ui| {
@@ -2084,19 +2099,31 @@ impl App {
                 .num_columns(2)
                 .spacing([16.0, 10.0])
                 .show(ui, |ui| {
-                    section(ui, "Jeu");
+                    section(ui, tr!("Interface"));
+                    label(ui, tr!("Langue"), tr!("textes de l'app et du jeu ; Alt maintenu : l'autre langue"));
+                    egui::ComboBox::from_id_salt("lang")
+                        .width(320.0)
+                        .selected_text(RichText::new(draft.lang.name()).color(ui::GOLD))
+                        .show_ui(ui, |ui| {
+                            for l in i18n::Lang::ALL {
+                                ui.selectable_value(&mut draft.lang, l, l.name());
+                            }
+                        });
+                    ui.end_row();
+
+                    section(ui, tr!("Jeu"));
                     let check = paths::check(&draft.game_dir);
                     let found = match (check.log, check.assets) {
-                        (true, true) => "journal et images du jeu trouvés",
-                        (true, false) => "journal trouvé, images du jeu introuvables",
-                        (false, true) => "images trouvées, journal du jeu introuvable",
-                        (false, false) => "jeu introuvable dans ce dossier",
+                        (true, true) => tr!("journal et images du jeu trouvés"),
+                        (true, false) => tr!("journal trouvé, images du jeu introuvables"),
+                        (false, true) => tr!("images trouvées, journal du jeu introuvable"),
+                        (false, false) => tr!("jeu introuvable dans ce dossier"),
                     };
-                    label(ui, "Dossier du jeu", found);
+                    label(ui, tr!("Dossier du jeu"), found);
                     // Le chemin est le bouton : un clic ouvre le choix du dossier.
                     let dir = draft.game_dir.display().to_string();
                     let shown = if dir.is_empty() {
-                        "choisir le dossier…".to_string()
+                        tr!("choisir le dossier…").to_string()
                     } else {
                         dir.clone()
                     };
@@ -2107,9 +2134,9 @@ impl App {
                     let resp = ui
                         .add_enabled(draft.picking.is_none(), button)
                         .on_hover_text(if dir.is_empty() {
-                            "Choisir le dossier du jeu".to_string()
+                            tr!("Choisir le dossier du jeu").to_string()
                         } else {
-                            format!("{dir}\nclic : choisir un autre dossier")
+                            tr!("{dir}\nclic : choisir un autre dossier", dir)
                         });
                     if resp.clicked() {
                         let (tx, rx) = channel();
@@ -2117,7 +2144,7 @@ impl App {
                         std::thread::spawn(move || {
                             let _ = tx.send(
                                 rfd::FileDialog::new()
-                                    .set_title("Dossier de Path of Exile 2")
+                                    .set_title(tr!("Dossier de Path of Exile 2"))
                                     .pick_folder(),
                             );
                             ctx.request_repaint();
@@ -2126,15 +2153,15 @@ impl App {
                     }
                     ui.end_row();
 
-                    section(ui, "Diagnostic (Ctrl+C)");
-                    label(ui, "Affichage", "ce que fait Ctrl+C sur un objet en jeu");
+                    section(ui, tr!("Diagnostic (Ctrl+C)"));
+                    label(ui, tr!("Affichage"), tr!("ce que fait Ctrl+C sur un objet en jeu"));
                     egui::ComboBox::from_id_salt("open_on_copy")
                         .width(320.0)
                         .selected_text(
                             RichText::new(if draft.open_on_copy {
-                                "ouvrir le détail du diagnostic"
+                                tr!("ouvrir le détail du diagnostic")
                             } else {
-                                "rester sur l'historique"
+                                tr!("rester sur l'historique")
                             })
                             .color(ui::GOLD),
                         )
@@ -2142,37 +2169,37 @@ impl App {
                             ui.selectable_value(
                                 &mut draft.open_on_copy,
                                 true,
-                                "ouvrir le détail du diagnostic",
+                                tr!("ouvrir le détail du diagnostic"),
                             );
                             ui.selectable_value(
                                 &mut draft.open_on_copy,
                                 false,
-                                "rester sur l'historique",
+                                tr!("rester sur l'historique"),
                             );
                         });
                     ui.end_row();
 
-                    section(ui, "Prix");
+                    section(ui, tr!("Prix"));
                     label(
                         ui,
-                        "Estimation sur le trade",
-                        "recherche d'annonces comparables sur pathofexile.com",
+                        tr!("Estimation sur le trade"),
+                        tr!("recherche d'annonces comparables sur pathofexile.com"),
                     );
-                    ui.checkbox(&mut draft.trade_prices, "activée");
+                    ui.checkbox(&mut draft.trade_prices, tr!("activée"));
                     ui.end_row();
                     label(
                         ui,
-                        "Lancement de l'estimation",
-                        "au Ctrl+C, ou plus tard avec le bouton « Estimer »",
+                        tr!("Lancement de l'estimation"),
+                        tr!("au Ctrl+C, ou plus tard avec le bouton « Estimer »"),
                     );
                     ui.add_enabled_ui(draft.trade_prices, |ui| {
                         egui::ComboBox::from_id_salt("auto_estimate")
                             .width(320.0)
                             .selected_text(
                                 RichText::new(if draft.auto_estimate {
-                                    "automatique, dès le Ctrl+C"
+                                    tr!("automatique, dès le Ctrl+C")
                                 } else {
-                                    "manuel, bouton « Estimer »"
+                                    tr!("manuel, bouton « Estimer »")
                                 })
                                 .color(ui::GOLD),
                             )
@@ -2180,20 +2207,20 @@ impl App {
                                 ui.selectable_value(
                                     &mut draft.auto_estimate,
                                     true,
-                                    "automatique, dès le Ctrl+C",
+                                    tr!("automatique, dès le Ctrl+C"),
                                 );
                                 ui.selectable_value(
                                     &mut draft.auto_estimate,
                                     false,
-                                    "manuel, bouton « Estimer »",
+                                    tr!("manuel, bouton « Estimer »"),
                                 );
                             });
                     });
                     ui.end_row();
                     label(
                         ui,
-                        "Seuil du marché",
-                        "en dessous, un objet est conseillé au PNJ",
+                        tr!("Seuil du marché"),
+                        tr!("en dessous, un objet est conseillé au PNJ"),
                     );
                     ui.add(
                         egui::DragValue::new(&mut draft.market_min_ex)
@@ -2203,29 +2230,29 @@ impl App {
                     );
                     ui.end_row();
 
-                    section(ui, "Mises à jour");
+                    section(ui, tr!("Mises à jour"));
                     label(
                         ui,
-                        "Recherche automatique",
-                        "sur GitHub, au lancement puis toutes les 5 minutes",
+                        tr!("Recherche automatique"),
+                        tr!("sur GitHub, au lancement puis toutes les 5 minutes"),
                     );
-                    ui.checkbox(&mut draft.auto_update, "activée");
+                    ui.checkbox(&mut draft.auto_update, tr!("activée"));
                     ui.end_row();
 
-                    section(ui, "Expérimental");
+                    section(ui, tr!("Expérimental"));
                     label(
                         ui,
-                        "Onglet Boss",
-                        "boss d'endgame affrontés : passages, morts, temps (expérimental)",
+                        tr!("Onglet Boss"),
+                        tr!("boss d'endgame affrontés : passages, morts, temps (expérimental)"),
                     );
-                    ui.checkbox(&mut draft.boss_tab, "afficher l'onglet");
+                    ui.checkbox(&mut draft.boss_tab, tr!("afficher l'onglet"));
                     ui.end_row();
                 });
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    save = ui::action_button(ui, "✔  Enregistrer").clicked();
-                    cancel = ui::action_button(ui, "Annuler").clicked();
+                    save = ui::action_button(ui, tr!("✔  Enregistrer")).clicked();
+                    cancel = ui::action_button(ui, tr!("Annuler")).clicked();
                 });
             });
         });
@@ -2244,11 +2271,18 @@ impl App {
             self.config.auto_update = draft.auto_update;
             self.config.market_min_ex = draft.market_min_ex;
             self.updater.set_enabled(draft.auto_update);
+            if draft.lang != i18n::base() {
+                self.stored.lang = draft.lang.code().to_string();
+                self.config.lang = self.stored.lang.clone();
+                i18n::set(draft.lang);
+                // Textes mis en cache dans l'ancienne langue.
+                self.socket_tips.clear();
+            }
             if draft.game_dir != self.config.game_dir {
                 self.set_game_dir(ctx, draft.game_dir);
             }
             self.stored.save(&self.dirs);
-            self.say("Réglages enregistrés".into());
+            self.say(tr!("Réglages enregistrés").into());
         } else if cancel || closed {
             self.settings = None;
         }
@@ -2256,7 +2290,7 @@ impl App {
 
     fn changelog_window(&mut self, ctx: &egui::Context) {
         let Some(releases) = &self.changelog else { return };
-        let (ok, closed) = ui::modal(ctx, "changelog", "Nouveautés", true, 560.0, |ui| {
+        let (ok, closed) = ui::modal(ctx, "changelog", tr!("Nouveautés"), true, 560.0, |ui| {
             ui::plain_widgets(ui);
             egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
                 for (i, r) in releases.iter().enumerate() {
@@ -2264,7 +2298,7 @@ impl App {
                         ui.add_space(10.0);
                     }
                     let current = r.version == updater::VERSION;
-                    let title = if current { format!("Version {} (installée)", r.version) } else { format!("Version {}", r.version) };
+                    let title = if current { tr!("Version {version} (installée)", version = r.version) } else { tr!("Version {version}", version = r.version) };
                     ui.label(RichText::new(title).color(ui::GOLD).strong());
                     for item in &r.items {
                         ui.horizontal_wrapped(|ui| {
@@ -2292,26 +2326,26 @@ impl App {
         ui::gold_widgets(ui);
         let step = self.judging_step().cloned();
         let (regex, names) = step.as_ref().map(vendor_regex::build).unwrap_or_default();
-        let button = ui.add_enabled(!regex.is_empty(), egui::Button::new(RichText::new("🔍  Regex marchands").color(ui::GOLD)));
+        let button = ui.add_enabled(!regex.is_empty(), egui::Button::new(RichText::new(tr!("🔍  Regex marchands")).color(ui::GOLD)));
         let button = button
             .on_hover_ui(|ui| {
                 ui.set_max_width(420.0);
-                let step = step.as_ref().map(|s| s.label.as_str()).unwrap_or_default();
-                ui.label(RichText::new(format!("Copie une recherche pour les marchands, d'après le build ({step}) : colle-la (Ctrl+V) dans la recherche d'un marchand en jeu, les objets utiles s'allument.")).size(15.0));
+                let step = step.as_ref().map(|s| guide::step_text(&s.label)).unwrap_or_default();
+                ui.label(RichText::new(tr!("Copie une recherche pour les marchands, d'après le build ({step}) : colle-la (Ctrl+V) dans la recherche d'un marchand en jeu, les objets utiles s'allument.", step)).size(15.0));
                 ui.add_space(4.0);
-                ui.label(RichText::new(format!("Cherche : {}", names.join(", "))).size(15.0).color(Color32::GRAY));
+                ui.label(RichText::new(tr!("Cherche : {names}", names = names.join(", "))).size(15.0).color(Color32::GRAY));
             })
-            .on_disabled_hover_text("Aucun build suivi, ou il ne vise aucun mod à cette étape");
+            .on_disabled_hover_text(tr!("Aucun build suivi, ou il ne vise aucun mod à cette étape"));
         if button.clicked() {
             ui.ctx().copy_text(regex.clone());
-            self.say(format!("Regex copiée ({} caractères) : colle-la dans la recherche d'un marchand", regex.chars().count()));
+            self.say(tr!("Regex copiée ({n} caractères) : colle-la dans la recherche d'un marchand", n = regex.chars().count()));
         }
     }
 
     /// Bouton « Menu » de la barre d'état, ouvert vers le haut : actions, puis réglages.
     fn settings_menu(&mut self, ui: &mut egui::Ui) {
         ui::gold_widgets(ui);
-        let button = ui.button(RichText::new("⚙  Menu").color(ui::GOLD));
+        let button = ui.button(RichText::new(tr!("⚙  Menu")).color(ui::GOLD));
         let popup = ui.make_persistent_id("settings_popup");
         if button.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup));
@@ -2323,15 +2357,15 @@ impl App {
         egui::popup::popup_above_or_below_widget(ui, popup, &button, egui::AboveOrBelow::Above, egui::PopupCloseBehavior::CloseOnClick, |ui| {
             ui.set_width(280.0);
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui::menu_section(ui, "BUILD ET JEU");
-            if ui::menu_item(ui, "⚔", "Gestionnaire de builds", "ajouter, mettre à jour, choisir le build suivi", true, false).clicked() {
+            ui::menu_section(ui, tr!("BUILD ET JEU"));
+            if ui::menu_item(ui, "⚔", tr!("Gestionnaire de builds"), tr!("ajouter, mettre à jour, choisir le build suivi"), true, false).clicked() {
                 self.add_build.open = true;
                 self.add_build.message = None;
             }
             if ui::menu_item(ui,
                     "🔧",
-                    "Réglages",
-                    "dossier du jeu, prix, mises à jour",
+                    tr!("Réglages"),
+                    tr!("langue, dossier du jeu, prix, mises à jour"),
                     true,
                     false,
                 )
@@ -2341,28 +2375,28 @@ impl App {
             }
             ui.add_space(4.0);
             ui.separator();
-            ui::menu_section(ui, "DONNÉES");
+            ui::menu_section(ui, tr!("DONNÉES"));
             let tracked = !self.gear.slots.is_empty();
-            let export_hint = if tracked { "copie le texte de chaque pièce suivie" } else { "aucune pièce suivie : Ctrl+Alt+C sur une pièce" };
-            if ui::menu_item(ui, "📤", "Exporter l'équipement", export_hint, tracked, false).clicked() {
+            let export_hint = if tracked { tr!("copie le texte de chaque pièce suivie") } else { tr!("aucune pièce suivie : Ctrl+Alt+C sur une pièce") };
+            if ui::menu_item(ui, "📤", tr!("Exporter l'équipement"), export_hint, tracked, false).clicked() {
                 self.export_gear(ui.ctx());
             }
-            if ui::menu_item(ui, "⟳", "Mettre à jour les catalogues", "augments, types de base, gemmes, images", true, false).clicked() {
+            if ui::menu_item(ui, "⟳", tr!("Mettre à jour les catalogues"), tr!("augments, types de base, gemmes, images"), true, false).clicked() {
                 self.augments.refresh();
                 self.gem_infos.refresh();
                 self.assets.refresh();
-                self.say("Mise à jour des catalogues en cours (quelques secondes)".into());
+                self.say(tr!("Mise à jour des catalogues en cours (quelques secondes)").into());
             }
-            if ui::menu_item(ui, "✨", "Nouveautés", &format!("ce qui a changé jusqu'à la version {}", updater::VERSION), true, false).clicked() {
+            if ui::menu_item(ui, "✨", tr!("Nouveautés"), &tr!("ce qui a changé jusqu'à la version {version}", version = updater::VERSION), true, false).clicked() {
                 self.changelog = Some(changelog::releases());
             }
             ui.add_space(4.0);
             ui.separator();
             ui.add_space(2.0);
-            if ui::menu_item(ui, "🗑", "Vider l'historique", "", !self.history.is_empty(), true).clicked() {
+            if ui::menu_item(ui, "🗑", tr!("Vider l'historique"), "", !self.history.is_empty(), true).clicked() {
                 self.history.clear();
                 self.save_history();
-                self.say("Historique vidé".into());
+                self.say(tr!("Historique vidé").into());
             }
             ui.add_space(2.0);
         });
@@ -2402,7 +2436,7 @@ impl App {
                                 c.reload_steps(&files);
                             }
                         }
-                        (true, format!("« {} » mis à jour", meta.name))
+                        (true, tr!("« {name} » mis à jour", name = meta.name))
                     }
                     Err(e) => (false, e),
                 });
@@ -2415,10 +2449,10 @@ impl App {
         let mut shift: Option<(String, isize)> = None;
         let mut link: Option<(String, String)> = None;
         let mut remove = None;
-        let (_, closed) = ui::modal(ctx, "build_manager", "Gestionnaire de builds", true, 680.0, |ui| {
+        let (_, closed) = ui::modal(ctx, "build_manager", tr!("Gestionnaire de builds"), true, 680.0, |ui| {
                 // Liste des builds : une carte par build, actions à droite.
                 if self.builds.list().is_empty() {
-                    ui.label(RichText::new("Aucun build pour l'instant.").color(Color32::GRAY));
+                    ui.label(RichText::new(tr!("Aucun build pour l'instant.")).color(Color32::GRAY));
                 }
                 let active_id = self.builds.active().map(|b| b.id.clone());
                 let count = self.builds.list().len();
@@ -2437,10 +2471,10 @@ impl App {
                                 // Ordre de la liste (aussi celui de la liste des builds en haut).
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
-                                    if ui.add_enabled(i > 0, egui::Button::new(RichText::new("▲").small()).small()).on_hover_text("Monter").clicked() {
+                                    if ui.add_enabled(i > 0, egui::Button::new(RichText::new("▲").small()).small()).on_hover_text(tr!("Monter")).clicked() {
                                         shift = Some((b.id.clone(), -1));
                                     }
-                                    if ui.add_enabled(i + 1 < count, egui::Button::new(RichText::new("▼").small()).small()).on_hover_text("Descendre").clicked() {
+                                    if ui.add_enabled(i + 1 < count, egui::Button::new(RichText::new("▼").small()).small()).on_hover_text(tr!("Descendre")).clicked() {
                                         shift = Some((b.id.clone(), 1));
                                     }
                                 });
@@ -2451,54 +2485,54 @@ impl App {
                                     ui.horizontal(|ui| {
                                         ui.add(egui::Label::new(RichText::new(&b.name).color(ui::GOLD).strong()).truncate()).on_hover_text(&b.name);
                                         if active {
-                                            ui.label(RichText::new("● actif").color(Color32::from_rgb(110, 210, 110)).small());
+                                            ui.label(RichText::new(tr!("● actif")).color(Color32::from_rgb(110, 210, 110)).small());
                                         }
                                     });
                                     if web {
                                         ui.hyperlink_to(RichText::new(short_source(&b.source)).small(), &b.source).on_hover_text(&b.source);
                                     } else {
-                                        ui.label(RichText::new(format!("{} · sans lien", b.source)).color(Color32::GRAY).small());
+                                        ui.label(RichText::new(tr!("{source} · sans lien", source = b.source)).color(Color32::GRAY).small());
                                     }
                                     let busy = self.add_build.link_pending.as_ref().is_some_and(|(id, _, _)| *id == b.id);
                                     if busy {
                                         ui.horizontal(|ui| {
                                             ui.spinner();
-                                            ui.label(RichText::new("mise à jour…").color(Color32::GRAY).small());
+                                            ui.label(RichText::new(tr!("mise à jour…")).color(Color32::GRAY).small());
                                         });
                                     } else if self.add_build.link_for.as_ref() == Some(&b.id) {
                                         ui.horizontal(|ui| {
-                                            ui.add(egui::TextEdit::singleline(&mut self.add_build.link_url).hint_text("lien du build sur Mobalytics ou Kami-labs").desired_width(text_w - 60.0));
-                                            if ui.add_enabled(!self.add_build.link_url.trim().is_empty(), egui::Button::new("Lier")).clicked() {
+                                            ui.add(egui::TextEdit::singleline(&mut self.add_build.link_url).hint_text(tr!("lien du build sur Mobalytics ou Kami-labs")).desired_width(text_w - 60.0));
+                                            if ui.add_enabled(!self.add_build.link_url.trim().is_empty(), egui::Button::new(tr!("Lier"))).clicked() {
                                                 link = Some((b.id.clone(), self.add_build.link_url.trim().to_string()));
                                             }
                                         });
-                                    } else if !web && ui::text_button(ui, "lier sa page web (Mobalytics, Kami-labs)").clicked() {
+                                    } else if !web && ui::text_button(ui, tr!("lier sa page web (Mobalytics, Kami-labs)")).clicked() {
                                         self.add_build.link_for = Some(b.id.clone());
                                         self.add_build.link_url.clear();
                                     }
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if self.add_build.confirm_remove.as_ref() == Some(&b.id) {
-                                        if ui.button("Annuler").clicked() {
+                                        if ui.button(tr!("Annuler")).clicked() {
                                             self.add_build.confirm_remove = None;
                                         }
-                                        if ui.button(RichText::new("Confirmer").color(Color32::from_rgb(230, 100, 90))).clicked() {
+                                        if ui.button(RichText::new(tr!("Confirmer")).color(Color32::from_rgb(230, 100, 90))).clicked() {
                                             remove = Some(b.id.clone());
                                         }
                                     } else {
-                                        if ui.button(RichText::new("Supprimer").color(Color32::from_rgb(220, 120, 110))).clicked() {
+                                        if ui.button(RichText::new(tr!("Supprimer")).color(Color32::from_rgb(220, 120, 110))).clicked() {
                                             self.add_build.confirm_remove = Some(b.id.clone());
                                         }
                                         // De droite à gauche : Activer, Mettre à jour, Supprimer à l'écran.
                                         if web
                                             && ui
-                                                .add_enabled(self.add_build.link_pending.is_none(), egui::Button::new("Mettre à jour"))
-                                                .on_hover_text("Retélécharge le build depuis sa page (étapes, objets, runes)")
+                                                .add_enabled(self.add_build.link_pending.is_none(), egui::Button::new(tr!("Mettre à jour")))
+                                                .on_hover_text(tr!("Retélécharge le build depuis sa page (étapes, objets, runes)"))
                                                 .clicked()
                                         {
                                             link = Some((b.id.clone(), b.source.clone()));
                                         }
-                                        if !active && ui.button("Activer").clicked() {
+                                        if !active && ui.button(tr!("Activer")).clicked() {
                                             activate = Some(b.id.clone());
                                         }
                                     }
@@ -2508,20 +2542,20 @@ impl App {
                 }
 
                 ui.add_space(12.0);
-                ui::section_header(ui, "AJOUTER UN BUILD", None, |_| {});
+                ui::section_header(ui, tr!("AJOUTER UN BUILD"), None, |_| {});
                 // Sites pris en charge, en couleur.
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.label("Lien de la page du build, sur ");
+                    ui.label(tr!("Lien de la page du build, sur "));
                     ui.label(RichText::new("Mobalytics").color(Color32::from_rgb(90, 200, 190)).strong());
-                    ui.label(" ou ");
+                    ui.label(tr!(" ou "));
                     ui.label(RichText::new("Kami-labs").color(Color32::from_rgb(240, 160, 70)).strong());
-                    ui.label(" :");
+                    ui.label(tr!(" :"));
                 });
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.add_build.url).hint_text("https://mobalytics.gg/poe-2/…").desired_width(ui.available_width() - 90.0));
                     let busy = self.add_build.pending.is_some();
-                    if ui.add_enabled(!busy && !self.add_build.url.trim().is_empty(), egui::Button::new("Importer")).clicked() {
+                    if ui.add_enabled(!busy && !self.add_build.url.trim().is_empty(), egui::Button::new(tr!("Importer"))).clicked() {
                         let (tx, rx) = channel();
                         let (url, ctx) = (self.add_build.url.clone(), ctx.clone());
                         std::thread::spawn(move || {
@@ -2626,13 +2660,13 @@ impl App {
         self.full_view = false;
         // Waystone : noté pour la prochaine map (onglet Maps), pas diagnostiqué.
         if let Some(w) = mapping::Waystone::parse(&ev.text) {
-            let title = format!("Waystone T{} « {} »", w.tier, w.name);
+            let title = tr!("Pierre de téléportation T{tier} « {name} »", tier = w.tier, name = w.name);
             match self.coach.as_mut().map(|c| c.set_waystone(w)) {
                 Some(true) => {
                     self.side_tab = views::SideTab::Maps;
-                    self.say(format!("{title} : associé à la prochaine map ouverte"));
+                    self.say(tr!("{title} : associé à la prochaine map ouverte", title));
                 }
-                _ => self.say(format!("{title} : personnage pas encore détecté, impossible de l'associer à une map")),
+                _ => self.say(tr!("{title} : personnage pas encore détecté, impossible de l'associer à une map", title)),
             }
             return;
         }
@@ -2640,7 +2674,7 @@ impl App {
         match ev.kind {
             CopyKind::Diagnose => {
                 self.side_tab = views::SideTab::Diagnostic;
-                self.say(format!("Diagnostic : {}", it.title()));
+                self.say(tr!("Diagnostic : {item}", item = it.title()));
                 self.remember(&it);
                 if self.stored.auto_estimate {
                     self.request_price(&it);
@@ -2651,23 +2685,23 @@ impl App {
             CopyKind::Equip => {
                 self.tab = views::Tab::Equipment;
                 let msg = match self.gear.equip(&it) {
-                    Equipped::Placed { slot, replaced } => format!(
-                        "{} suivi en {}{}",
-                        it.title(),
-                        slot.label().to_lowercase(),
-                        replaced.map(|r| format!(" (remplace {r})")).unwrap_or_default()
+                    Equipped::Placed { slot, replaced } => tr!(
+                        "{item} suivi en {slot}{replaced}",
+                        item = it.title(),
+                        slot = slot.label().to_lowercase(),
+                        replaced = replaced.map(|r| tr!(" (remplace {r})", r)).unwrap_or_default()
                     ),
                     Equipped::AlreadyThere(slot) => {
-                        format!("{} est déjà suivi ({})", it.title(), slot.label().to_lowercase())
+                        tr!("{item} est déjà suivi ({slot})", item = it.title(), slot = slot.label().to_lowercase())
                     }
                     Equipped::CharmsFull => {
-                        format!("3 charmes déjà suivis et aucun {} : retire-en un (clic droit)", it.base)
+                        tr!("3 charmes déjà suivis et aucun {base} : retire-en un (clic droit)", base = it.base)
                     }
-                    Equipped::UnknownClass(c) => format!("Je ne sais pas où se porte un objet « {c} »"),
+                    Equipped::UnknownClass(c) => tr!("Je ne sais pas où se porte un objet « {c} »", c),
                 };
                 match self.gear.save() {
                     Ok(()) => self.say(msg),
-                    Err(e) => self.say(format!("Impossible d'enregistrer l'équipement : {e}")),
+                    Err(e) => self.say(tr!("Impossible d'enregistrer l'équipement : {e}", e)),
                 }
             }
         }
@@ -2697,14 +2731,14 @@ impl App {
             if let Some(estimate) = est.value_ex().filter(|_| total >= 3) {
                 if estimate >= self.market_min_ex {
                     value.label = rules::Label::Market;
-                    value.summary = format!("{total} annonces comparables, estimé ≈ {}", self.fmt_price(estimate));
+                    value.summary = tr!("{total} annonces comparables, estimé ≈ {price}", total, price = self.fmt_price(estimate));
                 } else {
                     value.label = rules::Label::Vendor;
                     value.summary = self.below_threshold(estimate);
                 }
             } else if total == 0 {
                 value.label = rules::Label::Vendor;
-                value.summary = "aucune annonce comparable en achat immédiat : sans valeur au marché".into();
+                value.summary = tr!("aucune annonce comparable en achat immédiat : sans valeur au marché").into();
             }
         }
         // Unique bon marché : même explication que pour un rare.
@@ -2718,10 +2752,10 @@ impl App {
 
     /// Un objet classé « PNJ » malgré un prix : il vaut trop peu pour la peine de le vendre.
     fn below_threshold(&self, ex: f64) -> String {
-        format!(
-            "vaut ≈ {} au marché, sous le seuil de {} : pas la peine de le mettre en vente, à vendre au PNJ",
-            self.fmt_price(ex),
-            self.fmt_price(self.market_min_ex)
+        tr!(
+            "vaut ≈ {price} au marché, sous le seuil de {threshold} : pas la peine de le mettre en vente, à vendre au PNJ",
+            price = self.fmt_price(ex),
+            threshold = self.fmt_price(self.market_min_ex)
         )
     }
 
@@ -2735,12 +2769,12 @@ impl App {
         let my_dps = weapon_total_dps(it);
         // Écart d'une valeur de l'annonce face à celle de l'objet : « +5,5 », « −1 », et sa couleur.
         let diff = |d: f64| {
-            let n = if (d - d.round()).abs() < 0.05 { format!("{}", d.abs().round()) } else { format!("{:.1}", d.abs()).replace('.', ",") };
+            let n = if (d - d.round()).abs() < 0.05 { format!("{}", d.abs().round()) } else { i18n::decimal(format!("{:.1}", d.abs())) };
             (format!("{}{n}", if d > 0.0 { "+" } else { "−" }), if d > 0.0 { green } else { red })
         };
         // Chaque annonce en objet : ses lignes d'arme (DPS compris), défenses et implicites.
         let as_items: Vec<Option<Item>> = listings.iter().map(|l| l.as_item(&it.item_class)).collect();
-        let note = |v: f64| format!("{v:.1}").replace('.', ",");
+        let note = |v: f64| i18n::decimal(format!("{v:.1}"));
         ui.add_space(4.0);
         // Les proches d'abord, puis les autres ; chaque groupe du moins cher au plus cher, avec leur
         // part dans le prix et leur image (chargée à la demande).
@@ -2771,11 +2805,17 @@ impl App {
                 _ => item::Rarity::Rare,
             };
             let amount = if (l.amount - l.amount.round()).abs() < 0.05 { format!("{}", l.amount.round()) } else { format!("{:.1}", l.amount) };
-            let age = match l.age_hours {
-                Some(h) if h < 1.0 => "à l'instant".to_string(),
-                Some(h) if h < 48.0 => format!("il y a {} h", h.round()),
-                Some(h) => format!("il y a {} j", (h / 24.0).round()),
-                None => String::new(),
+            // L'âge seul (« 3 h ») pour l'infobulle, et la phrase (« il y a 3 h ») pour la carte.
+            let since = match l.age_hours {
+                Some(h) if h < 1.0 => Some(tr!("moins d'une heure").to_string()),
+                Some(h) if h < 48.0 => Some(tr!("{n} h", n = h.round())),
+                Some(h) => Some(tr!("{n} j", n = (h / 24.0).round())),
+                None => None,
+            };
+            let age = match (&since, l.age_hours) {
+                (_, Some(h)) if h < 1.0 => tr!("à l'instant").to_string(),
+                (Some(s), _) => tr!("il y a {age}", age = s),
+                _ => String::new(),
             };
             let defences: Vec<String> = ["Armour", "Evasion", "Energy Shield"].iter().zip(l.defences).filter(|(_, v)| *v > 0.0).map(|(n, v)| format!("{n} {v:.0}")).collect();
             // Une case de grille est en ligne : la carte remet ses lignes l'une sous l'autre.
@@ -2799,10 +2839,10 @@ impl App {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 1.0;
                                 if !l.name.is_empty() {
-                                    ui.label(RichText::new(&l.name).color(c(ui::rarity_color(rarity))).size(15.0).strong());
+                                    ui.label(RichText::new(gametext::name(&l.name)).color(c(ui::rarity_color(rarity))).size(15.0).strong());
                                 }
-                                ui.label(RichText::new(&l.base).color(c(ui::rarity_color(rarity))).size(14.0));
-                                ui.label(RichText::new(format!("niv. {}", l.item_level)).color(c(Color32::GRAY)).size(13.0));
+                                ui.label(RichText::new(gametext::name(&l.base)).color(c(ui::rarity_color(rarity))).size(14.0));
+                                ui.label(RichText::new(tr!("niv. {level}", level = l.item_level)).color(c(Color32::GRAY)).size(13.0));
                             });
                             ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                                 ui.spacing_mut().item_spacing.y = 1.0;
@@ -2819,37 +2859,37 @@ impl App {
                     head.on_hover_ui(|ui| {
                         let title = if l.name.is_empty() { l.base.clone() } else { format!("{} — {}", l.name, l.base) };
                         ui.label(RichText::new(title).color(ui::rarity_color(rarity)).strong());
-                        ui.label(format!("Niveau d'objet {}", l.item_level));
+                        ui.label(tr!("Niveau de l'objet {level}", level = l.item_level));
                         if !defences.is_empty() {
                             ui.label(defences.join(" · "));
                         }
-                        ui.label(format!("Prix demandé : {amount} {}", l.currency));
+                        ui.label(tr!("Prix demandé : {amount} {currency}", amount, currency = l.currency));
                         if let Some(ex) = l.ex {
                             ui.label(self.price_all(ex));
                         }
-                        if !age.is_empty() {
-                            ui.label(format!("En vente depuis : {}", age.trim_start_matches("il y a ")));
+                        if let Some(s) = &since {
+                            ui.label(tr!("En vente depuis : {age}", age = s));
                         }
                     });
                     // Lignes d'arme (DPS et écart face à l'objet), défenses, implicites (écart) : comme
                     // l'en-tête d'une pièce.
                     let mut lines: Vec<Vec<(String, Color32)>> = li.map(weapon_lines).unwrap_or_default();
                     if let (Some(mine_dps), Some(theirs)) = (my_dps, li.and_then(weapon_total_dps)) {
-                        if let Some(line) = lines.iter_mut().find(|l| l.first().is_some_and(|(t, _)| t.starts_with("Attaques par seconde"))) {
+                        if let Some(line) = lines.iter_mut().find(|l| l.first().is_some_and(|(t, _)| t.starts_with(tr!("Attaques par seconde")))) {
                             if (theirs - mine_dps).abs() >= 0.5 {
                                 let (t, col) = diff(theirs - mine_dps);
                                 line.push((format!("  {t}"), col));
                             }
                         }
                     }
-                    let def: Vec<String> = ["Armure", "Évasion", "Bouclier d'énergie"].iter().zip(l.defences).filter(|(_, v)| *v > 0.0).map(|(n, v)| format!("{n} {v:.0}")).collect();
+                    let def: Vec<String> = [tr!("Armure"), tr!("Score d'Évasion"), tr!("Bouclier d'énergie")].iter().zip(l.defences).filter(|(_, v)| *v > 0.0).map(|(n, v)| format!("{n} {v:.0}")).collect();
                     if !def.is_empty() {
                         lines.push(vec![(def.join(" · "), Color32::GRAY)]);
                     }
                     let mut seen = Vec::new();
                     for m in &l.implicits {
                         let (t, v) = trade::template(m);
-                        let mut line = vec![(m.clone(), ui::MOD_COLOR)];
+                        let mut line = vec![(gametext::line(m).into_owned(), ui::MOD_COLOR)];
                         if let Some((_, mv)) = mine.iter().find(|(mt, _)| *mt == t) {
                             seen.push(t.clone());
                             if let (Some(a), Some(b)) = (v, mv) {
@@ -2876,14 +2916,14 @@ impl App {
                     };
                     if score > 0.0 {
                         // La note en blanc, sa part dans le prix en gris.
-                        let text = if l.kept { format!("note {}", note(l.score)) } else { format!("éloignée : note {} ({}×)", note(l.score), note(l.score / score)) };
+                        let text = if l.kept { tr!("note {score}", score = note(l.score)) } else { tr!("éloignée : note {score} ({ratio}×)", score = note(l.score), ratio = note(l.score / score)) };
                         rule(ui);
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             ui.label(RichText::new(text).color(c(Color32::from_gray(225))).size(13.0));
                             if let Some(sh) = share {
                                 let pct = sh * 100.0;
-                                let part = if pct < 1.0 { "· pèse moins de 1 % dans le prix".to_string() } else { format!("· pèse {} % dans le prix", pct.round()) };
+                                let part = if pct < 1.0 { tr!("· pèse moins de 1 % dans le prix").to_string() } else { tr!("· pèse {pct} % dans le prix", pct = pct.round()) };
                                 ui.label(RichText::new(part).color(c(Color32::GRAY)).size(13.0));
                             }
                         });
@@ -2893,14 +2933,15 @@ impl App {
                     }
                     for m in l.mods.iter().filter(|m| !l.implicits.contains(m)) {
                         let (t, v) = trade::template(m);
-                        let mut text = m.clone();
+                        let shown = gametext::line(m);
+                        let mut text = shown.to_string();
                         let color = match mine.iter().find(|(mt, _)| *mt == t) {
                             Some((_, mv)) => {
                                 seen.push(t.clone());
                                 match (v, mv) {
                                     (Some(a), Some(b)) if (a - b).abs() >= 0.05 => {
                                         let (d, col) = diff(a - b);
-                                        text = format!("{m}  ({d})");
+                                        text = format!("{shown}  ({d})");
                                         col
                                     }
                                     _ => Color32::from_gray(210),
@@ -2913,7 +2954,7 @@ impl App {
                     // Mods de l'objet absents de l'annonce.
                     for (line, (t, _)) in it.mods.iter().zip(&mine) {
                         if !seen.contains(t) {
-                            ui.label(RichText::new(format!("sans : {line}")).color(c(red.gamma_multiply(0.8))).size(14.0).italics());
+                            ui.label(RichText::new(tr!("sans : {line}", line = gametext::line(line))).color(c(red.gamma_multiply(0.8))).size(14.0).italics());
                         }
                     }
                 });
@@ -2945,8 +2986,8 @@ impl App {
         }
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left.shrink2(Vec2::new(12.0, 6.0))), |ui| self.left_panel(ui));
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right.shrink2(Vec2::new(12.0, 6.0))), |ui| {
-            let summary = self.coach.as_ref().map(|c| c.summary()).unwrap_or_else(|| "chargement du guide…".into());
-            ui::section_header_sub(ui, "ACTIVITÉ", &summary);
+            let summary = self.coach.as_ref().map(|c| c.summary()).unwrap_or_else(|| tr!("chargement du guide…").into());
+            ui::section_header_sub(ui, tr!("ACTIVITÉ"), &summary);
             self.feed_list(ui);
         });
     }
@@ -2965,8 +3006,8 @@ impl App {
     /// l'onglet Maps).
     fn mapping_panel(&mut self, ui: &mut egui::Ui) {
         let mut to_route = false;
-        ui::section_header(ui, "MAPPING", None, |ui| {
-            to_route = ui::header_button(ui, "Route").on_hover_text("Revoir la route de leveling et ce qui a été oublié pendant la campagne").clicked();
+        ui::section_header(ui, tr!("MAPPING"), None, |ui| {
+            to_route = ui::header_button(ui, tr!("Route")).on_hover_text(tr!("Revoir la route de leveling et ce qui a été oublié pendant la campagne")).clicked();
         });
         if to_route {
             self.bottom_maps = Some(false);
@@ -2991,23 +3032,23 @@ impl App {
                 });
                 ui.horizontal(|ui| {
                     match inside {
-                        Some(_) => ui.label(RichText::new("en cours").color(Color32::from_rgb(110, 200, 110)).size(13.5)),
+                        Some(_) => ui.label(RichText::new(tr!("en cours")).color(Color32::from_rgb(110, 200, 110)).size(13.5)),
                         // Dehors après y être entré : retour en ville, le chrono est arrêté.
-                        None => ui.label(RichText::new("en pause").color(Color32::from_rgb(230, 160, 70)).size(13.5)),
+                        None => ui.label(RichText::new(tr!("en pause")).color(Color32::from_rgb(230, 160, 70)).size(13.5)),
                     };
                     ui.add_space(10.0);
-                    icon_count(ui, &mut self.passive_icons, TOMB_ICON, run.deaths, &plural(run.deaths, "mort"), Color32::from_rgb(225, 90, 80));
+                    icon_count(ui, &mut self.passive_icons, TOMB_ICON, run.deaths, &trn!(run.deaths, "{n} mort", "{n} morts"), Color32::from_rgb(225, 90, 80));
                     ui.add_space(10.0);
-                    icon_count(ui, &mut self.passive_icons, PORTAL_ICON, run.returns(), &format!("{} en ville", plural(run.returns(), "retour")), Color32::from_rgb(110, 150, 255));
+                    icon_count(ui, &mut self.passive_icons, PORTAL_ICON, run.returns(), &trn!(run.returns(), "{n} retour en ville", "{n} retours en ville"), Color32::from_rgb(110, 150, 255));
                 });
                 if inside.is_some() {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
                 }
             }
             None => {
-                ui.label(RichText::new("Pas de map en cours : le chronomètre démarre à l'entrée dans une map.").color(dim).size(15.0));
+                ui.label(RichText::new(tr!("Pas de map en cours : le chronomètre démarre à l'entrée dans une map.")).color(dim).size(15.0));
                 if let Some(w) = book.pending_waystone() {
-                    ui.label(RichText::new(format!("Waystone T{} « {} » prêt pour la prochaine map ({} mods)", w.tier, w.name, w.mods.len())).color(Color32::LIGHT_GRAY).size(13.5));
+                    ui.label(RichText::new(tr!("Pierre de téléportation T{tier} « {name} » prête pour la prochaine map ({mods} mods)", tier = w.tier, name = w.name, mods = w.mods.len())).color(Color32::LIGHT_GRAY).size(13.5));
                 }
             }
         }
@@ -3027,27 +3068,27 @@ impl App {
             ui.add_space(12.0);
             ui.add(egui::Separator::default().spacing(0.0));
             ui.add_space(12.0);
-            let title = if sitting.last().is_some_and(|r| recent(r.last, 2 * 3600)) { "SÉANCE" } else { "DERNIÈRE SÉANCE" };
+            let title = if sitting.last().is_some_and(|r| recent(r.last, 2 * 3600)) { tr!("SÉANCE") } else { tr!("DERNIÈRE SÉANCE") };
             ui.horizontal(|ui| {
                 ui.label(RichText::new(title).color(ui::GOLD_DIM).size(13.0).strong());
-                ui.label(RichText::new(format!("depuis le {}", date_text(sitting[0].start))).color(dim).size(13.5));
+                ui.label(RichText::new(tr!("depuis le {date}", date = date_text(sitting[0].start))).color(dim).size(13.5));
             });
             ui.add_space(6.0);
             let mut rows: Vec<(&str, String)> = Vec::new();
-            rows.push(("Maps", plural(maps.len() as u32, "map")));
+            rows.push((tr!("Maps"), trn!(maps.len(), "{n} map", "{n} maps")));
             if bosses > 0 {
-                rows.push(("Boss", plural(bosses as u32, "arène")));
+                rows.push((tr!("Boss"), trn!(bosses, "{n} arène", "{n} arènes")));
             }
-            rows.push(("Temps de jeu", duration_text(total)));
+            rows.push((tr!("Temps de jeu"), duration_text(total)));
             if !maps.is_empty() {
-                rows.push(("Temps moyen par map", duration_text(map_secs / maps.len() as i64)));
+                rows.push((tr!("Temps moyen par map"), duration_text(map_secs / maps.len() as i64)));
                 if map_secs > 0 {
-                    rows.push(("Maps par heure", format!("{:.1}", maps.len() as f64 * 3600.0 / map_secs as f64)));
+                    rows.push((tr!("Maps par heure"), i18n::decimal(format!("{:.1}", maps.len() as f64 * 3600.0 / map_secs as f64))));
                 }
             }
-            let per = |n: u32| if sitting.is_empty() { String::new() } else { format!(" · {:.2} par map", n as f64 / sitting.len() as f64) };
-            rows.push(("Morts", format!("{deaths}{}", per(deaths))));
-            rows.push(("Retours en ville", format!("{returns}{}", per(returns))));
+            let per = |n: u32| if sitting.is_empty() { String::new() } else { tr!(" · {n} par map", n = i18n::decimal(format!("{:.2}", n as f64 / sitting.len() as f64))) };
+            rows.push((tr!("Morts"), format!("{deaths}{}", per(deaths))));
+            rows.push((tr!("Retours en ville"), format!("{returns}{}", per(returns))));
             // Deux moitiés quand la largeur le permet : chacune son tableau libellé / valeur, le
             // même écart entre libellé et valeur des deux côtés.
             let pairs = if ui.available_width() >= 520.0 { 2 } else { 1 };
@@ -3076,14 +3117,14 @@ impl App {
         let current = c.character().and_then(|(_, ch)| ch.picks.get(&id)).and_then(|g| g.first()).cloned();
         let build: Vec<String> = route::build_choices(&r, &quest_choices).iter().map(|p| p.reward.clone()).collect();
         let mut pick = None;
-        let (_, close) = ui::modal(ctx, "route_pick", &r.what, true, 360.0, |ui| {
-            ui.label(RichText::new("Ton choix (modifiable en jeu en retournant sur place)").color(Color32::GRAY).small());
+        let (_, close) = ui::modal(ctx, "route_pick", r.what_text(), true, 360.0, |ui| {
+            ui.label(RichText::new(tr!("Ton choix (modifiable en jeu en retournant sur place)")).color(Color32::GRAY).small());
             ui.add_space(4.0);
             for (short, full) in route::modifiable_options(&id) {
                 let star = if build.iter().any(|b| b.eq_ignore_ascii_case(full)) { "★ " } else { "" };
                 let selected = current.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(full));
                 let text = RichText::new(format!("{star}{full}")).color(if selected { Color32::from_rgb(136, 136, 255) } else { Color32::LIGHT_GRAY });
-                if ui.selectable_label(selected, text).on_hover_text(*short).clicked() {
+                if ui.selectable_label(selected, text).on_hover_text(i18n::tr(short)).clicked() {
                     pick = Some(full.to_string());
                 }
             }
@@ -3105,14 +3146,14 @@ impl App {
         let player_picks = c.character().map(|(_, ch)| ch.picks.clone()).unwrap_or_default();
         let (act, items) = c.reminders();
         let label = match act {
-            0 => "ROUTE DE LEVELING".to_string(),
-            5 => "ROUTE — INTERLUDES".to_string(),
-            a if a > 5 => "ROUTE — CAMPAGNE TERMINÉE".to_string(),
-            a => format!("ROUTE — ACTE {a}"),
+            0 => tr!("ROUTE DE LEVELING").to_string(),
+            5 => tr!("ROUTE — INTERLUDES").to_string(),
+            a if a > 5 => tr!("ROUTE — CAMPAGNE TERMINÉE").to_string(),
+            a => tr!("ROUTE — ACTE {act}", act = a),
         };
         ui::section_header(ui, &label, None, |ui| {
             if has_maps {
-                to_maps = ui::header_button(ui, "Mapping").on_hover_text("Revenir aux maps : map en cours, séance, dernières maps").clicked();
+                to_maps = ui::header_button(ui, tr!("Mapping")).on_hover_text(tr!("Revenir aux maps : map en cours, séance, dernières maps")).clicked();
             }
         });
         let mut toggle: Option<String> = None;
@@ -3120,9 +3161,9 @@ impl App {
         let out = egui::ScrollArea::vertical().id_salt("route").auto_shrink([false, false]).show(ui, |ui| {
             if items.is_empty() {
                 let empty = match act {
-                    0 => "Elle s'affichera dès que le journal du jeu aura nommé ton personnage.",
-                    a if a > 5 => "Rien de la campagne n'a été oublié.",
-                    _ => "Rien à signaler pour cet acte.",
+                    0 => tr!("Elle s'affichera dès que le journal du jeu aura nommé ton personnage."),
+                    a if a > 5 => tr!("Rien de la campagne n'a été oublié."),
+                    _ => tr!("Rien à signaler pour cet acte."),
                 };
                 ui.label(RichText::new(empty).color(Color32::GRAY));
             }
@@ -3134,7 +3175,7 @@ impl App {
                     if !first {
                         ui.add_space(8.0);
                     }
-                    let title = if r.act == 5 { "INTERLUDES".to_string() } else { format!("ACTE {}", r.act) };
+                    let title = if r.act == 5 { tr!("INTERLUDES").to_string() } else { tr!("ACTE {act}", act = r.act) };
                     ui.label(RichText::new(title).color(ui::GOLD_DIM).small().strong());
                     done_act = Some(r.act);
                 }
@@ -3155,7 +3196,7 @@ impl App {
                 // options (elle reste au survol), signalé par une étiquette « build ».
                 let picks = route::build_choices(r, &quest_choices);
                 let pick = picks.iter().map(|p| p.reward.as_str()).collect::<Vec<_>>().join(" · ");
-                let mut reward = RichText::new(if pick.is_empty() { &r.reward } else { &pick }).color(color).strong();
+                let mut reward = RichText::new(if pick.is_empty() { r.reward_text() } else { &pick }).color(color).strong();
                 if done {
                     reward = reward.strikethrough();
                 }
@@ -3172,27 +3213,27 @@ impl App {
                     }
                     let check = ui.checkbox(&mut checked, "");
                     if !pick.is_empty() {
-                        ui.label(RichText::new("build ·").color(ui::GOLD_DIM).small());
+                        ui.label(RichText::new(tr!("build ·")).color(ui::GOLD_DIM).small());
                     }
                     if behind && !done {
                         // L'« acte 5 » de la route, ce sont les interludes.
-                        let when = if r.act == 5 { "interludes".to_string() } else { format!("acte {}", r.act) };
+                        let when = if r.act == 5 { tr!("interludes").to_string() } else { tr!("acte {act}", act = r.act) };
                         ui.label(RichText::new(when).color(Color32::from_rgb(200, 150, 100)).small().italics());
                     }
                     // Récompense modifiable : libellé court au bout de la ligne (orange tant que le
                     // choix n'est pas connu), un clic ouvre le choix.
                     let options = route::modifiable_options(&r.id);
                     let with_pick = done && !options.is_empty();
-                    let short = player_picks.get(&r.id).and_then(|g| g.first()).map(|p| options.iter().find(|(_, full)| full.eq_ignore_ascii_case(p)).map_or(p.as_str(), |(s, _)| *s));
+                    let short = player_picks.get(&r.id).and_then(|g| g.first()).map(|p| options.iter().find(|(_, full)| full.eq_ignore_ascii_case(p)).map_or(p.as_str(), |(s, _)| i18n::tr(s)));
                     let tag = match short {
                         Some(s) => RichText::new(s).color(Color32::from_rgb(136, 136, 255)).small(),
-                        None => RichText::new("à préciser").color(ui::EMPTY_SOCKET).small(),
+                        None => RichText::new(tr!("à préciser")).color(ui::EMPTY_SOCKET).small(),
                     };
                     let tag_w = if with_pick { ui.fonts(|f| f.layout_no_wrap(tag.text().to_string(), egui::TextStyle::Small.resolve(ui.style()), Color32::WHITE).size().x) + 12.0 } else { 0.0 };
                     let text_w = ui.available_width() - tag_w;
                     let label = ui.allocate_ui(Vec2::new(text_w.max(40.0), ui.spacing().interact_size.y), |ui| ui.add(egui::Label::new(reward).truncate())).inner;
                     if with_pick {
-                        let tag = ui.add(egui::Label::new(tag).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Changer ce choix");
+                        let tag = ui.add(egui::Label::new(tag).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr!("Changer ce choix"));
                         if tag.clicked() {
                             open_pick = Some(r.id.clone());
                         }
@@ -3202,31 +3243,31 @@ impl App {
                 // Fiche au survol, en blocs : la récompense, comment l'obtenir, où, le choix du build.
                 let tip = |ui: &mut egui::Ui| {
                     ui.set_max_width(420.0);
-                    ui.label(RichText::new(&r.reward).color(color).strong());
-                    ui.label(RichText::new(&r.what).color(Color32::LIGHT_GRAY));
+                    ui.label(RichText::new(r.reward_text()).color(color).strong());
+                    ui.label(RichText::new(r.what_text()).color(Color32::LIGHT_GRAY));
                     ui.add_space(4.0);
-                    ui.label(RichText::new(format!("Zone : {}", r.zone)).color(Color32::GRAY).small());
+                    ui.label(RichText::new(tr!("Zone : {zone}", zone = r.zone)).color(Color32::GRAY).small());
                     let importance = match r.importance.as_str() {
-                        "must" => "Indispensable",
-                        "recommended" => "Conseillé",
-                        _ => "Sur le chemin de l'histoire",
+                        "must" => tr!("Indispensable"),
+                        "recommended" => tr!("Conseillé"),
+                        _ => tr!("Sur le chemin de l'histoire"),
                     };
                     ui.label(RichText::new(importance).color(Color32::GRAY).small());
                     if behind && !done {
-                        let when = if r.act == 5 { "Oubliée aux interludes".to_string() } else { format!("Oubliée à l'acte {}", r.act) };
+                        let when = if r.act == 5 { tr!("Oubliée aux interludes").to_string() } else { tr!("Oubliée à l'acte {act}", act = r.act) };
                         ui.label(RichText::new(when).color(Color32::from_rgb(200, 150, 100)).small().italics());
                     }
                     // Ce que le joueur a pris (lu dans le journal du jeu).
                     if let Some(got) = player_picks.get(&r.id).filter(|g| !g.is_empty()) {
                         ui.separator();
-                        ui.label(RichText::new("TON CHOIX").color(ui::GOLD_DIM).small().strong());
+                        ui.label(RichText::new(tr!("TON CHOIX")).color(ui::GOLD_DIM).small().strong());
                         for g in got {
                             ui.label(RichText::new(g).color(Color32::from_rgb(110, 210, 110)));
                         }
                     }
                     if !picks.is_empty() {
                         ui.separator();
-                        ui.label(RichText::new("CHOIX DU BUILD").color(ui::GOLD_DIM).small().strong());
+                        ui.label(RichText::new(tr!("CHOIX DU BUILD")).color(ui::GOLD_DIM).small().strong());
                         for p in &picks {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(RichText::new(&p.reward).color(ui::GOLD));
@@ -3235,7 +3276,7 @@ impl App {
                         }
                     }
                     ui.separator();
-                    ui.label(RichText::new("Cochée toute seule quand le jeu l'annonce ; clique la case pour corriger.").color(Color32::DARK_GRAY).small().italics());
+                    ui.label(RichText::new(tr!("Cochée toute seule quand le jeu l'annonce ; clique la case pour corriger.")).color(Color32::DARK_GRAY).small().italics());
                 };
                 let (check, label) = row.inner;
                 label.on_hover_ui(tip);
@@ -3259,7 +3300,7 @@ impl App {
     fn feed_list(&mut self, ui: &mut egui::Ui) {
         let out = egui::ScrollArea::vertical().id_salt("feed").auto_shrink([false, false]).show(ui, |ui| {
             if self.feed.is_empty() {
-                ui.label(RichText::new("Les niveaux, étapes du guide, morts et messages privés s'afficheront ici.").color(Color32::GRAY));
+                ui.label(RichText::new(tr!("Les niveaux, étapes du guide, morts et messages privés s'afficheront ici.")).color(Color32::GRAY));
             }
             for f in &self.feed {
                 use coach::FeedKind::*;
@@ -3344,11 +3385,11 @@ impl App {
         let size = 30.0;
         let full = egui::Rect::from_min_size(egui::pos2(view.max.x - size, view.min.y), Vec2::splat(size));
         let center = full.translate(Vec2::new(-(size + 6.0), 0.0));
-        let tip = if self.tab == views::Tab::Atlas { "Recentrer (ou double-clic)" } else { "Centrer sur l'ascendance (double-clic : tout le build)" };
+        let tip = if self.tab == views::Tab::Atlas { tr!("Recentrer (ou double-clic)") } else { tr!("Centrer sur l'ascendance (double-clic : tout le build)") };
         if ui::view_button(ui, center, ui::ViewIcon::Recenter).on_hover_text(tip).clicked() {
             self.recenter_view();
         }
-        let (icon, tip) = if self.full_view { (ui::ViewIcon::Exit, "Quitter le plein écran (Échap)") } else { (ui::ViewIcon::Enter, "Plein écran") };
+        let (icon, tip) = if self.full_view { (ui::ViewIcon::Exit, tr!("Quitter le plein écran (Échap)")) } else { (ui::ViewIcon::Enter, tr!("Plein écran")) };
         if ui::view_button(ui, full, icon).on_hover_text(tip).clicked() {
             // La vue change de taille : elle se recadre d'elle-même.
             self.full_view = !self.full_view;
@@ -3380,7 +3421,7 @@ impl App {
                 let penalty = c
                     .character()
                     .map(|(_, ch)| stats::res_penalty(ch.max_act, ch.level))
-                    .unwrap_or((0.0, "acte 1".into()));
+                    .unwrap_or((0.0, tr!("acte 1").into()));
                 (
                     &c.steps,
                     c.current_step_index(),
@@ -3388,7 +3429,7 @@ impl App {
                     c.character().map(|(_, ch)| ch.level),
                 )
             }
-            None => (&no_steps, None, (0.0, "acte 1".into()), None),
+            None => (&no_steps, None, (0.0, tr!("acte 1").into()), None),
         };
         let quests = self.quest_bonuses();
         let (view_step, gear) = (&mut self.view_step, &mut self.gear);
@@ -3397,12 +3438,12 @@ impl App {
             ui.horizontal(|ui| {
                 ui::gold_widgets(ui);
                 if !steps.is_empty() {
-                    ui.label(RichText::new("Étape").color(ui::GOLD_DIM));
+                    ui.label(RichText::new(tr!("Étape")).color(ui::GOLD_DIM));
                     shown = Some(views::step_selector(ui, steps, view_step, current));
                     ui.add_space(12.0);
                 }
                 let h = ui.min_rect().height().max(ui.spacing().interact_size.y);
-                ui.label(RichText::new("Set d'armes").color(ui::GOLD_DIM));
+                ui.label(RichText::new(tr!("Set d'armes")).color(ui::GOLD_DIM));
                 let size = ui::set_tabs_size(ui, h, [false; 2]);
                 let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                 let mut set = gear.set.max(1);
@@ -3419,7 +3460,7 @@ impl App {
                                 .size(18.0)
                                 .strong(),
                         );
-                        ui.label(RichText::new("Niveau").color(ui::GOLD_DIM));
+                        ui.label(RichText::new(tr!("Niveau")).color(ui::GOLD_DIM));
                     });
                 }
             });
@@ -3450,8 +3491,8 @@ impl App {
                 )
             });
             let title = step
-                .map(|s| format!("Build · {}", s.label))
-                .unwrap_or_else(|| "Build (aucun)".into());
+                .map(|s| tr!("Build · {step}", step = guide::step_text(&s.label)))
+                .unwrap_or_else(|| tr!("Build (aucun)").into());
             views::stats(ui, &worn, build.as_ref(), &title, &penalty, quests.resistances);
         });
     }
@@ -3470,16 +3511,16 @@ impl App {
             });
         }
         let Some(book) = self.coach.as_mut().and_then(|c| c.maps()) else {
-            ui.put(rect, egui::Label::new(RichText::new("Chargement du guide…").color(dim)));
+            ui.put(rect, egui::Label::new(RichText::new(tr!("Chargement du guide…")).color(dim)));
             return;
         };
         let allocated: HashSet<String> = book.atlas.keys().cloned().collect();
         match &*self.atlas_tree.lock().unwrap() {
             None => {
-                ui.put(rect, egui::Label::new(RichText::new("Lecture de l'arbre de l'Atlas dans les fichiers du jeu…").color(dim)));
+                ui.put(rect, egui::Label::new(RichText::new(tr!("Lecture de l'arbre de l'Atlas dans les fichiers du jeu…")).color(dim)));
             }
             Some(Err(e)) => {
-                ui.put(rect, egui::Label::new(RichText::new(format!("Arbre de l'Atlas indisponible : {e}")).color(dim)));
+                ui.put(rect, egui::Label::new(RichText::new(tr!("Arbre de l'Atlas indisponible : {e}", e)).color(dim)));
             }
             Some(Ok(tree)) => {
                 let allocated: HashSet<&str> = allocated.iter().map(String::as_str).collect();
@@ -3494,7 +3535,7 @@ impl App {
         let shown_label = self.coach.as_ref().and_then(|c| c.steps.get(self.view_step.or(c.current_step_index()).unwrap_or(0)).map(|s| s.label.clone()));
         let tree_jewels = self.tree_jewels(shown_label.as_deref().unwrap_or_default());
         let Some(coach) = self.coach.as_ref() else {
-            ui.put(rect, egui::Label::new(RichText::new("Chargement du guide…").color(Color32::GRAY)));
+            ui.put(rect, egui::Label::new(RichText::new(tr!("Chargement du guide…")).color(Color32::GRAY)));
             return;
         };
         if coach.steps.is_empty() {
@@ -3504,12 +3545,12 @@ impl App {
                 ui.vertical_centered(|ui| {
                     ui.add_space(rect.height() * 0.35);
                     ui::gold_widgets(ui);
-                    ui.label(RichText::new("Aucun build").color(ui::GOLD).heading());
+                    ui.label(RichText::new(tr!("Aucun build")).color(ui::GOLD).heading());
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Ajoute le build que tu suis pour voir ici ses sorts, son arbre de talents et son ascendance, étape par étape.").color(Color32::GRAY));
-                    ui.label(RichText::new("Colle le lien de sa page sur Mobalytics ou Kami-labs.").color(Color32::GRAY));
+                    ui.label(RichText::new(tr!("Ajoute le build que tu suis pour voir ici ses aptitudes, son arbre de talents et son ascendance, étape par étape.")).color(Color32::GRAY));
+                    ui.label(RichText::new(tr!("Colle le lien de sa page sur Mobalytics ou Kami-labs.")).color(Color32::GRAY));
                     ui.add_space(10.0);
-                    add = ui.button(RichText::new("Ajouter un build…").color(ui::GOLD)).clicked();
+                    add = ui.button(RichText::new(tr!("Ajouter un build…")).color(ui::GOLD)).clicked();
                 });
             });
             if add {
@@ -3533,14 +3574,14 @@ impl App {
             // gardent le style de l'application.
             ui.horizontal(|ui| {
                 ui::gold_widgets(ui);
-                ui.label(RichText::new("Étape").color(ui::GOLD_DIM));
+                ui.label(RichText::new(tr!("Étape")).color(ui::GOLD_DIM));
                 shown = views::step_selector(ui, &coach.steps, view_step, current);
                 // Set d'armes, partagé avec l'écran d'équipement.
                 if tab == views::Tab::Passives && coach.steps.iter().any(|s| !s.passive_sets.is_empty()) {
                     ui.add_space(12.0);
                     // Même hauteur que la liste d'étape à sa gauche, centré sur la même ligne.
                     let h = ui.min_rect().height();
-                    ui.label(RichText::new("Set d'armes").color(ui::GOLD_DIM));
+                    ui.label(RichText::new(tr!("Set d'armes")).color(ui::GOLD_DIM));
                     let size = ui::set_tabs_size(ui, h, [false; 2]);
                     let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                     let mut set = (*weapon_set).max(1);
@@ -3598,7 +3639,7 @@ impl App {
             Some(step) => {
                 let prices = self.prices.data.lock().unwrap();
                 let base = |n: &str| prices.as_ref()?.unique_by_name(n).map(|(b, _, _)| b.to_string());
-                (uniques::missing_by_slot(step, &self.gear, base), step.label.clone())
+                (uniques::missing_by_slot(step, &self.gear, base), guide::step_text(&step.label))
             }
             None => (vec![], String::new()),
         };
@@ -3612,9 +3653,9 @@ impl App {
             let (price, basis) = match found {
                 Some((ex, listings)) => (
                     (format!("≈ {}", self.fmt_price(ex)), Color32::from_rgb(225, 220, 210)),
-                    Some(if listings < prices::MIN_LISTINGS { format!("{listings} annonces seulement, cours de poe.ninja") } else { format!("{listings} annonces, cours de poe.ninja") }),
+                    Some(if listings < prices::MIN_LISTINGS { tr!("{n} annonces seulement, cours de poe.ninja", n = listings) } else { trn!(listings, "{n} annonce, cours de poe.ninja", "{n} annonces, cours de poe.ninja") }),
                 ),
-                None => (("pas de prix au marché".to_string(), Color32::GRAY), None),
+                None => ((tr!("pas de prix au marché").to_string(), Color32::GRAY), None),
             };
             let view = self.unique_view(&n);
             (n, ui::WantedUnique { view, price, basis })
@@ -3713,7 +3754,7 @@ impl App {
         if let Some(slot) = to_clear {
             self.gear.clear(slot);
             let _ = self.gear.save();
-            self.say(format!("{} n'est plus suivi", slot.label()));
+            self.say(tr!("{slot} n'est plus suivi", slot = slot.label()));
         }
     }
 
@@ -3765,9 +3806,9 @@ impl App {
                 (text, color)
             }
             Err(_) => match self.trade.get(it) {
-                Some(trade::Estimate::Done { total: 0, .. }) => ("sans valeur".to_string(), Color32::GRAY),
-                Some(trade::Estimate::Done { .. }) => ("incertain".to_string(), Color32::GRAY),
-                _ => ("prix inconnu".to_string(), Color32::from_gray(110)),
+                Some(trade::Estimate::Done { total: 0, .. }) => (tr!("sans valeur").to_string(), Color32::GRAY),
+                Some(trade::Estimate::Done { .. }) => (tr!("incertain").to_string(), Color32::GRAY),
+                _ => (tr!("prix inconnu").to_string(), Color32::from_gray(110)),
             },
         }
     }
@@ -3795,7 +3836,7 @@ impl App {
         } else if (v - v.round()).abs() < 0.05 {
             format!("{}", v.round())
         } else {
-            format!("{v:.1}").replace('.', ",")
+            i18n::decimal(format!("{v:.1}"))
         };
         format!("{n} {unit}")
     }
@@ -3813,11 +3854,11 @@ impl App {
             if v >= 100.0 {
                 format!("{v:.0}")
             } else if v >= 1.0 {
-                format!("{v:.1}").replace('.', ",")
+                i18n::decimal(format!("{v:.1}"))
             } else if v >= 0.01 {
-                format!("{v:.2}").replace('.', ",")
+                i18n::decimal(format!("{v:.2}"))
             } else {
-                "< 0,01".into()
+                i18n::decimal("< 0.01".into())
             }
         };
         let mut parts = vec![format!("{} ex", fmt(ex))];
@@ -3832,7 +3873,7 @@ impl App {
 
     fn history_panel(&mut self, ui: &mut egui::Ui) {
         if self.history.is_empty() {
-            ui.label(RichText::new("Ctrl+C sur un objet en jeu pour le diagnostiquer : il s'ajoutera ici.").color(Color32::GRAY));
+            ui.label(RichText::new(tr!("Ctrl+C sur un objet en jeu pour le diagnostiquer : il s'ajoutera ici.")).color(Color32::GRAY));
             return;
         }
         let mut open = None;
@@ -3879,7 +3920,8 @@ impl App {
                         .size()
                         .x
                 };
-                let inline = text_w(&it.name, egui::TextStyle::Body)
+                let shown_name = gametext::name(&it.name);
+                let inline = text_w(&shown_name, egui::TextStyle::Body)
                     + text_w(&kind, egui::TextStyle::Small)
                     + 40.0
                     + 130.0
@@ -3906,7 +3948,7 @@ impl App {
                         if let Some((g, color)) = glyph {
                             ui.label(RichText::new(g).color(color).strong());
                         }
-                        ui.add(egui::Label::new(RichText::new(&it.name).color(ui::rarity_color(it.rarity))).truncate());
+                        ui.add(egui::Label::new(RichText::new(shown_name.as_ref()).color(ui::rarity_color(it.rarity))).truncate());
                         if inline {
                             ui.add_space(4.0);
                             ui.label(RichText::new(&kind).color(Color32::GRAY).small());
@@ -3925,7 +3967,7 @@ impl App {
                     // Bouton ou loader : centrés sur la hauteur de la ligne.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         match pending {
-                            None => estimate_rect = Some(ui::action_button(ui, "💰  Estimer").rect),
+                            None => estimate_rect = Some(ui::action_button(ui, tr!("💰  Estimer")).rect),
                             Some(msg) => {
                                 // Attente imposée par les limites de l'API : décompte en secondes.
                                 if let Some(left) = trade::wait_left() {
@@ -3965,17 +4007,17 @@ impl App {
                 Ok((ex, approx)) => {
                     format!("{}{}", if approx { "≈ " } else { "" }, self.price_all(ex))
                 }
-                _ if self.needs_estimate(it) => "pas encore estimé : bouton « Estimer »".into(),
-                Err("…") => "en cours…".into(),
+                _ if self.needs_estimate(it) => tr!("pas encore estimé : bouton « Estimer »").into(),
+                Err("…") => tr!("en cours…").into(),
                 _ if matches!(
                     self.trade.get(it),
                     Some(trade::Estimate::Done { total: 0, .. })
                 ) =>
                 {
-                    "sans valeur : aucune annonce comparable en achat immédiat".into()
+                    tr!("sans valeur : aucune annonce comparable en achat immédiat").into()
                 }
-                Err("?") => "trop peu d'annonces pour estimer".into(),
-                Err(_) => "inconnu".into(),
+                Err("?") => tr!("trop peu d'annonces pour estimer").into(),
+                Err(_) => tr!("inconnu").into(),
             };
             let confidence = self.trade.get(it).filter(|_| matches!(self.price_ex(it), Ok((_, true)))).map(|e| e.confidence_pct());
             let resp = resp.on_hover_ui(|ui| {
@@ -3985,23 +4027,23 @@ impl App {
                 // Le nom et le type sont déjà sur la ligne : on commence par le verdict.
                 if let Some(c) = &comparison {
                     let (text, color) = ui::verdict_style(c.verdict);
-                    let against = if c.against_name.is_empty() || c.verdict == compare::Verdict::Same { String::new() } else { format!(" que {}", c.against_name) };
+                    let against = if c.against_name.is_empty() || c.verdict == compare::Verdict::Same { String::new() } else { tr!(" que {name}", name = c.against_name) };
                     ui.label(body(&format!("{}{against}", text.to_lowercase())).color(color));
                     ui.add_space(6.0);
                 }
                 let advice = value.label.advice();
                 ui.horizontal(|ui| {
-                    ui.label(body("Conseil :").color(Color32::from_gray(225)).strong());
+                    ui.label(body(tr!("Conseil :")).color(Color32::from_gray(225)).strong());
                     ui.label(body(advice).color(ui::value_color(value.label)).strong());
                 });
                 ui.horizontal(|ui| {
-                    ui.label(body("Prix estimé :").color(Color32::from_gray(225)).strong());
+                    ui.label(body(tr!("Prix estimé :")).color(Color32::from_gray(225)).strong());
                     ui.label(body(&price).color(ui::GOLD));
                 });
                 if let Some(p) = confidence {
                     ui.horizontal(|ui| {
-                        ui.label(body("Confiance :").color(Color32::from_gray(225)).strong());
-                        ui.label(body(&format!("{p} %")).color(ui::confidence_color(p)));
+                        ui.label(body(tr!("Confiance :")).color(Color32::from_gray(225)).strong());
+                        ui.label(body(&i18n::percent(p)).color(ui::confidence_color(p)));
                     });
                 }
                 ui.label(body(&value.summary).color(Color32::LIGHT_GRAY));
@@ -4009,7 +4051,7 @@ impl App {
                     ui.label(body(&format!("• {r}")).color(Color32::GRAY));
                 }
                 ui.add_space(6.0);
-                ui.label(RichText::new("clic : ouvrir le diagnostic · clic droit : retirer").size(14.0).color(Color32::from_gray(110)).italics());
+                ui.label(RichText::new(tr!("clic : ouvrir le diagnostic · clic droit : retirer")).size(14.0).color(Color32::from_gray(110)).italics());
             });
             if selected || resp.hovered() {
                 band_painter.rect_filled(
@@ -4030,7 +4072,7 @@ impl App {
                 }
             }
             resp.context_menu(|ui| {
-                if ui.button("Retirer de l'historique").clicked() {
+                if ui.button(tr!("Retirer de l'historique")).clicked() {
                     remove = Some(i);
                     ui.close_menu();
                 }
@@ -4102,12 +4144,12 @@ impl App {
             lines.push(RichText::new(d).color(Color32::GRAY).size(ui::HEADER_LINE_SIZE).into());
         }
         for m in it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m) {
-            lines.push(RichText::new(m).color(Color32::from_rgb(136, 136, 255)).size(ui::HEADER_LINE_SIZE).into());
+            lines.push(RichText::new(gametext::line(m)).color(Color32::from_rgb(136, 136, 255)).size(ui::HEADER_LINE_SIZE).into());
         }
         if it.req_level > 0 {
             let mut job = egui::text::LayoutJob::default();
             let font = egui::FontId::proportional(ui::HEADER_LINE_SIZE);
-            job.append("Niveau requis ", 0.0, egui::TextFormat::simple(font.clone(), Color32::GRAY));
+            job.append(tr!("Niveau requis "), 0.0, egui::TextFormat::simple(font.clone(), Color32::GRAY));
             let color = if it.req_level > self.char_level() { ui::SOCKET_WRONG } else { Color32::from_gray(225) };
             job.append(&it.req_level.to_string(), 0.0, egui::TextFormat::simple(font, color));
             lines.push(job.into());
@@ -4119,7 +4161,8 @@ impl App {
         let text: Vec<&String> = it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k != item::ModKind::Implicit).map(|(m, _)| m).collect();
         if !text.is_empty() {
             ui.separator();
-            for m in text {
+            let text: Vec<String> = text.into_iter().cloned().collect();
+            for (_, m) in gametext::lines(&text) {
                 ui.label(RichText::new(m).color(Color32::from_gray(225)));
             }
         }
@@ -4145,7 +4188,7 @@ impl App {
             });
         // Verdict en haut à droite de l'aperçu.
         let verdict = match (&recommended, comparison) {
-            (Some(_), _) => Some(("★ UNIQUE DU BUILD", ui::rarity_color(item::Rarity::Unique))),
+            (Some(_), _) => Some((tkey!("★ UNIQUE DU BUILD"), ui::rarity_color(item::Rarity::Unique))),
             (None, Some(c)) => Some(ui::verdict_style(c.verdict)),
             (None, None) => None,
         };
@@ -4189,16 +4232,16 @@ impl App {
         // Badge de la réponse (voir la fin) : le titre s'arrête avant lui, quitte à passer à la ligne.
         let badge = best.as_ref().filter(|_| comparison.is_some()).map(|b| {
             let side = b.slot.side().filter(|_| per_slot.len() > 1).map(|s| format!(" · {s}")).unwrap_or_default();
-            let gap = b.gap.map(|d| format!(" ({}{} %)", if d > 0 { "+" } else if d < 0 { "−" } else { "" }, d.abs())).unwrap_or_default();
-            (format!("{}{side}{gap}", b.answer.0), b.answer.1)
+            let gap = b.gap.map(|d| format!(" ({}{})", if d > 0 { "+" } else if d < 0 { "−" } else { "" }, i18n::percent(d.abs()))).unwrap_or_default();
+            (format!("{}{side}{gap}", i18n::tr(b.answer.0)), b.answer.1)
         });
         let badge_w = badge.as_ref().map_or(0.0, |(t, _)| ui.fonts(|f| f.layout_no_wrap(t.clone(), egui::FontId::proportional(17.0), Color32::WHITE).size().x) + 36.0);
         ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 72.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.set_min_height(72.0);
             ui.add_space(4.0);
             ui.set_max_width((ui.available_width() - badge_w).max(120.0));
-            ui.add(egui::Label::new(RichText::new(if slot.is_some() { "PIÈCE DIAGNOSTIQUÉE" } else { "OBJET DIAGNOSTIQUÉ" }).color(ui::GOLD).size(15.5).strong()).wrap());
-            let place = slot.map(|s| s.label().to_string()).unwrap_or_else(|| "ne se porte pas".into());
+            ui.add(egui::Label::new(RichText::new(if slot.is_some() { tr!("PIÈCE DIAGNOSTIQUÉE") } else { tr!("OBJET DIAGNOSTIQUÉ") }).color(ui::GOLD).size(15.5).strong()).wrap());
+            let place = slot.map(|s| s.label().to_string()).unwrap_or_else(|| tr!("ne se porte pas").into());
             ui.label(RichText::new(place).color(Color32::GRAY));
         });
         ui.separator();
@@ -4219,12 +4262,12 @@ impl App {
     /// pas plus loin du build (mieux), l'inverse (moins bien), ou les deux qui se contredisent.
     fn diag_verdict(comparison: Option<&compare::Comparison>, recommended: &Option<(Vec<String>, bool)>, it_score: Option<u32>, worn_score: Option<u32>) -> (&'static str, Color32) {
         if recommended.as_ref().is_some_and(|(_, now)| *now) {
-            return ("★ UNIQUE DU BUILD", ui::rarity_color(item::Rarity::Unique));
+            return (tkey!("★ UNIQUE DU BUILD"), ui::rarity_color(item::Rarity::Unique));
         }
-        let Some(c) = comparison else { return ("▼ MOINS BIEN", ui::SOCKET_WRONG) };
+        let Some(c) = comparison else { return (tkey!("▼ MOINS BIEN"), ui::SOCKET_WRONG) };
         // Base qui ne convient pas au build : moins bien, quoi qu'il arrive.
-        if c.deltas.iter().any(|d| d.headline && d.text.starts_with("pas pour ce build")) {
-            return ("▼ MOINS BIEN", ui::SOCKET_WRONG);
+        if c.deltas.iter().any(|d| d.headline && d.text.starts_with(tr!("pas pour ce build"))) {
+            return (tkey!("▼ MOINS BIEN"), ui::SOCKET_WRONG);
         }
         let better = match c.verdict {
             compare::Verdict::Better => Some(true),
@@ -4237,9 +4280,9 @@ impl App {
             _ => None,
         };
         match (better, closer) {
-            (Some(true), Some(true) | None) => ("▲ MIEUX", ui::SOCKET_GOOD),
-            (Some(false), Some(false) | None) | (None, Some(false)) => ("▼ MOINS BIEN", ui::SOCKET_WRONG),
-            _ => ("? À VOIR", ui::EMPTY_SOCKET),
+            (Some(true), Some(true) | None) => (tkey!("▲ MIEUX"), ui::SOCKET_GOOD),
+            (Some(false), Some(false) | None) | (None, Some(false)) => (tkey!("▼ MOINS BIEN"), ui::SOCKET_WRONG),
+            _ => (tkey!("? À VOIR"), ui::EMPTY_SOCKET),
         }
     }
 
@@ -4284,7 +4327,7 @@ impl App {
                 if let (Some(m), Some(n)) = (compare::weapon_dps(w), compare::weapon_dps(it)) {
                     let mark = if n.total() >= m.total() { ("+", ui::SOCKET_GOOD) } else { missing };
                     // Le DPS total est au bout de la ligne des attaques par seconde (sinon sur sa ligne).
-                    if let Some(line) = weapon.iter_mut().find(|l| l.first().is_some_and(|(t, _)| t.starts_with("Attaques par seconde"))) {
+                    if let Some(line) = weapon.iter_mut().find(|l| l.first().is_some_and(|(t, _)| t.starts_with(tr!("Attaques par seconde")))) {
                         line.insert(0, (format!("{} ", mark.0), mark.1));
                     } else if let Some(i) = view.props.iter().position(|p| p.first().is_some_and(|(t, _)| t == "DPS ")) {
                         marks[i] = Some(mark);
@@ -4301,15 +4344,15 @@ impl App {
                 // Implicites et compétence de ta pièce : gardés par la pièce diagnostiquée (+), en
                 // moins (~) ou perdus (✗).
                 let it_implicits: Vec<String> = it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m.clone())
-                    .chain(it.granted_skills.iter().map(|s| format!("Compétence : {s}")))
+                    .chain(it.granted_skills.iter().map(|s| format!("{}{s}", tr!("Octroie l'Aptitude : "))))
                     .collect();
                 let kept = ("+", ui::SOCKET_GOOD);
                 left.implicit_marks = left
                     .implicits
                     .iter()
                     .map(|l| {
-                        if let Some(skill) = l.strip_prefix("Compétence : ") {
-                            let same = it_implicits.iter().any(|w| w.strip_prefix("Compétence : ").is_some_and(|n| skill_name(n) == skill_name(skill)));
+                        if let Some(skill) = l.strip_prefix(tr!("Octroie l'Aptitude : ")) {
+                            let same = it_implicits.iter().any(|w| w.strip_prefix(tr!("Octroie l'Aptitude : ")).is_some_and(|n| skill_name(n) == skill_name(skill)));
                             return Some(if same { kept } else { missing });
                         }
                         let (tpl, mine) = trade::template(l);
@@ -4346,9 +4389,9 @@ impl App {
                 left.notes = c.notes.clone();
             }
             (Some(c), None) => {
-                left.notes = if c.notes.is_empty() { vec!["Pas de pièce suivie à cet emplacement.".into()] } else { c.notes.clone() };
+                left.notes = if c.notes.is_empty() { vec![tr!("Pas de pièce suivie à cet emplacement.").into()] } else { c.notes.clone() };
             }
-            (None, _) => left.notes = vec!["Ne se porte pas : pas de comparaison.".into()],
+            (None, _) => left.notes = vec![tr!("Ne se porte pas : pas de comparaison.").into()],
         }
         // Pièce du build : ce qu'il vise, et si la pièce diagnostiquée l'a (✓ ~ ✗).
         if recommended.is_none() && card.is_none() {
@@ -4357,7 +4400,7 @@ impl App {
         let _ = judged;
         let mut right = DiagSide { score: it_score, ..Default::default() };
         if let Some((steps, current)) = recommended {
-            right.notes.push(if *current { "unique recommandé à cette étape".to_string() } else { format!("unique recommandé à : {}", steps.join(", ")) });
+            right.notes.push(if *current { tr!("unique recommandé à cette étape").to_string() } else { tr!("unique recommandé à : {steps}", steps = steps.iter().map(|s| guide::step_text(s)).collect::<Vec<_>>().join(", ")) });
         }
         let Some(b) = card else { return (left, Some(right)) };
         let unique_text = b.unique.as_ref().and_then(|u| self.coach.as_ref()?.catalog().uniques.get(u).cloned());
@@ -4386,14 +4429,14 @@ impl App {
         }
         right.implicits = unique_text.as_ref().map(|t| t.implicits.clone()).unwrap_or_else(|| b.implicits.clone());
         let it_implicits: Vec<String> = it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m.clone())
-            .chain(it.granted_skills.iter().map(|s| format!("Compétence : {s}")))
+            .chain(it.granted_skills.iter().map(|s| format!("{}{s}", tr!("Octroie l'Aptitude : "))))
             .collect();
         right.implicit_marks = right
             .implicits
             .iter()
             .map(|l| {
-                if let Some(skill) = l.strip_prefix("Compétence : ") {
-                    let same = it_implicits.iter().any(|w| w.strip_prefix("Compétence : ").is_some_and(|n| n.contains(skill)));
+                if let Some(skill) = l.strip_prefix(tr!("Octroie l'Aptitude : ")) {
+                    let same = it_implicits.iter().any(|w| w.strip_prefix(tr!("Octroie l'Aptitude : ")).is_some_and(|n| n.contains(skill)));
                     return Some(if same { good } else { missing });
                 }
                 let (tpl, want) = trade::template(l);
@@ -4446,8 +4489,8 @@ impl App {
     fn base_defences_text(&self, it: &Item) -> Option<String> {
         let base = self.assets.index.lock().unwrap().as_ref().and_then(|i| i.base_of(it)).unwrap_or_else(|| it.base.clone());
         let d = self.augments.get()?.defences.get(&base).copied()?;
-        let parts: Vec<String> = ["Armour", "Evasion Rating", "Energy Shield"].iter().zip(d).filter(|(_, v)| *v > 0.0).map(|(n, v)| format!("{n} {v:.0}")).collect();
-        Some(format!("Base : {}", parts.join(" · ")))
+        let parts: Vec<String> = [tr!("Armure"), tr!("Score d'Évasion"), tr!("Bouclier d'énergie")].iter().zip(d).filter(|(_, v)| *v > 0.0).map(|(n, v)| format!("{n} {v:.0}")).collect();
+        Some(tr!("Base : {defences}", defences = parts.join(" · ")))
     }
 
     /// Emplacement où se porterait une pièce (dans le set d'armes affiché).
@@ -4475,7 +4518,7 @@ impl App {
         let mut tiers: Vec<(u32, String)> = Vec::new();
         for r in &book.runs {
             if !tiers.iter().any(|(k, _)| *k == tier_key(r)) {
-                tiers.push((tier_key(r), if r.kind == mapping::RunKind::Boss { "Boss".to_string() } else { run_tier(r) }));
+                tiers.push((tier_key(r), if r.kind == mapping::RunKind::Boss { tr!("Boss").to_string() } else { run_tier(r) }));
             }
         }
         tiers.sort_by_key(|(k, _)| std::cmp::Reverse(*k));
@@ -4483,13 +4526,13 @@ impl App {
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }).show(ui, |ui| {
                 let count = book.runs.iter().filter(shown).count();
-                ui::section_header(ui, "MAPS", Some(count), |ui| {
+                ui::section_header(ui, tr!("MAPS"), Some(count), |ui| {
                     // À la taille des listes du personnage et du build.
                     ui::gold_widgets(ui);
                     let group_label = |g: Option<bool>| match g {
-                        None => "Solo et groupe",
-                        Some(false) => "Solo",
-                        Some(true) => "En groupe",
+                        None => tr!("Solo et groupe"),
+                        Some(false) => tr!("Solo"),
+                        Some(true) => tr!("En groupe"),
                     };
                     // Le tier à gauche, solo/groupe à droite, chacun dans une case de même taille
                     // centrée sur la ligne du titre (sinon la seconde liste descend d'un cran).
@@ -4507,15 +4550,15 @@ impl App {
                                 }
                             })
                             .response
-                            .on_hover_text("Les moyennes ne se comparent qu'entre maps du même genre");
+                            .on_hover_text(tr!("Les moyennes ne se comparent qu'entre maps du même genre"));
                     });
                     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(cell(row.right() - 168.0)).layout(center), |ui| {
-                        let tier_label = |t: Option<u32>| t.and_then(|t| tiers.iter().find(|(k, _)| *k == t)).map_or("Tous les tiers".to_string(), |(_, l)| l.clone());
+                        let tier_label = |t: Option<u32>| t.and_then(|t| tiers.iter().find(|(k, _)| *k == t)).map_or(tr!("Tous les tiers").to_string(), |(_, l)| l.clone());
                         egui::ComboBox::from_id_salt("maps_tier")
                             .width(150.0)
                             .selected_text(RichText::new(tier_label(tier)).color(ui::GOLD))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut pick_tier, None, "Tous les tiers");
+                                ui.selectable_value(&mut pick_tier, None, tr!("Tous les tiers"));
                                 for (k, l) in &tiers {
                                     ui.selectable_value(&mut pick_tier, Some(*k), l);
                                 }
@@ -4524,18 +4567,18 @@ impl App {
                 });
                 if let Some(w) = book.pending_waystone() {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("WAYSTONE PRÊT").color(ui::GOLD_DIM).size(13.5).strong());
+                        ui.label(RichText::new(tr!("PIERRE DE TÉLÉPORTATION PRÊTE")).color(ui::GOLD_DIM).size(13.5).strong());
                         ui.label(RichText::new(format!("T{} · {}", w.tier, w.name)).color(ui::GOLD));
                         if w.corrupted {
-                            ui.label(RichText::new("corrompu").color(dim).size(13.5));
+                            ui.label(RichText::new(tr!("corrompu")).color(dim).size(13.5));
                         }
                     });
                     waystone_lines(ui, w);
-                    ui.label(RichText::new("Il sera associé à la prochaine map ouverte.").color(dim).size(13.5).italics());
+                    ui.label(RichText::new(tr!("Il sera associé à la prochaine map ouverte.")).color(dim).size(13.5).italics());
                     ui.add_space(10.0);
                 }
                 if book.runs.is_empty() {
-                    ui.label(RichText::new("Les maps s'afficheront ici dès ta première entrée en map : durée, morts, retours en ville et contenus visités.").color(dim));
+                    ui.label(RichText::new(tr!("Les maps s'afficheront ici dès ta première entrée en map : durée, morts, retours en ville et contenus visités.")).color(dim));
                     return;
                 }
                 // Chiffres clés, sur le temps de jeu dans les maps (hors AFK et hors repaire).
@@ -4544,11 +4587,11 @@ impl App {
                     let deaths: u32 = maps.iter().map(|r| r.deaths).sum();
                     let n = maps.len() as f64;
                     let per_hour = if play > 0 { n * 3600.0 / play as f64 } else { 0.0 };
-                    let (each, per, in_maps) = if kind == mapping::RunKind::Boss { ("par boss en moyenne", "boss par heure", "de jeu en boss") } else { ("par map en moyenne", "maps par heure", "de jeu en maps") };
+                    let (each, per, in_maps) = if kind == mapping::RunKind::Boss { (tr!("par boss en moyenne"), tr!("boss par heure"), tr!("de jeu en boss")) } else { (tr!("par map en moyenne"), tr!("maps par heure"), tr!("de jeu en maps")) };
                     let figures = [
                         (duration_text(play / maps.len() as i64), each),
-                        (format!("{per_hour:.1}"), per),
-                        (format!("{:.2}", deaths as f64 / n), if kind == mapping::RunKind::Boss { "morts par boss" } else { "morts par map" }),
+                        (i18n::decimal(format!("{per_hour:.1}")), per),
+                        (i18n::decimal(format!("{:.2}", deaths as f64 / n)), if kind == mapping::RunKind::Boss { tr!("morts par boss") } else { tr!("morts par map") }),
                         (duration_text(play), in_maps),
                     ];
                     // Une carte par chiffre, centrée ; 2 par ligne quand la place manque pour 4.
@@ -4582,18 +4625,18 @@ impl App {
                     mods.sort_by(|a, b| (b.1.2 as f64 / b.1.0 as f64).total_cmp(&(a.1.2 as f64 / a.1.0 as f64)).then(b.1.0.cmp(&a.1.0)));
                     if !mods.is_empty() {
                         ui.add_space(22.0);
-                        ui.label(RichText::new("MODS DE WAYSTONE").color(ui::GOLD_DIM).size(13.0).strong());
+                        ui.label(RichText::new(tr!("MODS DES PIERRES DE TÉLÉPORTATION")).color(ui::GOLD_DIM).size(13.0).strong());
                         egui::Grid::new("map_mods").num_columns(4).spacing([24.0, 6.0]).min_col_width(110.0).show(ui, |ui| {
                             // Le mod en dernier : il prend la place qui reste.
-                            for h in ["Maps", "Temps moyen", "Morts par map", "Mod"] {
+                            for h in [tr!("Maps"), tr!("Temps moyen"), tr!("Morts par map"), tr!("Mod")] {
                                 ui.label(RichText::new(h).color(dim).size(13.5));
                             }
                             ui.end_row();
                             for (m, (count, secs, deaths)) in mods.iter().take(10) {
                                 ui.label(RichText::new(count.to_string()).color(Color32::LIGHT_GRAY).size(15.5));
                                 ui.label(RichText::new(duration_text(secs / *count as i64)).color(Color32::LIGHT_GRAY).size(15.5));
-                                ui.label(RichText::new(format!("{:.2}", *deaths as f64 / *count as f64)).color(Color32::LIGHT_GRAY).size(15.5));
-                                ui.label(RichText::new(m).color(Color32::from_rgb(140, 150, 230)).size(15.5));
+                                ui.label(RichText::new(i18n::decimal(format!("{:.2}", *deaths as f64 / *count as f64))).color(Color32::LIGHT_GRAY).size(15.5));
+                                ui.label(RichText::new(gametext::line(m)).color(Color32::from_rgb(140, 150, 230)).size(15.5));
                                 ui.end_row();
                             }
                         });
@@ -4601,7 +4644,7 @@ impl App {
                 }
                 // Historique : la plus récente en haut, bandes alternées comme l'historique des objets.
                 ui.add_space(22.0);
-                ui.label(RichText::new("HISTORIQUE").color(ui::GOLD_DIM).size(13.0).strong());
+                ui.label(RichText::new(tr!("HISTORIQUE")).color(ui::GOLD_DIM).size(13.0).strong());
                 ui.add_space(2.0);
                 let out = egui::ScrollArea::vertical().id_salt("maps_history").auto_shrink([false, false]).show(ui, |ui| {
                     // Colonne des mods seulement si une map affichée a un waystone.
@@ -4624,7 +4667,7 @@ impl App {
                         let text_w = |t: &str, size: f32| ui.painter().layout_no_wrap(t.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x.ceil();
                         let dur_w = text_w("00 min 00 s", 18.0);
                         let count_w = 22.0 + 3.0 + text_w("00", 15.0);
-                        let mods_w = if any_mods { text_w("00 mods", 13.5) } else { 0.0 };
+                        let mods_w = if any_mods { text_w(&trn!(10, "{n} mod", "{n} mods"), 13.5) } else { 0.0 };
                         let date_w = text_w("29 sept. 23:59", 13.5);
                         // Colonnes gardées (morts et retours, mods, date) : on retire dans cet ordre.
                         let optional = [2.0 * (count_w + GAP), if any_mods { mods_w + GAP } else { 0.0 }, date_w + GAP];
@@ -4647,9 +4690,9 @@ impl App {
                             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r).layout(layout), |ui| add(ui));
                         };
                         let ltr = egui::Layout::left_to_right(egui::Align::Center);
-                        let deaths_text = plural(run.deaths, "mort");
-                        let returns_text = format!("{} en ville", plural(run.returns(), "retour"));
-                        let mods_text = run.waystone.as_ref().map(|w| plural(w.mods.len() as u32, "mod"));
+                        let deaths_text = trn!(run.deaths, "{n} mort", "{n} morts");
+                        let returns_text = trn!(run.returns(), "{n} retour en ville", "{n} retours en ville");
+                        let mods_text = run.waystone.as_ref().map(|w| trn!(w.mods.len(), "{n} mod", "{n} mods"));
                         col(ui, take(dur_w), egui::Layout::right_to_left(egui::Align::Center), &mut |ui| {
                             ui.label(RichText::new(duration_text(run.active_secs())).color(Color32::from_gray(225)).size(18.0).strong());
                         });
@@ -4699,7 +4742,7 @@ impl App {
                             ui.label(RichText::new(time_note(run)).color(Color32::GRAY).size(13.5).italics());
                             if let Some(w) = &run.waystone {
                                 ui.add_space(4.0);
-                                ui.label(RichText::new(format!("Waystone T{} · {}{}", w.tier, w.name, if w.corrupted { " · corrompu" } else { "" })).color(ui::GOLD));
+                                ui.label(RichText::new(tr!("Pierre de téléportation T{tier} · {name}{corrupted}", tier = w.tier, name = w.name, corrupted = if w.corrupted { tr!(" · corrompu") } else { "" })).color(ui::GOLD));
                                 waystone_lines(ui, w);
                             }
                         });
@@ -4726,9 +4769,9 @@ impl App {
         let dim = Color32::GRAY;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }).show(ui, |ui| {
-                ui::section_header(ui, "BOSS D'ENDGAME", Some(bosses.len()), |_| {});
+                ui::section_header(ui, tr!("BOSS D'ENDGAME"), Some(bosses.len()), |_| {});
                 if bosses.is_empty() {
-                    ui.label(RichText::new("Les boss d'endgame s'afficheront ici dès ta première arène : tentatives, morts, temps passé.").color(dim).size(15.0));
+                    ui.label(RichText::new(tr!("Les boss d'endgame s'afficheront ici dès ta première arène : tentatives, morts, temps passé.")).color(dim).size(15.0));
                     return;
                 }
                 let out = egui::ScrollArea::vertical().id_salt("bosses").auto_shrink([false, false]).show(ui, |ui| {
@@ -4752,7 +4795,7 @@ impl App {
                         let text_w = |t: &str, size: f32| ui.painter().layout_no_wrap(t.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x.ceil();
                         let dur_w = text_w("00 min 00 s", 18.0);
                         let count_w = 22.0 + 3.0 + text_w("00", 15.0);
-                        let tries_w = text_w("00 passages", 13.5);
+                        let tries_w = text_w(&trn!(10, "{n} passage", "{n} passages"), 13.5);
                         let date_w = text_w("29 sept. 23:59", 13.5);
                         let room = |extra: f32| rect.width() - dur_w - count_w - 2.0 * GAP - extra >= 200.0;
                         let date = room(tries_w + date_w + 2.0 * GAP);
@@ -4771,10 +4814,10 @@ impl App {
                         col(ui, take(dur_w), egui::Layout::right_to_left(egui::Align::Center), &mut |ui| {
                             ui.label(RichText::new(duration_text(time / tries as i64)).color(Color32::from_gray(225)).size(18.0).strong());
                         });
-                        col(ui, take(count_w), ltr, &mut |ui| icon_count(ui, icons, TOMB_ICON, deaths, &plural(deaths, "mort"), Color32::from_rgb(225, 90, 80)));
+                        col(ui, take(count_w), ltr, &mut |ui| icon_count(ui, icons, TOMB_ICON, deaths, &trn!(deaths, "{n} mort", "{n} morts"), Color32::from_rgb(225, 90, 80)));
                         if show_tries {
                             col(ui, take(tries_w), ltr, &mut |ui| {
-                                ui.label(RichText::new(plural(tries, "passage")).color(dim).size(13.5));
+                                ui.label(RichText::new(trn!(tries, "{n} passage", "{n} passages")).color(dim).size(13.5));
                             });
                         }
                         if date {
@@ -4796,9 +4839,9 @@ impl App {
                         let row = egui::InnerResponse::new((), ui.interact(rect, ui.id().with(("boss_line", i)), egui::Sense::hover()));
                         row.response.clone().on_hover_ui(|ui| {
                             ui.label(RichText::new(format!("{} · {}", run_name(last), boss_mechanic(code))).color(ui::GOLD));
-                            ui.label(RichText::new(format!("{} · {} au total", plural(tries, "passage"), plural(deaths, "mort"))).color(Color32::LIGHT_GRAY).size(13.5));
-                            ui.label(RichText::new(format!("{} par passage en moyenne · {} au total", duration_text(time / tries as i64), duration_text(time))).color(Color32::LIGHT_GRAY).size(13.5));
-                            ui.label(RichText::new(format!("dernier passage le {}", date_text(last.start))).color(Color32::LIGHT_GRAY).size(13.5));
+                            ui.label(RichText::new(tr!("{tries} · {deaths} au total", tries = trn!(tries, "{n} passage", "{n} passages"), deaths = trn!(deaths, "{n} mort", "{n} morts"))).color(Color32::LIGHT_GRAY).size(13.5));
+                            ui.label(RichText::new(tr!("{each} par passage en moyenne · {total} au total", each = duration_text(time / tries as i64), total = duration_text(time))).color(Color32::LIGHT_GRAY).size(13.5));
+                            ui.label(RichText::new(tr!("dernier passage le {date}", date = date_text(last.start))).color(Color32::LIGHT_GRAY).size(13.5));
                         });
                         if i % 2 == 1 {
                             band.set(stripe, egui::Shape::rect_filled(row.response.rect.expand2(Vec2::new(8.0, 0.0)), 0.0, Color32::from_rgb(21, 20, 18)));
@@ -4837,12 +4880,12 @@ impl App {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.set_min_height(22.0);
-                        let r = ui.add(egui::Label::new(RichText::new("MARCHÉ").color(ui::GOLD_DIM).size(13.0).strong().underline()).sense(egui::Sense::click()));
+                        let r = ui.add(egui::Label::new(RichText::new(tr!("MARCHÉ")).color(ui::GOLD_DIM).size(13.0).strong().underline()).sense(egui::Sense::click()));
                         back |= r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
                         ui.label(RichText::new("›").color(ui::GOLD_DIM).size(14.0));
-                        ui.label(RichText::new("DÉTAIL").color(ui::GOLD).size(13.0).strong());
+                        ui.label(RichText::new(tr!("DÉTAIL")).color(ui::GOLD).size(13.0).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            back |= ui::action_button(ui, "⬅  Retour").on_hover_text("Revenir à la liste").clicked();
+                            back |= ui::action_button(ui, tr!("⬅  Retour")).on_hover_text(tr!("Revenir à la liste")).clicked();
                         });
                     });
                     ui.add_space(2.0);
@@ -4851,7 +4894,7 @@ impl App {
                     ui.add_space(8.0);
                 });
                 let out = egui::ScrollArea::vertical().id_salt("market_detail").auto_shrink([false, false]).show(ui, |ui| {
-                    egui::Frame::new().inner_margin(margin).show(ui, |ui| self.market_detail(ui, &line, None, &prices, &shown_league, "COURS DU MARCHÉ"));
+                    egui::Frame::new().inner_margin(margin).show(ui, |ui| self.market_detail(ui, &line, None, &prices, &shown_league, tr!("COURS DU MARCHÉ")));
                 });
                 ui::fade_scroll(ui, &out, true);
                 if back {
@@ -4878,7 +4921,7 @@ impl App {
                         .iter()
                         .filter(|l| {
                             l.category == self.market_category
-                                && (needle.is_empty() || l.name.to_lowercase().contains(&needle))
+                                && (needle.is_empty() || l.name.to_lowercase().contains(&needle) || gametext::name(&l.name).to_lowercase().contains(&needle))
                         })
                         .cloned()
                         .collect()
@@ -4905,19 +4948,19 @@ impl App {
                 })
                 .show(ui, |ui| {
                     let mut refresh = false;
-                    ui::section_header(ui, "MARCHÉ", None, |ui| {
+                    ui::section_header(ui, tr!("MARCHÉ"), None, |ui| {
                         if busy {
                             ui.add(egui::Spinner::new().size(16.0).color(ui::GOLD));
                         } else {
-                            refresh = ui::action_button(ui, "⟳  Actualiser")
-                                .on_hover_text("Recharger les cours depuis poe.ninja")
+                            refresh = ui::action_button(ui, tr!("⟳  Actualiser"))
+                                .on_hover_text(tr!("Recharger les cours depuis poe.ninja"))
                                 .clicked();
                         }
                         if let Some(a) = age {
                             let text = if a < 90 {
-                                "à l'instant".to_string()
+                                tr!("à l'instant").to_string()
                             } else {
-                                format!("il y a {} min", a / 60)
+                                tr!("il y a {n} min", n = a / 60)
                             };
                             ui.label(RichText::new(text).color(Color32::GRAY).small());
                         }
@@ -4955,7 +4998,7 @@ impl App {
                                         .show_ui(ui, |ui| {
                                             for l in list {
                                                 let mine = if l == self.league {
-                                                    format!("{l} (personnage)")
+                                                    tr!("{league} (personnage)", league = l)
                                                 } else {
                                                     l.clone()
                                                 };
@@ -4968,7 +5011,7 @@ impl App {
                                             }
                                         })
                                         .response
-                                        .on_hover_text("Ligue dont les cours sont affichés");
+                                        .on_hover_text(tr!("Ligue dont les cours sont affichés"));
                                 },
                             );
                         });
@@ -4979,8 +5022,8 @@ impl App {
                         let shown = CATEGORIES
                             .iter()
                             .find(|(k, _)| *k == self.market_category)
-                            .map(|(_, l)| *l)
-                            .unwrap_or("Monnaie");
+                            .map(|(_, l)| i18n::tr(l))
+                            .unwrap_or(tr!("Monnaie"));
                         egui::ComboBox::from_id_salt("market_category")
                             .selected_text(RichText::new(shown).color(ui::GOLD))
                             .show_ui(ui, |ui| {
@@ -4988,14 +5031,14 @@ impl App {
                                     ui.selectable_value(
                                         &mut self.market_category,
                                         key.to_string(),
-                                        *label,
+                                        i18n::tr(label),
                                     );
                                 }
                             });
                         ui.add(
                             // À la hauteur de la liste voisine.
                             egui::TextEdit::singleline(&mut self.market_search)
-                                .hint_text("rechercher")
+                                .hint_text(tr!("rechercher"))
                                 .desired_width(ui.available_width())
                                 .min_size(Vec2::new(0.0, ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y))
                                 .vertical_align(egui::Align::Center),
@@ -5004,9 +5047,9 @@ impl App {
                     ui.add_space(6.0);
                     if lines.is_empty() {
                         let text = if age.is_none() {
-                            "Chargement des cours…"
+                            tr!("Chargement des cours…")
                         } else {
-                            "Aucun résultat"
+                            tr!("Aucun résultat")
                         };
                         ui.label(RichText::new(text).color(Color32::GRAY));
                         return;
@@ -5042,7 +5085,7 @@ impl App {
                                     }
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(&l.name).color(Color32::from_gray(225)),
+                                            RichText::new(gametext::name(&l.name)).color(Color32::from_gray(225)),
                                         )
                                         .truncate(),
                                     );
@@ -5058,8 +5101,8 @@ impl App {
                                                 [56.0, 20.0],
                                                 egui::Label::new(
                                                     RichText::new(format!(
-                                                        "{sign}{:.0} %",
-                                                        l.change
+                                                        "{sign}{}",
+                                                        i18n::percent(format!("{:.0}", l.change))
                                                     ))
                                                     .color(color)
                                                     .small(),
@@ -5145,7 +5188,7 @@ impl App {
         };
         let fmt = |v: f64| Self::fmt_in(v, unit(v));
         // Bande de titre, comme au diagnostic.
-        let category = MARKET_CATEGORIES.iter().find(|(k, _)| *k == line.category).map(|(_, l)| *l).unwrap_or(line.category.as_str());
+        let category = MARKET_CATEGORIES.iter().find(|(k, _)| *k == line.category).map(|(_, l)| i18n::tr(l)).unwrap_or(line.category.as_str());
         ui.add_space(4.0);
         ui.label(RichText::new(title).color(ui::GOLD).size(15.5).strong());
         ui.label(RichText::new(format!("{category} · {league}")).color(Color32::GRAY));
@@ -5193,11 +5236,11 @@ impl App {
                         let n = if v >= 100.0 {
                             format!("{v:.0}")
                         } else if v >= 1.0 {
-                            format!("{v:.1}").replace('.', ",").trim_end_matches(",0").to_string()
+                            i18n::decimal(format!("{v:.1}").trim_end_matches(".0").to_string())
                         } else if v >= 0.001 {
-                            format!("{v:.3}").replace('.', ",").trim_end_matches('0').to_string()
+                            i18n::decimal(format!("{v:.3}").trim_end_matches('0').to_string())
                         } else {
-                            "< 0,001".into()
+                            i18n::decimal("< 0.001".into())
                         };
                         let (size, color) = if name == main { (30.0, Color32::from_rgb(235, 200, 60)) } else { (22.0, Color32::from_rgb(225, 220, 210)) };
                         ui.label(RichText::new(n).size(size).color(color).strong());
@@ -5206,16 +5249,16 @@ impl App {
                 });
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{}{:.0} %", if up { "+" } else { "" }, line.change)).color(trend).strong());
-                    ui.label(RichText::new("sur 7 jours").color(Color32::GRAY));
+                    ui.label(RichText::new(format!("{}{}", if up { "+" } else { "" }, i18n::percent(format!("{:.0}", line.change)))).color(trend).strong());
+                    ui.label(RichText::new(tr!("sur 7 jours")).color(Color32::GRAY));
                 });
                 ui.add_space(8.0);
                 // Titre de la courbe et choix de la période.
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("ÉVOLUTION DU COURS").color(ui::GOLD).size(13.0).strong());
+                    ui.label(RichText::new(tr!("ÉVOLUTION DU COURS")).color(ui::GOLD).size(13.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
-                        for (i, label) in ["Tout", "30 j", "7 j"].iter().enumerate().map(|(i, l)| (2 - i, l)) {
+                        for (i, label) in [tr!("Tout"), tr!("30 j"), tr!("7 j")].iter().enumerate().map(|(i, l)| (2 - i, l)) {
                             let on = period == i;
                             let text = RichText::new(*label).size(12.5).color(if on { ui::GOLD } else { Color32::GRAY });
                             let r = ui.add(egui::Label::new(if on { text.strong().underline() } else { text }).sense(egui::Sense::click()));
@@ -5239,13 +5282,13 @@ impl App {
                         let axis = |v: f64| {
                             let v = v / per;
                             let n = if v >= 100.0 { format!("{v:.0}") } else if v >= 10.0 { format!("{v:.1}") } else { format!("{v:.2}") };
-                            format!("{} {name}", n.replace('.', ","))
+                            format!("{} {name}", i18n::decimal(n))
                         };
                         let n = [7, 30, usize::MAX][period].min(points.len());
                         ui::price_chart(ui, rect, &points[points.len() - n..], trend, &axis);
                     }
                     Some(Err(e)) => {
-                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("Historique indisponible : {e}"), egui::FontId::proportional(13.0), Color32::GRAY);
+                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, tr!("Historique indisponible : {e}", e), egui::FontId::proportional(13.0), Color32::GRAY);
                     }
                     None => {
                         ui.put(egui::Rect::from_center_size(rect.center(), Vec2::splat(24.0)), egui::Spinner::new().size(22.0).color(ui::GOLD));
@@ -5256,17 +5299,17 @@ impl App {
                 let foot_top = ui.cursor().top();
                 // Volume : poe.ninja ne compte pas d'annonces sur le marché d'échange, mais ce qui s'échange.
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Volume échangé :").color(Color32::from_gray(225)).strong());
-                    let units = if line.value > 0.0 { format!(" (≈ {} unités)", Self::fmt_count(line.volume / line.value)) } else { String::new() };
-                    ui.label(RichText::new(format!("{} par jour{units}", fmt(line.volume * ex_per_div))).color(Color32::LIGHT_GRAY));
+                    ui.label(RichText::new(tr!("Volume échangé :")).color(Color32::from_gray(225)).strong());
+                    let units = if line.value > 0.0 { tr!(" (≈ {n} unités)", n = Self::fmt_count(line.volume / line.value)) } else { String::new() };
+                    ui.label(RichText::new(tr!("{amount} par jour{units}", amount = fmt(line.volume * ex_per_div), units)).color(Color32::LIGHT_GRAY));
                 });
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     let have = if line.id == "divine" { "exalted" } else if line.value >= 1.0 || line.id == "exalted" { "divine" } else { "exalted" };
-                    ui.hyperlink_to("Acheter ou vendre sur le trade ↗", uniques::exchange_url(league, &line.id, have));
+                    ui.hyperlink_to(tr!("Acheter ou vendre sur le trade ↗"), uniques::exchange_url(league, &line.id, have));
                     if let Some(url) = prices.data.lock().unwrap().as_ref().and_then(|p| p.page_url(false, &line.name, &line.name)) {
                         ui.add_space(12.0);
-                        ui.hyperlink_to("Voir sur poe.ninja ↗", url);
+                        ui.hyperlink_to(tr!("Voir sur poe.ninja ↗"), url);
                     }
                 });
                 let h = ui.cursor().top() - foot_top;
@@ -5284,7 +5327,7 @@ impl App {
         let mut out = String::new();
         for (i, c) in digits.chars().enumerate() {
             if i > 0 && (digits.len() - i) % 3 == 0 {
-                out.push('\u{202f}');
+                out.push(if i18n::english() { ',' } else { '\u{202f}' });
             }
             out.push(c);
         }
@@ -5319,40 +5362,40 @@ impl App {
                     if let Some(step) = self.trade.refreshing(it) {
                         // Réestimation en cours : l'ancienne estimation reste affichée.
                         let step = match trade::wait_left() {
-                            Some(left) => format!("{step} (limite de l'API : encore {} s)", left.as_secs() + 1),
+                            Some(left) => tr!("{step} (limite de l'API : encore {n} s)", step, n = left.as_secs() + 1),
                             None => step,
                         };
                         ui.add(egui::Spinner::new().size(16.0).color(ui::GOLD)).on_hover_text(step);
                         ui.ctx().request_repaint_after(Duration::from_millis(250));
                         ui.add_space(2.0);
                     } else if done && self.stored.trade_prices {
-                        again = ui::action_button(ui, "⟳").on_hover_text("Réestimer : relancer la recherche sur le site de trade (les prix bougent)").clicked();
+                        again = ui::action_button(ui, "⟳").on_hover_text(tr!("Réestimer : relancer la recherche sur le site de trade (les prix bougent)")).clicked();
                         ui.add_space(2.0);
                     } else if ninja {
                         if self.prices.busy() {
                             ui.add(egui::Spinner::new().size(16.0).color(ui::GOLD));
                             ui.ctx().request_repaint_after(Duration::from_millis(250));
                         } else {
-                            again = ui::action_button(ui, "⟳").on_hover_text("Recharger les cours de poe.ninja").clicked();
+                            again = ui::action_button(ui, "⟳").on_hover_text(tr!("Recharger les cours de poe.ninja")).clicked();
                         }
                         ui.add_space(2.0);
                     }
-                    ui.label(RichText::new("ESTIMATION").color(ui::GOLD).size(13.0).strong());
+                    ui.label(RichText::new(tr!("ESTIMATION")).color(ui::GOLD).size(13.0).strong());
                     // Jamais estimé (ou échec) : le bouton pour lancer l'estimation, à la place de
                     // « Détails ».
                     if self.needs_estimate(it) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let (label, hint) = match est {
-                                Some(trade::Estimate::Failed(_)) => ("⟳  Réessayer", "Relancer l'estimation sur le site de trade"),
-                                _ => ("💰  Estimer", "Cherche des annonces comparables sur le site de trade"),
+                                Some(trade::Estimate::Failed(_)) => (tr!("⟳  Réessayer"), tr!("Relancer l'estimation sur le site de trade")),
+                                _ => (tr!("💰  Estimer"), tr!("Cherche des annonces comparables sur le site de trade")),
                             };
                             estimate = ui::action_button(ui, label).on_hover_text(hint).clicked();
                         });
                     }
                     if done || ninja {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let hint = if done { "Comment le prix a été trouvé : recherche, critères, annonces" } else { "D'où vient le prix : cours de poe.ninja" };
-                            open = ui::action_button(ui, "🔍  Détails").on_hover_text(hint).clicked();
+                            let hint = if done { tr!("Comment le prix a été trouvé : recherche, critères, annonces") } else { tr!("D'où vient le prix : cours de poe.ninja") };
+                            open = ui::action_button(ui, tr!("🔍  Détails")).on_hover_text(hint).clicked();
                         });
                     }
                 });
@@ -5381,7 +5424,7 @@ impl App {
     /// et la recherche de l'unique sur le site de trade.
     fn ninja_detail(&mut self, ui: &mut egui::Ui, it: &Item) {
         if self.ninja_price(it).is_none() {
-            ui.label(RichText::new("Pas d'estimation pour cet objet.").color(Color32::GRAY));
+            ui.label(RichText::new(tr!("Pas d'estimation pour cet objet.")).color(Color32::GRAY));
             return;
         }
         ui.add_space(4.0);
@@ -5392,13 +5435,13 @@ impl App {
         // La source du prix : sa page sur poe.ninja (sinon, pour un unique, ses annonces).
         let page = self.prices.data.lock().unwrap().as_ref().and_then(|p| p.page_url(it.rarity == item::Rarity::Unique, &it.name, &it.base));
         ui.add_space(10.0);
-        ui::zone_title(ui, "SOURCE", "");
+        ui::zone_title(ui, tr!("SOURCE"), "");
         match page {
             Some(url) => {
-                ui.hyperlink_to("Voir sur poe.ninja", url);
+                ui.hyperlink_to(tr!("Voir sur poe.ninja"), url);
             }
             None if it.rarity == item::Rarity::Unique => {
-                ui.hyperlink_to("Voir les annonces sur le site de trade", uniques::trade_url(&self.league, &it.name, Some(&it.base)));
+                ui.hyperlink_to(tr!("Voir les annonces sur le site de trade"), uniques::trade_url(&self.league, &it.name, Some(&it.base)));
             }
             None => {}
         }
@@ -5424,7 +5467,7 @@ impl App {
             // Une ligne trop longue passe à la ligne plutôt que d'être coupée ; en passe de mesure,
             // elle reste sur une ligne (sa vraie largeur).
             let mut inner = |ui: &mut egui::Ui| {
-                ui.label(RichText::new(format!("{label} :")).color(Color32::from_gray(225)).strong());
+                ui.label(RichText::new(tr!("{label} :", label)).color(Color32::from_gray(225)).strong());
                 add(ui);
             };
             if ui.is_sizing_pass() {
@@ -5434,13 +5477,13 @@ impl App {
             }
         };
         let advice = |ui: &mut egui::Ui| {
-            row(ui, "Conseil", &mut |ui| {
+            row(ui, tr!("Conseil"), &mut |ui| {
                 ui.label(RichText::new(value.label.advice()).color(ui::value_color(value.label)).strong());
             });
         };
         // En attente d'estimation : les lignes restent, avec « — » en gris.
         let unknown = |ui: &mut egui::Ui| {
-            for label in ["Confiance", "Conseil", "Basé sur"] {
+            for label in [tr!("Confiance"), tr!("Conseil"), tr!("Basé sur")] {
                 row(ui, label, &mut |ui| {
                     ui.label(RichText::new("—").color(Color32::from_gray(110)));
                 });
@@ -5452,32 +5495,32 @@ impl App {
                     (Some(estimate), Some((low, high))) if *total > 0 => {
                         // Fourchette dans la même devise que l'estimation.
                         let unit = self.price_unit(estimate);
-                        let span = format!("de {} à {}", Self::fmt_in(low, unit), Self::fmt_in(high, unit));
-                        let base = if *base_only { "base " } else { "" };
+                        let span = tr!("de {low} à {high}", low = Self::fmt_in(low, unit), high = Self::fmt_in(high, unit));
+                        let base = if *base_only { tr!("base ") } else { "" };
                         let p = e.confidence_pct();
-                        row(ui, "Prix estimé", &mut |ui| {
+                        row(ui, tr!("Prix estimé"), &mut |ui| {
                             // Confiance faible : la fourchette d'abord, le prix n'est qu'un repère.
                             if p < 50 && high - low >= 0.1 {
                                 ui.label(RichText::new(format!("{base}{span}")).color(gold).strong());
-                                ui.label(RichText::new(format!("(repère {})", self.fmt_price(estimate))).color(Color32::GRAY));
+                                ui.label(RichText::new(tr!("(repère {price})", price = self.fmt_price(estimate))).color(Color32::GRAY));
                             } else {
                                 ui.label(RichText::new(format!("{base}≈ {}", self.fmt_price(estimate))).color(gold).strong());
                                 let range = if high - low >= 0.1 { format!(" · {span}") } else { String::new() };
                                 ui.label(RichText::new(format!("({}){range}", self.price_all(estimate))).color(Color32::GRAY));
                             }
                         });
-                        row(ui, "Confiance", &mut |ui| {
-                            ui.label(RichText::new(format!("{p} % ({})", e.confidence())).color(ui::confidence_color(p)));
+                        row(ui, tr!("Confiance"), &mut |ui| {
+                            ui.label(RichText::new(format!("{} ({})", i18n::percent(p), e.confidence())).color(ui::confidence_color(p)));
                         });
                     }
-                    _ if *total == 0 => row(ui, "Prix estimé", &mut |ui| {
-                        ui.label(RichText::new("aucune annonce comparable en achat immédiat").color(Color32::LIGHT_GRAY));
+                    _ if *total == 0 => row(ui, tr!("Prix estimé"), &mut |ui| {
+                        ui.label(RichText::new(tr!("aucune annonce comparable en achat immédiat")).color(Color32::LIGHT_GRAY));
                     }),
                     _ => {
                         let min = prices_ex.iter().copied().fold(f64::INFINITY, f64::min);
-                        let from = if min.is_finite() { format!(", dès {}", self.fmt_price(min)) } else { String::new() };
-                        let text = format!("trop peu d'annonces pour estimer ({total}{from} ; il en faut {})", trade::MIN_PRICED);
-                        row(ui, "Prix estimé", &mut |ui| {
+                        let from = if min.is_finite() { tr!(", dès {price}", price = self.fmt_price(min)) } else { String::new() };
+                        let text = tr!("trop peu d'annonces pour estimer ({total}{from} ; il en faut {min})", total, from, min = trade::MIN_PRICED);
+                        row(ui, tr!("Prix estimé"), &mut |ui| {
                             ui.label(RichText::new(&text).color(Color32::LIGHT_GRAY));
                         });
                     }
@@ -5486,24 +5529,24 @@ impl App {
                 // Sur quoi repose l'estimation (annonces proches sur celles lues, éparpillement).
                 let kept = listings.iter().filter(|l| l.kept).count();
                 let mut basis = if *score == 0.0 || listings.is_empty() {
-                    if *total == 1 { "1 annonce en achat immédiat".to_string() } else { format!("{total} annonces en achat immédiat") }
+                    trn!(*total, "{n} annonce en achat immédiat", "{n} annonces en achat immédiat")
                 } else {
-                    format!("{kept} {} sur {} annonces lues", if kept == 1 { "proche" } else { "proches" }, listings.len())
+                    trn!(kept, "{n} proche sur {read} annonces lues", "{n} proches sur {read} annonces lues", read = listings.len())
                 };
                 if let Some(spread) = e.spread().filter(|s| *s >= 2.0) {
-                    basis.push_str(&format!(" · prix éparpillés ×{}", spread.round()));
+                    basis.push_str(&tr!(" · prix éparpillés ×{n}", n = spread.round()));
                 }
-                row(ui, "Basé sur", &mut |ui| {
+                row(ui, tr!("Basé sur"), &mut |ui| {
                     ui.label(RichText::new(&basis).color(Color32::GRAY));
                 });
 
             }
             Some(trade::Estimate::Pending(msg)) => {
-                row(ui, "Prix estimé", &mut |ui| {
+                row(ui, tr!("Prix estimé"), &mut |ui| {
                     ui.add(egui::Spinner::new().color(ui::GOLD));
                     match trade::wait_left() {
                         Some(left) => {
-                            ui.label(RichText::new(format!("limite de l'API de trade : encore {} s", left.as_secs() + 1)).color(Color32::LIGHT_GRAY));
+                            ui.label(RichText::new(tr!("limite de l'API de trade : encore {n} s", n = left.as_secs() + 1)).color(Color32::LIGHT_GRAY));
                             ui.ctx().request_repaint_after(Duration::from_millis(250));
                         }
                         None => {
@@ -5514,17 +5557,17 @@ impl App {
                 unknown(ui);
             }
             Some(trade::Estimate::Failed(e)) => {
-                row(ui, "Prix estimé", &mut |ui| {
+                row(ui, tr!("Prix estimé"), &mut |ui| {
                     ui.label(RichText::new(e).color(Color32::from_rgb(230, 120, 100)));
                 });
                 unknown(ui);
             }
             None if trade::priceable(it) => {
-                row(ui, "Prix estimé", &mut |ui| {
+                row(ui, tr!("Prix estimé"), &mut |ui| {
                     if self.stored.trade_prices {
                         ui.label(RichText::new("—").color(Color32::from_gray(110)));
                     } else {
-                        ui.label(RichText::new("estimation sur le trade coupée dans les réglages").color(Color32::GRAY));
+                        ui.label(RichText::new(tr!("estimation sur le trade coupée dans les réglages")).color(Color32::GRAY));
                     }
                 });
                 // Estimation coupée : le conseil d'après les règles reste la seule indication.
@@ -5537,25 +5580,24 @@ impl App {
             // Uniques et devises : prix de poe.ninja, présenté comme une estimation.
             None => match self.ninja_price(it) {
                 Some((ex, listings)) => {
-                    row(ui, "Prix estimé", &mut |ui| {
+                    row(ui, tr!("Prix estimé"), &mut |ui| {
                         ui.label(RichText::new(self.fmt_price(ex)).color(gold).strong());
                         ui.label(RichText::new(format!("({})", self.price_all(ex))).color(Color32::GRAY));
                     });
                     advice(ui);
                     let basis = match listings {
-                        Some(1) => "1 annonce, cours de poe.ninja".to_string(),
-                        Some(n) => format!("{n} annonces, cours de poe.ninja"),
-                        None => "cours de poe.ninja".to_string(),
+                        Some(n) => trn!(n, "{n} annonce, cours de poe.ninja", "{n} annonces, cours de poe.ninja"),
+                        None => tr!("cours de poe.ninja").to_string(),
                     };
-                    row(ui, "Basé sur", &mut |ui| {
+                    row(ui, tr!("Basé sur"), &mut |ui| {
                         ui.label(RichText::new(&basis).color(Color32::GRAY));
                     });
                     // Le résumé redit le prix : il est dans le détail.
                     return;
                 }
                 None => {
-                    row(ui, "Prix", &mut |ui| {
-                        ui.label(RichText::new("inconnu").color(Color32::GRAY));
+                    row(ui, tr!("Prix"), &mut |ui| {
+                        ui.label(RichText::new(tr!("inconnu")).color(Color32::GRAY));
                     });
                     advice(ui);
                 }
@@ -5588,10 +5630,10 @@ impl App {
                 ui.add(egui::Spinner::new().size(14.0).color(ui::GOLD));
                 ui.ctx().request_repaint_after(Duration::from_millis(250));
             } else if ninja || self.stored.trade_prices {
-                let hint = if ninja { "Recharger les cours de poe.ninja" } else { "Réestimer : relancer la recherche sur le site de trade (les prix bougent)" };
+                let hint = if ninja { tr!("Recharger les cours de poe.ninja") } else { tr!("Réestimer : relancer la recherche sur le site de trade (les prix bougent)") };
                 again = ui::action_button(ui, "⟳").on_hover_text(hint).clicked();
             }
-            ui.label(RichText::new("PRIX").color(ui::GOLD_DIM).small().strong());
+            ui.label(RichText::new(tr!("PRIX")).color(ui::GOLD_DIM).small().strong());
         });
         ui.add_space(2.0);
         if again {
@@ -5606,11 +5648,11 @@ impl App {
     /// Titre de la colonne des annonces lues (fixe au-dessus de leur défilement).
     fn listings_title(&self, ui: &mut egui::Ui, it: &Item) {
         let detail = match self.trade.get(it).filter(|_| trade::priceable(it)) {
-            Some(trade::Estimate::Done { listings, total, .. }) => format!("{} sur {total} en vente", listings.len()),
+            Some(trade::Estimate::Done { listings, total, .. }) => tr!("{read} sur {total} en vente", read = listings.len(), total),
             _ => String::new(),
         };
         // Même titre que les cartes (« ACTIVITÉ ») : sous-titre gris, trait dessous.
-        ui::section_header_sub(ui, "ANNONCES LUES", &detail);
+        ui::section_header_sub(ui, tr!("ANNONCES LUES"), &detail);
     }
 
     /// `listings_only` : la colonne de droite, les annonces lues seules (sans leur titre) ; sinon
@@ -5618,7 +5660,7 @@ impl App {
     fn estimation_detail(&mut self, ui: &mut egui::Ui, it: &Item, listings_only: bool) {
         let Some(e) = self.trade.get(it).filter(|_| trade::priceable(it)) else {
             if listings_only {
-                ui.label(RichText::new("Aucune : le prix vient des cours de poe.ninja.").color(Color32::GRAY));
+                ui.label(RichText::new(tr!("Aucune : le prix vient des cours de poe.ninja.")).color(Color32::GRAY));
             } else {
                 self.ninja_detail(ui, it);
             }
@@ -5628,7 +5670,7 @@ impl App {
         let (base_only, widened, score) = (*base_only, *widened, *score);
         if listings_only {
             if listings.is_empty() {
-                ui.label(RichText::new("Aucune annonce gardée : réestime l'objet pour les voir.").color(Color32::GRAY));
+                ui.label(RichText::new(tr!("Aucune annonce gardée : réestime l'objet pour les voir.")).color(Color32::GRAY));
             } else {
                 self.listing_cards(ui, it, listings, score, e.shares());
             }
@@ -5649,12 +5691,12 @@ impl App {
         self.value_rows(ui, it, &Some(e.clone()));
         ui.add_space(10.0);
 
-        ui::zone_title(ui, "RECHERCHE", "");
+        ui::zone_title(ui, tr!("RECHERCHE"), "");
         if base_only {
-            text(ui, "aucun mod reconnu : prix de la base, pour le craft");
+            text(ui, tr!("aucun mod reconnu : prix de la base, pour le craft"));
         }
         if widened {
-            text(ui, &format!("trop peu d'annonces de note proche (±{} %) : les plus proches ont été prises", (trade::SCORE_GAP * 100.0) as u32));
+            text(ui, &tr!("trop peu d'annonces de note proche (±{gap} %) : les plus proches ont été prises", gap = (trade::SCORE_GAP * 100.0) as u32));
         }
         // Mods cherchés ; ceux lâchés par la recherche élargie, en gris. Le nombre de mods exigé
         // n'est pas répété.
@@ -5662,20 +5704,24 @@ impl App {
             if c.starts_with("au moins ") && c.ends_with("comme cet objet") {
                 continue;
             }
-            match c.strip_suffix(" (lâché, sa place reste exigée)") {
-                Some(dropped) => ui.label(RichText::new(format!("• {dropped}")).color(Color32::from_gray(110))).on_hover_text("Lâché par la recherche élargie : sa place reste exigée"),
-                None => ui.label(RichText::new(format!("• {c}")).color(Color32::LIGHT_GRAY)),
+            match trade::criterion_text(c) {
+                (text, true) => ui.label(RichText::new(format!("• {text}")).color(Color32::from_gray(110))).on_hover_text(tr!("Lâché par la recherche élargie : sa place reste exigée")),
+                (text, false) => ui.label(RichText::new(format!("• {text}")).color(Color32::LIGHT_GRAY)),
             };
         }
         // La source du prix, comme pour un prix poe.ninja.
         ui.add_space(10.0);
-        ui::zone_title(ui, "SOURCE", "");
-        ui.hyperlink_to("Voir la recherche sur le site de trade", url);
+        ui::zone_title(ui, tr!("SOURCE"), "");
+        ui.hyperlink_to(tr!("Voir la recherche sur le site de trade"), url);
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Alt maintenu : tout dans l'autre langue (interface et textes du jeu), le temps de l'appui.
+        if i18n::set_flip(ctx.input(|i| i.modifiers.alt)) {
+            self.socket_tips.clear();
+        }
         while let Ok(ev) = self.copies.try_recv() {
             self.on_copy(ev);
         }
@@ -5761,13 +5807,26 @@ impl eframe::App for App {
                         ui.label(RichText::new(msg).color(Color32::from_rgb(220, 200, 150)));
                     }
                     _ => {
-                        // Raccourcis en jeu, touches dessinées comme sur un clavier.
+                        // Raccourcis, touches dessinées comme sur un clavier : ceux du jeu, puis
+                        // ceux de l'app, chaque groupe sous son petit titre.
                         ui.spacing_mut().item_spacing.x = 4.0;
+                        let group = |ui: &mut egui::Ui, title: &str| {
+                            ui.label(RichText::new(title).color(ui::GOLD_DIM).small().strong());
+                            ui.add_space(4.0);
+                        };
+                        group(ui, tr!("EN JEU"));
                         ui::keys(ui, &["Ctrl", "C"]);
-                        ui.label(RichText::new("diagnostiquer").color(Color32::GRAY));
+                        ui.label(RichText::new(tr!("diagnostiquer")).color(Color32::GRAY));
                         ui.add_space(14.0);
                         ui::keys(ui, &["Ctrl", "Alt", "C"]);
-                        ui.label(RichText::new("suivre la pièce").color(Color32::GRAY));
+                        ui.label(RichText::new(tr!("suivre la pièce")).color(Color32::GRAY));
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        group(ui, tr!("DANS L'APP"));
+                        ui::keys(ui, &["Alt"]);
+                        let other = if i18n::base() == i18n::Lang::Fr { i18n::Lang::En } else { i18n::Lang::Fr };
+                        ui.label(RichText::new(tr!("maintenu : {lang}", lang = other.name())).color(Color32::GRAY));
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5850,7 +5909,7 @@ impl eframe::App for App {
                     egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }).show(ui, |ui| {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let crumbs = ["HISTORIQUE", "DIAGNOSTIC", "ESTIMATION"];
+                            let crumbs = [tr!("HISTORIQUE"), tr!("DIAGNOSTIC"), tr!("ESTIMATION")];
                             for (i, name) in crumbs.iter().enumerate().take(depth + 1) {
                                 if i > 0 {
                                     ui.label(RichText::new("›").color(ui::GOLD_DIM).size(14.0));
@@ -5869,8 +5928,8 @@ impl eframe::App for App {
                             }
                             if depth > 0 {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let hint = if depth == 2 { "Revenir au diagnostic" } else { "Revenir à l'historique" };
-                                    back = ui::action_button(ui, "⬅  Retour").on_hover_text(hint).clicked();
+                                    let hint = if depth == 2 { tr!("Revenir au diagnostic") } else { tr!("Revenir à l'historique") };
+                                    back = ui::action_button(ui, tr!("⬅  Retour")).on_hover_text(hint).clicked();
                                 });
                             }
                         });
@@ -5944,7 +6003,7 @@ impl eframe::App for App {
                         }
                         (Some(it), _) if market_line.is_some() => egui::ScrollArea::vertical().id_salt("diagnostic_scroll").auto_shrink([false, false]).show(ui, |ui| {
                             let (prices, league) = (self.prices.clone(), self.league.clone());
-                            egui::Frame::new().inner_margin(margin).show(ui, |ui| self.market_detail(ui, market_line.as_ref().unwrap(), Some(it), &prices, &league, "OBJET DIAGNOSTIQUÉ"));
+                            egui::Frame::new().inner_margin(margin).show(ui, |ui| self.market_detail(ui, market_line.as_ref().unwrap(), Some(it), &prices, &league, tr!("OBJET DIAGNOSTIQUÉ")));
                             None
                         }),
                         _ => egui::ScrollArea::vertical().id_salt("diagnostic_scroll").auto_shrink([false, false]).show(ui, |ui| {
@@ -5993,17 +6052,17 @@ impl eframe::App for App {
                             let gap = |d: &SlotDiag| {
                                 d.gap.map(|g| {
                                     let color = if g > 0 { ui::SOCKET_GOOD } else if g < 0 { ui::SOCKET_WRONG } else { Color32::GRAY };
-                                    (format!("{}{} %", if g > 0 { "+" } else if g < 0 { "−" } else { "" }, g.abs()), color)
+                                    (format!("{}{}", if g > 0 { "+" } else if g < 0 { "−" } else { "" }, i18n::percent(g.abs())), color)
                                 })
                             };
-                            let build = |d: &SlotDiag| d.it_score.filter(|_| d.build).map(|s| (format!("{s} %"), ui::score_color(s)));
+                            let build = |d: &SlotDiag| d.it_score.filter(|_| d.build).map(|s| (i18n::percent(s), ui::score_color(s)));
                             match b.slots.as_slice() {
                                 [d] => {
-                                    if ui::click_band(ui, "Comparer à l'équipé", gap(d).map(|(v, c)| ("vers le build", v, c)), d.worn, true).clicked() {
+                                    if ui::click_band(ui, tr!("Comparer à l'équipé"), gap(d).map(|(v, c)| (tr!("vers le build"), v, c)), d.worn, true).clicked() {
                                         open = Some((d.slot, DetailMode::DiagWorn));
                                     }
                                     ui.add_space(4.0);
-                                    if ui::click_band(ui, "Comparer au build", build(d).map(|(v, c)| ("cette pièce", v, c)), d.build, true).clicked() {
+                                    if ui::click_band(ui, tr!("Comparer au build"), build(d).map(|(v, c)| (tr!("cette pièce"), v, c)), d.build, true).clicked() {
                                         open = Some((d.slot, DetailMode::DiagBuild));
                                     }
                                 }
@@ -6015,11 +6074,11 @@ impl eframe::App for App {
                                             ui::Chip { label: d.slot.side().unwrap_or("").to_string(), value, enabled }
                                         }).collect()
                                     };
-                                    if let Some(i) = ui::chip_band(ui, "Comparer à l'équipé", &chips(&|d| (gap(d), d.worn))) {
+                                    if let Some(i) = ui::chip_band(ui, tr!("Comparer à l'équipé"), &chips(&|d| (gap(d), d.worn))) {
                                         open = Some((slots[i].slot, DetailMode::DiagWorn));
                                     }
                                     ui.add_space(4.0);
-                                    if let Some(i) = ui::chip_band(ui, "Comparer au build", &chips(&|d| (build(d), d.build))) {
+                                    if let Some(i) = ui::chip_band(ui, tr!("Comparer au build"), &chips(&|d| (build(d), d.build))) {
                                         open = Some((slots[i].slot, DetailMode::DiagBuild));
                                     }
                                 }
@@ -6056,19 +6115,19 @@ impl eframe::App for App {
 
 /// Catégories poe.ninja du marché d'échange et leur nom affiché.
 const MARKET_CATEGORIES: &[(&str, &str)] = &[
-    ("Currency", "Monnaie"),
-    ("Fragments", "Fragments"),
-    ("Runes", "Runes"),
-    ("Essences", "Essences"),
-    ("SoulCores", "Cœurs d'âme"),
-    ("Idols", "Idoles"),
-    ("Expedition", "Expédition"),
-    ("Ritual", "Rituel"),
-    ("Delirium", "Délire"),
-    ("Breach", "Brèche"),
-    ("Abyss", "Abîme"),
-    ("UncutGems", "Gemmes non taillées"),
-    ("LineageSupportGems", "Gemmes de lignée"),
+    ("Currency", tkey!("Monnaie")),
+    ("Fragments", tkey!("Fragments")),
+    ("Runes", tkey!("Runes")),
+    ("Essences", tkey!("Essences")),
+    ("SoulCores", tkey!("Noyaux d'âme")),
+    ("Idols", tkey!("Idoles")),
+    ("Expedition", tkey!("Expédition")),
+    ("Ritual", tkey!("Rituel")),
+    ("Delirium", tkey!("Délire")),
+    ("Breach", tkey!("Brèche")),
+    ("Abyss", tkey!("Abîme")),
+    ("UncutGems", tkey!("Gemmes brutes")),
+    ("LineageSupportGems", tkey!("Gemmes de lignée")),
 ];
 
 static RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\)").unwrap());
@@ -6190,11 +6249,11 @@ fn weapon_lines(it: &Item) -> Vec<Vec<(String, Color32)>> {
         if let Some(c) = WEAPON_LINE.captures(line) {
             let kind = &c[1];
             let name = match kind {
-                "Physical" => "Dégâts physiques",
-                "Chaos" => "Dégâts de chaos",
-                _ => "Dégâts élémentaires",
+                "Physical" => tr!("Dégâts Physiques"),
+                "Chaos" => tr!("Dégâts de Chaos"),
+                _ => tr!("Dégâts Élémentaires"),
             };
-            let mut parts = vec![(format!("{name} : "), label)];
+            let mut parts = vec![(tr!("{name} : ", name), label)];
             for (k, r) in RANGE_PART.captures_iter(&c[2]).enumerate() {
                 if k > 0 {
                     parts.push((", ".into(), label));
@@ -6217,12 +6276,12 @@ fn weapon_lines(it: &Item) -> Vec<Vec<(String, Color32)>> {
             out.push(parts);
         } else if let Some(c) = RATE_LINE.captures(line) {
             let name = match &c[1] {
-                "Critical Hit Chance" => "Coups critiques",
-                "Attacks per Second" => "Attaques par seconde",
-                _ => "Rechargement",
+                "Critical Hit Chance" => tr!("Chances de Touche critique"),
+                "Attacks per Second" => tr!("Attaques par seconde"),
+                _ => tr!("Temps de rechargement"),
             };
-            let parts = vec![(format!("{name} : "), label), (c[2].to_string(), if c.get(3).is_some() { aug } else { Color32::from_gray(225) })];
-            if name == "Attaques par seconde" {
+            let parts = vec![(tr!("{name} : ", name), label), (c[2].to_string(), if c.get(3).is_some() { aug } else { Color32::from_gray(225) })];
+            if &c[1] == "Attacks per Second" {
                 rate_line = Some(out.len());
             }
             out.push(parts);
@@ -6233,9 +6292,9 @@ fn weapon_lines(it: &Item) -> Vec<Vec<(String, Color32)>> {
         let mut t = tail(total);
         if chaos > 0.0 {
             t.pop();
-            t.push((", dont ".into(), label));
+            t.push((tr!(", dont ").into(), label));
             t.push((format!("{chaos:.0}"), Color32::from_gray(225)));
-            t.push((" DPS chaos)".into(), label));
+            t.push((tr!(" DPS chaos)").into(), label));
         }
         out[i].extend(t);
     }
@@ -6270,7 +6329,7 @@ fn skill_name(text: &str) -> &str {
 fn dps_parts(d: &compare::Dps) -> ui::Parts {
     let mut out: ui::Parts = vec![("DPS ".into(), false), (format!("{:.0}", d.total()), true)];
     if d.phys > 0.0 && d.ele > 0.0 {
-        out.push((format!(" · physique {:.0} · élémentaire {:.0}", d.phys, d.ele), false));
+        out.push((tr!(" · physique {phys} · élémentaire {ele}", phys = format!("{:.0}", d.phys), ele = format!("{:.0}", d.ele)), false));
     }
     out
 }
@@ -6283,7 +6342,7 @@ fn fmt_num(v: f64) -> String {
 /// Défenses en morceaux de texte, valeurs changées par les mods en bleu (`aug`).
 fn defence_parts(d: [f64; 3], aug: [bool; 3]) -> ui::Parts {
     let mut out: ui::Parts = Vec::new();
-    for ((n, v), a) in ["Armure", "Évasion", "Bouclier d'énergie"].iter().zip(d).zip(aug).filter(|((_, v), _)| *v > 0.0) {
+    for ((n, v), a) in [tr!("Armure"), tr!("Score d'Évasion"), tr!("Bouclier d'énergie")].iter().zip(d).zip(aug).filter(|((_, v), _)| *v > 0.0) {
         if !out.is_empty() {
             out.push((" · ".into(), false));
         }
@@ -6299,21 +6358,22 @@ fn flask_parts(recover: (f64, bool), mana: bool, time: (f64, bool), duration: (f
     let mut out = Vec::new();
     if recover.0 > 0.0 {
         out.push(vec![
-            ("Récupère ".into(), false),
+            (tr!("Rend ").into(), false),
             (format!("{:.0}", recover.0), recover.1),
-            (format!(" {} en ", if mana { "mana" } else { "vie" }), false),
+            (if mana { tr!(" Mana sur ") } else { tr!(" Vie sur ") }.into(), false),
             (fmt_num(time.0), time.1),
             (" s".into(), false),
         ]);
     } else if duration.0 > 0.0 {
-        out.push(vec![("Dure ".into(), false), (fmt_num(duration.0), duration.1), (" s".into(), false)]);
+        out.push(vec![(tr!("Dure ").into(), false), (fmt_num(duration.0), duration.1), (" s".into(), false)]);
     }
     if max.0 > 0.0 {
         out.push(vec![
+            (tr!("Consomme ").into(), false),
             (format!("{:.0}", per_use.0), per_use.1),
-            (" charges sur ".into(), false),
+            (tr!(" charges sur ").into(), false),
             (format!("{:.0}", max.0), max.1),
-            (" par utilisation".into(), false),
+            (tr!(" par utilisation").into(), false),
         ]);
     }
     out
@@ -6521,14 +6581,14 @@ mod tests {
         assert_eq!(lines[1][1], ("4-87".to_string(), damage_color("Lightning")));
         // DPS au bout des lignes : physiques, élémentaires, total après les attaques par seconde.
         let text = |l: &Vec<(String, Color32)>| l.iter().map(|(t, _)| t.as_str()).collect::<String>();
-        assert_eq!(text(&lines[0]), "Dégâts physiques : 41-68 (DPS 76)");
-        assert_eq!(text(&lines[1]), "Dégâts élémentaires : 4-87 (DPS 64)");
+        assert_eq!(text(&lines[0]), "Dégâts Physiques : 41-68 (DPS 76)");
+        assert_eq!(text(&lines[1]), "Dégâts Élémentaires : 4-87 (DPS 64)");
         assert_eq!(text(&lines[3]), "Attaques par seconde : 1.40 (DPS 140)");
         // Ligne d'un seul élément (« Lightning Damage ») et chaos compté dans le total.
         let staff = item::parse("Item Class: Quarterstaves\nRarity: Rare\nBramble Goad\nGuardian Quarterstaff\n--------\nPhysical Damage: 52-86 (augmented)\nLightning Damage: 4-87 (augmented)\nChaos Damage: 10-20 (augmented)\nCritical Hit Chance: 10.00%\nAttacks per Second: 1.40\n--------\nItem Level: 70\n--------\nAdds 4 to 87 Lightning Damage").unwrap();
         let lines = weapon_lines(&staff);
-        assert_eq!(text(&lines[1]), "Dégâts élémentaires : 4-87 (DPS 64)");
-        assert_eq!(text(&lines[2]), "Dégâts de chaos : 10-20 (DPS 21)");
+        assert_eq!(text(&lines[1]), "Dégâts Élémentaires : 4-87 (DPS 64)");
+        assert_eq!(text(&lines[2]), "Dégâts de Chaos : 10-20 (DPS 21)");
         assert_eq!(text(&lines[4]), "Attaques par seconde : 1.40 (DPS 181, dont 21 DPS chaos)");
     }
 }
