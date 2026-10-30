@@ -69,6 +69,136 @@ pub struct Catalog {
     /// Prérequis Force / Dextérité / Intelligence des gemmes, par nom.
     #[serde(default)]
     pub gem_reqs: HashMap<String, [u32; 3]>,
+    /// Centre de l'illustration de chaque ascendance dans l'arbre (coordonnées PoB).
+    #[serde(default)]
+    pub ascendancy_centers: HashMap<String, [f32; 2]>,
+    /// Texte des uniques (PoB), par nom : type de base, implicites, mods.
+    #[serde(default)]
+    pub uniques: HashMap<String, UniqueText>,
+    /// Effet de chaque charme pendant son utilisation (PoB : « 15% increased Rarity… »).
+    #[serde(default)]
+    pub charm_buffs: HashMap<String, Vec<String>>,
+}
+
+static BASE_START: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?m)^itemBases\["([^"]+)"\] = \{"#).unwrap());
+static CHARM_BUFF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"buff = \{([^}]*)\}").unwrap());
+static QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]*)""#).unwrap());
+
+/// Effets des charmes dans `Data/Bases/flask.lua` de PoB.
+pub fn parse_charm_buffs(lua: &str) -> HashMap<String, Vec<String>> {
+    let starts: Vec<(usize, String)> = BASE_START.captures_iter(lua).map(|c| (c.get(0).unwrap().start(), c[1].to_string())).collect();
+    let mut out = HashMap::new();
+    for (k, (at, name)) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).map_or(lua.len(), |(e, _)| *e);
+        if let Some(c) = CHARM_BUFF.captures(&lua[*at..end]) {
+            let lines: Vec<String> = QUOTED.captures_iter(&c[1]).map(|q| q[1].to_string()).collect();
+            if !lines.is_empty() {
+                out.insert(name.clone(), lines);
+            }
+        }
+    }
+    out
+}
+
+/// Un unique tel que PoB le décrit (version actuelle), plages de valeurs comprises.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UniqueText {
+    pub base: String,
+    pub implicits: Vec<String>,
+    pub mods: Vec<String>,
+}
+
+/// Fichiers d'uniques de PoB (`Data/Uniques/<nom>.lua`).
+const UNIQUE_FILES: &[&str] = &[
+    "amulet", "axe", "belt", "body", "boots", "bow", "claw", "crossbow", "dagger", "flail", "flask", "focus", "gloves", "helmet",
+    "jewel", "mace", "quiver", "ring", "sceptre", "shield", "soulcore", "spear", "staff", "sword", "talisman", "wand",
+];
+
+/// Lignes d'en-tête d'un unique PoB (pas des mods).
+const UNIQUE_META: &[&str] = &[
+    "League:", "Source:", "Variant:", "Version:", "Selected Variant:", "Selected Version:", "LevelReq:", "Requires ", "Implicits:",
+    "Has Alt Variant", "Radius:", "Limited to:", "Sockets:", "Item Level:", "Quality:", "Upgrade:",
+];
+
+static UNIQUE_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\{(\w+):([^}]*)\}").unwrap());
+
+/// Uniques d'un fichier PoB : blocs `[[ … ]]` (nom, base, en-tête, puis mods). Les mods marqués
+/// `{version:…}` ne sont gardés que pour la dernière version, de même pour `{variant:…}` quand
+/// une variante s'appelle « Current » ; les autres marques (`{tags:…}`, `{range:…}`) sont retirées.
+pub fn parse_uniques(lua: &str) -> Vec<(String, UniqueText)> {
+    let mut out = Vec::new();
+    for block in lua.split("[[").skip(1) {
+        let Some(body) = block.split("]]").next() else { continue };
+        let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty());
+        let (Some(name), Some(base)) = (lines.next(), lines.next()) else { continue };
+        let (mut versions, mut variants, mut implicits) = (0usize, Vec::new(), 0usize);
+        let mut raw = Vec::new();
+        for l in lines {
+            if raw.is_empty() && UNIQUE_META.iter().any(|m| l.starts_with(m)) {
+                if l.starts_with("Version:") {
+                    versions += 1;
+                } else if let Some(v) = l.strip_prefix("Variant:") {
+                    variants.push(v.trim().to_string());
+                } else if let Some(n) = l.strip_prefix("Implicits:") {
+                    implicits = n.trim().parse().unwrap_or(0);
+                }
+                continue;
+            }
+            raw.push(l);
+        }
+        let current_variant = variants.iter().position(|v| v == "Current").map(|i| i + 1);
+        let mut text = UniqueText { base: base.to_string(), ..Default::default() };
+        // Variantes au choix (pas de « Current ») : leurs lignes, fusionnées après coup.
+        let mut choices: Vec<(usize, String)> = Vec::new();
+        for (i, l) in raw.iter().enumerate() {
+            let mut line: &str = l;
+            let mut keep = true;
+            let mut choice = false;
+            while let Some(c) = UNIQUE_TAG.captures(line) {
+                let wanted = |n: usize| c[2].split(',').any(|v| v.trim().parse::<usize>().ok() == Some(n));
+                match &c[1] {
+                    "version" if versions > 0 => keep &= wanted(versions),
+                    "variant" => {
+                        keep &= current_variant.is_none_or(wanted);
+                        choice |= current_variant.is_none();
+                    }
+                    _ => {}
+                }
+                line = &line[c[0].len()..];
+            }
+            if keep && !line.is_empty() {
+                if choice && i >= implicits {
+                    choices.push((text.mods.len(), line.to_string()));
+                } else if i < implicits {
+                    text.implicits.push(line.to_string())
+                } else {
+                    text.mods.push(line.to_string())
+                }
+            }
+        }
+        // Une ligne par variante au choix, qui ne diffèrent que d'un mot ou deux : une seule
+        // ligne, le passage qui change remplacé par « [au choix] ».
+        if let Some(at) = choices.first().map(|(a, _)| *a) {
+            let words: Vec<Vec<&str>> = choices.iter().map(|(_, l)| l.split(' ').collect()).collect();
+            let shortest = words.iter().map(Vec::len).min().unwrap_or(0);
+            let head = (0..shortest).take_while(|k| words.iter().all(|w| w[*k] == words[0][*k])).count();
+            let tail = (0..shortest - head).take_while(|k| words.iter().all(|w| w[w.len() - 1 - k] == words[0][words[0].len() - 1 - k])).count();
+            if choices.len() > 1 && head + tail > 0 {
+                let w = &words[0];
+                let merged = [&w[..head], &["[au choix]"], &w[w.len() - tail..]].concat().join(" ");
+                // Rite of Passage : PoB liste un esprit par variante, mais en jeu il est tiré au
+                // hasard à chaque utilisation (« Possessed by a random Spirit… »).
+                let merged = merged.replace("Spirit Of The [au choix]", "a random Spirit");
+                text.mods.insert(at.min(text.mods.len()), merged);
+            } else {
+                for (k, (_, l)) in choices.into_iter().enumerate() {
+                    text.mods.insert((at + k).min(text.mods.len()), l);
+                }
+            }
+        }
+        out.push((name.to_string(), text));
+    }
+    out
 }
 
 static GEM_START: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?m)^\t\["Metadata/[^"]+"\] = \{$"#).unwrap());
@@ -95,6 +225,12 @@ impl Catalog {
             .flatten()
             .map(|o| o.as_array().into_iter().flatten().filter_map(|v| v.as_f64()).collect())
             .collect();
+        for asc in tree["classes"].as_array().into_iter().flatten().flat_map(|c| c["ascendancies"].as_array().into_iter().flatten()) {
+            let bg = &asc["background"];
+            if let (Some(name), Some(x), Some(y)) = (asc["name"].as_str(), bg["x"].as_f64(), bg["y"].as_f64()) {
+                cat.ascendancy_centers.insert(name.to_string(), [x as f32, y as f32]);
+            }
+        }
         for node in tree["nodes"].as_object().into_iter().flat_map(|o| o.values()) {
             let Some(id) = node["stringId"].as_str() else { continue };
             // Position : centre du groupe + rayon de l'orbite, à l'angle de l'emplacement (convention PoB).
@@ -145,6 +281,15 @@ impl Catalog {
                 attribute: node["isAttribute"].as_bool().unwrap_or(false),
             });
         }
+        if let Ok(lua) = get_text(&format!("{POB}/Data/Bases/flask.lua")) {
+            cat.charm_buffs = parse_charm_buffs(&lua);
+        }
+        // Uniques : un fichier par type d'objet ; un fichier manquant n'empêche pas le reste.
+        for f in UNIQUE_FILES {
+            if let Ok(lua) = get_text(&format!("{POB}/Data/Uniques/{f}.lua")) {
+                cat.uniques.extend(parse_uniques(&lua));
+            }
+        }
         let lua = get_text(&format!("{POB}/Data/Gems.lua"))?;
         let starts: Vec<usize> = GEM_START.find_iter(&lua).map(|m| m.start()).chain([lua.len()]).collect();
         for w in starts.windows(2) {
@@ -162,7 +307,7 @@ impl Catalog {
 
     /// Depuis le cache (une semaine), sinon téléchargé ; vide si hors ligne.
     pub fn load(cache: &Path) -> Catalog {
-        let path = cache.join("pob_catalog_v6.json");
+        let path = cache.join("pob_catalog_v11.json");
         let fresh = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .map(|t| SystemTime::now().duration_since(t).unwrap_or_default() < Duration::from_secs(7 * 86400))
@@ -249,6 +394,9 @@ pub struct Step {
     pub uniques: Vec<Wanted>,
     /// Passifs propres à un set d'armes (1 ou 2) ; les autres sont communs aux deux.
     pub passive_sets: HashMap<String, u8>,
+    /// Fioles et charmes visés : à part de `targets`, ils ne comptent ni dans le profil du
+    /// build ni dans les caractéristiques, seulement dans la fiche de leur case.
+    pub side_targets: Vec<(Slot, String, Vec<Target>)>,
 }
 
 /// Unique recommandé par le build. Le planificateur range toutes les fioles sous `Flask1` :
@@ -257,11 +405,18 @@ pub struct Step {
 pub struct Wanted {
     pub name: String,
     pub slot: Option<Slot>,
+    /// Place dans la rangée du planificateur (charmes : 0 à 2 ; fioles : 0 vie, 1 mana).
+    pub position: usize,
 }
 
 impl Step {
     pub fn targets_for(&self, slot: Slot) -> impl Iterator<Item = &Target> {
-        self.targets.iter().filter(move |(s, _, _)| *s == slot).flat_map(|(_, _, t)| t)
+        self.targets.iter().chain(&self.side_targets).filter(move |(s, _, _)| *s == slot).flat_map(|(_, _, t)| t)
+    }
+
+    /// Type de base visé sur `slot` (vide si le build n'en précise pas).
+    pub fn base_for(&self, slot: Slot) -> &str {
+        self.targets.iter().chain(&self.side_targets).find(|(s, b, _)| *s == slot && !b.is_empty()).map(|(_, b, _)| b.as_str()).unwrap_or_default()
     }
 
     pub fn all_targets(&self) -> impl Iterator<Item = &Target> {
@@ -336,6 +491,9 @@ struct RawSlot {
     additional_text: String,
     #[serde(default)]
     unique_name: String,
+    /// Position dans la rangée (fioles : 0 vie, 1 mana ; charmes : 0 à 2).
+    #[serde(default)]
+    slot_x: usize,
 }
 #[derive(Deserialize)]
 struct RawSkill {
@@ -428,7 +586,9 @@ pub fn load_steps(files: &[PathBuf], catalog: &Catalog) -> Vec<Step> {
                 .map(|s| {
                     let name = catalog.gem(&s.id);
                     Skill {
-                        weapon_set: step_sets.and_then(|s| s.sets.get(&name).copied()),
+                        // Sets connus pour l'étape (Mobalytics) : un sort sans set s'utilise avec
+                        // les deux (0).
+                        weapon_set: step_sets.map(|s| s.sets.get(&name).copied().unwrap_or(0)),
                         name,
                         from_level: s.level_interval[0],
                         supports: s.support_skills.iter().map(|u| (catalog.gem(&u.id), u.level_interval[0])).collect(),
@@ -444,14 +604,32 @@ pub fn load_steps(files: &[PathBuf], catalog: &Catalog) -> Vec<Step> {
                     Some((slot, base, targets))
                 })
                 .collect();
+            // Fioles et charmes : tous rangés sous Flask1 / Charm1 par le planificateur. Une fiole
+            // de mana se reconnaît à son type de base, sinon à sa place dans la rangée.
+            let side_targets = b
+                .inventory_slots
+                .iter()
+                .filter(|s| s.unique_name.is_empty() && !s.additional_text.is_empty())
+                .filter_map(|s| {
+                    let (base, targets) = parse_targets(&s.additional_text);
+                    let slot = match s.inventory_id.as_str() {
+                        id if id.starts_with("Flask") && base.contains("Mana Flask") => Slot::ManaFlask,
+                        id if id.starts_with("Flask") && base.contains("Life Flask") => Slot::LifeFlask,
+                        id if id.starts_with("Flask") => [Slot::LifeFlask, Slot::ManaFlask].get(s.slot_x).copied()?,
+                        id if id.starts_with("Charm") => crate::gear::CHARMS.get(s.slot_x).copied()?,
+                        _ => return None,
+                    };
+                    Some((slot, base, targets))
+                })
+                .collect();
             let uniques = b
                 .inventory_slots
                 .iter()
                 .filter(|s| !s.unique_name.is_empty())
-                .filter_map(|s| Some(Wanted { name: s.unique_name.clone(), slot: wanted_slot(&s.inventory_id)? }))
+                .filter_map(|s| Some(Wanted { name: s.unique_name.clone(), slot: wanted_slot(&s.inventory_id)?, position: s.slot_x }))
                 .collect();
             let passive_sets = weapon_set_passives(&b.passives);
-            Some(Step { label, skills, passives: b.passives.into_iter().map(|p| p.id).collect(), targets, uniques, passive_sets })
+            Some(Step { label, skills, passives: b.passives.into_iter().map(|p| p.id).collect(), targets, uniques, passive_sets, side_targets })
         })
         .collect()
 }
@@ -551,7 +729,7 @@ mod tests {
             passives: vec![],
             targets: vec![],
             uniques: vec![],
-            passive_sets: HashMap::new(),
+            passive_sets: HashMap::new(), side_targets: vec![],
         }
     }
 
@@ -561,6 +739,28 @@ mod tests {
         let sets = weapon_set_passives(&[p("a", None), p("a", Some(1)), p("b", Some(1)), p("b", Some(2)), p("c", Some(2)), p("c", Some(2)), p("d", Some(1))]);
         assert_eq!(sets.len(), 2);
         assert_eq!((sets["c"], sets["d"]), (2, 1));
+    }
+
+    #[test]
+    fn unique_text() {
+        let lua = "return {\n[[\nOlroth's Resolve\nUltimate Life Flask\nSource: Drops\nVersion: Pre 0.4.0\nVersion: Current\n{version:1}Instant Recovery\n(100-150)% increased Charges per use\n{version:2}Regenerate 3% of Ward\n]],[[\nRite of Passage\nGolden Charm\nLeague: Dawn\nVariant: Owl\nVariant: Bear\nImplicits: 1\nUsed when you kill a Rare enemy\n{variant:2}{tags:x}Possessed by Bear\n]],\n}";
+        let u = parse_uniques(lua);
+        assert_eq!(u[0].0, "Olroth's Resolve");
+        assert_eq!((u[0].1.base.as_str(), u[0].1.mods.clone()), ("Ultimate Life Flask", vec!["(100-150)% increased Charges per use".to_string(), "Regenerate 3% of Ward".to_string()]));
+        assert_eq!(u[1].1.implicits, vec!["Used when you kill a Rare enemy"]);
+        assert_eq!(u[1].1.mods, vec!["Possessed by Bear"]);
+        let choice = "[[\nRite\nGolden Charm\nVariant: Owl\nVariant: Bear\n{variant:1}Possessed by Spirit Of The Owl for 10 seconds\n{variant:2}Possessed by Spirit Of The Bear for 10 seconds\n]]";
+        assert_eq!(parse_uniques(choice)[0].1.mods, vec!["Possessed by a random Spirit for 10 seconds"]);
+        let other = "[[\nX\nRuby Ring\nVariant: Fire\nVariant: Cold\n{variant:1}+10% to Fire Resistance\n{variant:2}+10% to Cold Resistance\n]]";
+        assert_eq!(parse_uniques(other)[0].1.mods, vec!["+10% to [au choix] Resistance"]);
+    }
+
+    #[test]
+    fn charm_buffs() {
+        let lua = "itemBases[\"Golden Charm\"] = {\n\ttype = \"Charm\",\n\tcharm = { duration = 1, chargesUsed = 80, chargesMax = 80, buff = { \"15% increased Rarity of Items found\" }, },\n}\nitemBases[\"Ultimate Mana Flask\"] = {\n\tflask = { mana = 310, },\n}\n";
+        let b = parse_charm_buffs(lua);
+        assert_eq!(b.get("Golden Charm").unwrap(), &vec!["15% increased Rarity of Items found".to_string()]);
+        assert!(!b.contains_key("Ultimate Mana Flask"));
     }
 
     #[test]

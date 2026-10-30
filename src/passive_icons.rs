@@ -18,6 +18,18 @@ fn to_color_image(img: &image::RgbaImage) -> ColorImage {
     ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw())
 }
 
+/// Préfixe d'une illustration d'ascendance (« ascendancy:Chronomancer ») : son chemin est lu
+/// dans la table des ascendances du jeu.
+pub const ASCENDANCY: &str = "ascendancy:";
+
+/// Illustration du médaillon d'une ascendance (colonne PassiveTreeImage), d'après son nom anglais.
+fn ascendancy_art(index: &bundles::Index, name: &str) -> Option<String> {
+    let table = crate::dat::Dat::new(index.read("data/balance/ascendancy.datc64").ok()?)?;
+    // Colonnes : Id, Index, Class (clé), FlavourRect, FlavourColour, Name (44), Flavour, Audio,
+    // PassiveTreeImage (68).
+    (0..table.rows).find(|r| table.string(*r, 44) == name).map(|r| table.string(r, 68).to_lowercase()).filter(|p| p.ends_with(".dds"))
+}
+
 pub struct PassiveIcons {
     tx: Sender<String>,
     rx: Receiver<(String, Option<ColorImage>)>,
@@ -45,7 +57,13 @@ impl PassiveIcons {
                         }
                         index
                             .as_ref()
-                            .and_then(|idx| idx.read_cached(&icon.to_lowercase(), &mut bundle_cache).ok())
+                            .and_then(|idx| {
+                                let path = match icon.strip_prefix(ASCENDANCY) {
+                                    Some(name) => ascendancy_art(idx, name)?,
+                                    None => icon.to_lowercase(),
+                                };
+                                idx.read_cached(&path, &mut bundle_cache).ok()
+                            })
                             .and_then(|data| bundles::decode_dds(&data).ok())
                             .inspect(|img| {
                                 let _ = std::fs::create_dir_all(file.parent().unwrap());

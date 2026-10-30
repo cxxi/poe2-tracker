@@ -1,4 +1,4 @@
-//! Onglets du build : sorts, talents (arbre), ascendances et uniques, pour une étape du guide.
+//! Onglets du build : sorts, talents (arbre et ascendance) et uniques, pour une étape du guide.
 
 use std::collections::{HashMap, HashSet};
 
@@ -7,9 +7,7 @@ use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use crate::art::Assets;
 use crate::gem_info::GemInfo;
 use crate::guide::{Catalog, Step};
-use crate::prices::PriceData;
 use crate::ui::{GOLD, GOLD_DIM};
-use crate::uniques;
 
 const GREEN: Color32 = Color32::from_rgb(110, 210, 110);
 
@@ -19,8 +17,6 @@ pub enum Tab {
     Stats,
     Skills,
     Passives,
-    Ascendancy,
-    Uniques,
     Atlas,
 }
 
@@ -47,8 +43,7 @@ impl SideTab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [Tab::Equipment,
-        Tab::Stats, Tab::Skills, Tab::Passives, Tab::Ascendancy, Tab::Atlas, Tab::Uniques];
+    pub const ALL: [Tab; 5] = [Tab::Equipment, Tab::Stats, Tab::Skills, Tab::Passives, Tab::Atlas];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -56,8 +51,6 @@ impl Tab {
             Tab::Stats => "Caractéristiques",
             Tab::Skills => "Sorts",
             Tab::Passives => "Talents",
-            Tab::Ascendancy => "Ascendances",
-            Tab::Uniques => "Uniques",
             Tab::Atlas => "Atlas",
         }
     }
@@ -151,8 +144,9 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
                             if prev.is_some() && !before.contains(skill.name.as_str()) {
                                 ui.label(RichText::new("nouveau").color(GREEN).small().strong());
                             }
+                            // Set d'armes du sort, en bout de ligne.
                             if let Some(set) = skill.weapon_set {
-                                set_badge(ui, set);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| set_badge(ui, set));
                             }
                         });
                         let (txt, col) = if skill.from_level > level {
@@ -232,160 +226,34 @@ fn icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32) -> egui::
     }
 }
 
-// --- Uniques -------------------------------------------------------------------------
-
-const UNIQUE: Color32 = Color32::from_rgb(175, 96, 37);
-
-/// Uniques de l'étape affichée (en cartes), puis tous ceux du build, les plus partagés
-/// entre étapes d'abord.
-pub fn uniques(ui: &mut egui::Ui, steps: &[Step], shown: usize, worn: &HashSet<String>, prices: Option<&PriceData>, league: &str, assets: &mut Assets) {
-    let summary = uniques::summary(steps);
-    let step = &steps[shown];
-    let price = |name: &str| -> (Option<String>, String) {
-        let Some((base, div, listings)) = prices.and_then(|p| p.unique_by_name(name)) else { return (None, "prix ?".into()) };
-        let p = prices.unwrap();
-        let text = if listings < crate::prices::MIN_LISTINGS { format!("~{} (peu d'annonces)", p.fmt(div)) } else { format!("≈ {}", p.fmt(div)) };
-        (Some(base.to_string()), text)
-    };
-    let here = uniques::of_step(step);
-    if here.is_empty() {
-        ui.label(RichText::new(format!("Aucun unique recommandé à l'étape {}.", step.label)).color(Color32::GRAY));
-    }
-    for (w, count) in here {
-        let (base, price_text) = price(&w.name);
-        let others: Vec<&str> = summary
-            .iter()
-            .find(|s| s.name == w.name)
-            .map(|s| s.steps.iter().map(String::as_str).filter(|l| *l != step.label).collect())
-            .unwrap_or_default();
-        let have = worn.contains(&w.name);
-        egui::Frame::new()
-            .fill(Color32::from_rgba_unmultiplied(10, 9, 8, 210))
-            .stroke(Stroke::new(1.0_f32, if have { GREEN.gamma_multiply(0.6) } else { GOLD_DIM }))
-            .corner_radius(4)
-            .inner_margin(8)
-            .outer_margin(egui::Margin::symmetric(0, 3))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    unique_icon(ui, assets, &w.name, 44.0);
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            let title = if count > 1 { format!("{} ×{count}", w.name) } else { w.name.clone() };
-                            ui.label(RichText::new(title).color(UNIQUE).size(16.0).strong());
-                            if have {
-                                ui.label(RichText::new("✓ porté").color(GREEN).strong());
-                            }
-                        });
-                        let slot = uniques::slot_label(uniques::slot(w.slot, base.as_deref()));
-                        let what = match &base {
-                            Some(b) => format!("{slot} · {b}"),
-                            None => slot.to_string(),
-                        };
-                        ui.label(RichText::new(what).color(Color32::GRAY).small());
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&price_text).color(GOLD));
-                            ui.hyperlink_to("chercher sur le trade ↗", uniques::trade_url(league, &w.name, base.as_deref()));
-                        });
-                        if !others.is_empty() {
-                            ui.label(RichText::new(format!("aussi dans : {}", others.join(", "))).color(Color32::GRAY).small());
-                        }
-                    });
-                });
-            });
-    }
-    if summary.is_empty() {
-        return;
-    }
-    ui.add_space(10.0);
-    ui.label(RichText::new("TOUT LE BUILD").color(GOLD_DIM).strong());
-    ui.label(RichText::new("du plus utilisé entre étapes au moins utilisé").color(Color32::DARK_GRAY).small());
-    ui.add_space(4.0);
-    egui::Grid::new("all_uniques").num_columns(4).spacing([14.0, 4.0]).striped(true).show(ui, |ui| {
-        for s in &summary {
-            let (base, price_text) = price(&s.name);
-            let have = worn.contains(&s.name);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(if have { "✓" } else { "★" }).color(if have { GREEN } else { UNIQUE }));
-                ui.hyperlink_to(RichText::new(&s.name).color(UNIQUE), uniques::trade_url(league, &s.name, base.as_deref()))
-                    .on_hover_text("chercher sur le trade");
-            });
-            ui.label(RichText::new(uniques::slot_label(uniques::slot(s.slot, base.as_deref()))).color(Color32::GRAY));
-            let n = s.steps.len();
-            ui.label(RichText::new(if n > 1 { format!("{n} étapes") } else { s.steps[0].clone() }).color(Color32::LIGHT_GRAY))
-                .on_hover_text(s.steps.join(", "));
-            ui.label(RichText::new(price_text).color(GOLD));
-            ui.end_row();
-        }
-    });
-}
-
-fn unique_icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32) {
-    match assets.texture_unique(name) {
-        Some(tex) => {
-            let s = tex.size_vec2();
-            let k = (size / s.x).min(size / s.y);
-            ui.add_sized([size, size], egui::Image::new((tex.id(), s * k)));
-        }
-        None => {
-            ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-        }
-    }
-}
-
-// --- Ascendances ----------------------------------------------------------------------
-
-pub fn ascendancy(ui: &mut egui::Ui, steps: &[Step], current: Option<usize>, catalog: &Catalog) {
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut any = false;
-    for (i, step) in steps.iter().enumerate() {
-        let fresh: Vec<&crate::guide::Passive> = step
-            .passives
-            .iter()
-            .filter(|id| seen.insert(id.as_str()))
-            .filter_map(|id| catalog.passives.get(id))
-            .filter(|p| p.ascendancy && p.notable)
-            .collect();
-        if fresh.is_empty() {
-            continue;
-        }
-        any = true;
-        let reached = current.is_some_and(|c| i <= c);
-        ui.add_space(6.0);
-        ui.label(RichText::new(&step.label).color(if reached { GOLD } else { GOLD_DIM }).size(13.0).strong());
-        for p in fresh {
-            egui::Frame::new()
-                .fill(Color32::from_rgba_unmultiplied(10, 9, 8, 210))
-                .stroke(Stroke::new(1.0_f32, if reached { GOLD } else { GOLD_DIM }))
-                .corner_radius(4)
-                .inner_margin(8)
-                .outer_margin(egui::Margin::symmetric(0, 3))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new(&p.name).color(GOLD).size(15.0).strong());
-                    for s in &p.stats {
-                        ui.label(RichText::new(s).color(Color32::from_rgb(136, 136, 255)));
-                    }
-                });
-        }
-    }
-    if !any {
-        ui.label(RichText::new("Ce build ne précise pas d'ascendance.").color(Color32::GRAY));
-    }
-}
-
 // --- Talents (arbre) -----------------------------------------------------------------
 
 struct Node {
     id: String,
     pos: Pos2,
-    kind: u8, // 0 petit, 1 notable, 2 keystone, 3 joyau, 4 départ de classe
+    kind: u8, // 0 petit, 1 notable, 2 keystone, 3 joyau, 4 départ de classe, 5 départ d'ascendance
     /// Nœuds reliés, avec le rayon d'arc signé de la liaison (0 = droite).
     links: Vec<(usize, f32)>,
     icon: String,
     group: Pos2,
     orbit: u8,
     attribute: bool,
+    /// Ascendance du nœud : comme en jeu, la sienne est dessinée dans le médaillon central.
+    ascendancy: Option<String>,
+    /// Numéro du nœud dans l'arbre (les joyaux du build désignent leur châsse ainsi).
+    skill: u32,
+}
+
+/// Joyau que le build pose dans une châsse de l'arbre, prêt à afficher.
+pub struct TreeJewel {
+    pub node: u32,
+    /// Image dans les archives du jeu.
+    pub icon: String,
+    pub name: String,
+    /// Type de base d'un unique, affiché en gris à la suite du nom.
+    pub base: String,
+    pub color: Color32,
+    pub lines: Vec<String>,
 }
 
 /// Les trois attributs : nom, couleur, icône « + » du jeu.
@@ -435,6 +303,10 @@ pub fn link_points(a: (Pos2, Pos2, u8), b: (Pos2, Pos2, u8), radius: f32) -> Vec
     vec![pa, pb]
 }
 
+/// Distance maximale des nœuds d'ascendance au centre, rapportée à l'anneau des départs.
+const ASC_REACH: f32 = 0.85;
+/// Rayon de l'illustration d'ascendance, rapporté à l'anneau des départs.
+const ASC_ART: f32 = 0.97;
 const CENTER_CIRCLE: &str = "art/textures/interface/2d/2dart/uiimages/ingame/passivetree/passivetreemaincircle.dds";
 const ACTIVE_START: &str = "art/textures/interface/2d/2dart/uiimages/ingame/passivetree/passivetreemaincircleactive.dds";
 /// Distance des départs rapportée à la demi-largeur du médaillon : la croix tombe dans son trèfle.
@@ -466,6 +338,10 @@ pub struct TreeView {
     zoom: f32,
     pan: Vec2,
     fitted_for: Option<String>,
+    /// Taille de la vue au dernier cadrage : on recadre quand elle change (plein écran…).
+    fitted_size: Vec2,
+    /// Cadrage demandé sur le médaillon central (l'ascendance).
+    focus_ascendancy: bool,
     /// Attribut choisi à la main pour un nœud d'attribut (0 Force, 1 Dextérité, 2 Intelligence),
     /// mémorisé par build dans `overrides_file`.
     overrides: HashMap<String, usize>,
@@ -478,27 +354,68 @@ impl TreeView {
             return;
         }
         let main: Vec<(&String, &crate::guide::Passive)> =
-            catalog.passives.iter().filter(|(_, p)| !p.ascendancy && !p.hidden && (p.x != 0.0 || p.y != 0.0)).collect();
+            catalog.passives.iter().filter(|(_, p)| !p.hidden && (p.x != 0.0 || p.y != 0.0)).collect();
         let by_skill: HashMap<u32, usize> = main.iter().enumerate().map(|(i, (_, p))| (p.skill, i)).collect();
+        // Les ascendances sont rangées loin autour de l'arbre dans les données : chacune est
+        // ramenée au centre, réduite au besoin pour tenir dans l'anneau des départs de classe.
+        let ring = main.iter().filter(|(_, p)| p.class_start && !p.ascendancy).map(|(_, p)| Vec2::new(p.x, p.y).length()).fold(1000.0_f32, f32::max);
+        // Centre : celui de son illustration (posée au centre du médaillon), à défaut celui de ses nœuds.
+        let mut frames: HashMap<&str, (Vec2, f32)> = HashMap::new();
+        for (_, p) in &main {
+            if let Some(a) = p.ascendancy_name.as_deref() {
+                frames.entry(a).or_insert_with(|| {
+                    let pts: Vec<Pos2> = main.iter().filter(|(_, q)| q.ascendancy_name.as_deref() == Some(a)).map(|(_, q)| Pos2::new(q.x, q.y)).collect();
+                    let center = catalog.ascendancy_centers.get(a).map_or_else(|| Rect::from_points(&pts).center().to_vec2(), |[x, y]| Vec2::new(*x, *y));
+                    let reach = pts.iter().map(|q| (q.to_vec2() - center).length()).fold(1.0_f32, f32::max);
+                    (center, (ring * ASC_REACH / reach).min(1.0))
+                });
+            }
+        }
+        let place = |p: &crate::guide::Passive, x: f32, y: f32| match p.ascendancy_name.as_deref().and_then(|a| frames.get(a)) {
+            Some((center, k)) => Pos2::ZERO + (Vec2::new(x, y) - *center) * *k,
+            None => Pos2::new(x, y),
+        };
+        let scale = |p: &crate::guide::Passive| p.ascendancy_name.as_deref().and_then(|a| frames.get(a)).map_or(1.0, |f| f.1);
         self.nodes = main
             .iter()
             .map(|(id, p)| Node {
                 id: (*id).clone(),
-                pos: Pos2::new(p.x, p.y),
-                kind: if p.class_start { 4 } else if p.keystone { 2 } else if p.jewel { 3 } else if p.notable { 1 } else { 0 },
+                pos: place(p, p.x, p.y),
+                kind: if p.ascendancy && p.ascendancy_name.as_deref() == Some(p.name.as_str()) {
+                    5
+                } else if p.class_start {
+                    4
+                } else if p.keystone {
+                    2
+                } else if p.jewel {
+                    3
+                } else if p.notable {
+                    1
+                } else {
+                    0
+                },
                 links: p
                     .links
                     .iter()
                     .enumerate()
-                    .filter_map(|(k, s)| by_skill.get(s).map(|j| (*j, p.link_arcs.get(k).copied().unwrap_or(0.0))))
+                    // Pas de liaison entre une ascendance et le reste de l'arbre.
+                    .filter(|(_, s)| by_skill.get(s).is_some_and(|j| main[*j].1.ascendancy_name == p.ascendancy_name))
+                    .filter_map(|(k, s)| by_skill.get(s).map(|j| (*j, p.link_arcs.get(k).copied().unwrap_or(0.0) * scale(p))))
                     .collect(),
                 icon: p.icon.clone(),
-                group: Pos2::new(p.gx, p.gy),
+                group: place(p, p.gx, p.gy),
                 orbit: p.orbit,
                 attribute: p.attribute,
+                ascendancy: p.ascendancy_name.clone(),
+                skill: p.skill,
             })
             .collect();
         self.index = self.nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), i)).collect();
+    }
+
+    /// Au prochain affichage, centre sur l'ascendance (médaillon central), zoom inchangé.
+    pub fn recenter(&mut self) {
+        self.focus_ascendancy = true;
     }
 
     /// Fichier des choix d'attributs du build affiché (rechargé quand le build change).
@@ -539,6 +456,7 @@ impl TreeView {
         icons: &mut crate::passive_icons::PassiveIcons,
         key: String,
         set: u8,
+        jewels: &[TreeJewel],
     ) {
         self.build(catalog);
         if self.nodes.is_empty() {
@@ -555,6 +473,10 @@ impl TreeView {
                 .collect()
         };
         let mut taken = taken_in(step);
+        // Ascendance du build (celle des nœuds pris) : la seule affichée, départ compris.
+        let shown_asc = taken.iter().find_map(|i| self.nodes[*i].ascendancy.clone());
+        let hidden = |n: &Node| n.ascendancy.is_some() && n.ascendancy != shown_asc;
+        taken.extend((0..self.nodes.len()).filter(|i| self.nodes[*i].kind == 5 && !hidden(&self.nodes[*i])));
         let before: HashSet<usize> = prev.map(taken_in).unwrap_or_default();
         let set_of: HashMap<usize, u8> = step.passive_sets.iter().filter_map(|(id, n)| Some((*self.index.get(id)?, *n))).collect();
         let per_set = [1u8, 2].map(|n| set_of.values().filter(|v| **v == n).count());
@@ -565,9 +487,10 @@ impl TreeView {
             .filter(|i| self.nodes[*i].kind == 4 && self.nodes[*i].links.iter().any(|(j, _)| taken.contains(j)))
             .collect();
         taken.extend(starts);
-        if self.fitted_for.as_ref() != Some(&key) {
+        if self.fitted_for.as_ref() != Some(&key) || (self.fitted_size - rect.size()).length() > 1.0 {
             self.fit(rect, &taken);
             self.fitted_for = Some(key);
+            self.fitted_size = rect.size();
         }
 
         // Déplacement à la souris, zoom à la molette autour du curseur.
@@ -594,11 +517,8 @@ impl TreeView {
         let main_attr = catalog.main_attribute(step);
         let overrides = &self.overrides;
         let attr_of = |n: &Node| overrides.get(&n.id).copied().unwrap_or(main_attr);
-        let to_screen = |p: Pos2| rect.center() + self.pan + (p - self.center) * self.zoom;
-        let is_fresh = |i: usize| prev.is_some() && taken.contains(&i) && !before.contains(&i) && self.nodes[i].kind != 4;
+        let is_fresh = |i: usize| prev.is_some() && taken.contains(&i) && !before.contains(&i) && self.nodes[i].kind < 4;
 
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(6, 6, 6, 235));
         // Médaillon central du jeu : son anneau passe par les six départs de classe.
         let start_ring = self
             .nodes
@@ -607,11 +527,24 @@ impl TreeView {
             .map(|n| n.pos.to_vec2().length())
             .fold(0.0_f32, f32::max)
             .max(1000.0);
+        if std::mem::take(&mut self.focus_ascendancy) {
+            // Le médaillon au milieu de la vue, sans toucher au zoom.
+            self.center = Pos2::ZERO;
+            self.pan = Vec2::ZERO;
+        }
+        let to_screen = |p: Pos2| rect.center() + self.pan + (p - self.center) * self.zoom;
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(6, 6, 6, 235));
         painter.circle_filled(to_screen(Pos2::ZERO), start_ring * self.zoom, Color32::from_rgb(12, 10, 14));
         if let Some(tex) = icons.get(CENTER_CIRCLE).cloned() {
             let half = start_ring / RING_FRACTION * MEDALLION_SCALE;
             let r = Rect::from_center_size(to_screen(Pos2::ZERO), Vec2::splat(2.0 * half * self.zoom));
             painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        // Illustration de l'ascendance du build, dans le disque du médaillon.
+        if let Some(tex) = shown_asc.as_ref().and_then(|a| icons.get(&format!("{}{a}", crate::passive_icons::ASCENDANCY))).cloned() {
+            let r = Rect::from_center_size(to_screen(Pos2::ZERO), Vec2::splat(2.0 * start_ring * ASC_ART * self.zoom));
+            painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_gray(150));
         }
         let dim = Color32::from_rgb(52, 49, 44);
         // Certaines liaisons ne sont listées que d'un côté : on les trace toutes, une seule fois.
@@ -619,7 +552,7 @@ impl TreeView {
         for (i, n) in self.nodes.iter().enumerate() {
             for &(j, radius) in &n.links {
                 // Les premiers nœuds sont sertis dans le médaillon : pas de trait vers le départ.
-                if n.kind == 4 || self.nodes[j].kind == 4 || !drawn.insert((i.min(j), i.max(j))) {
+                if n.kind == 4 || self.nodes[j].kind == 4 || hidden(n) || !drawn.insert((i.min(j), i.max(j))) {
                     continue;
                 }
                 let (a, b) = (to_screen(n.pos), to_screen(self.nodes[j].pos));
@@ -654,7 +587,7 @@ impl TreeView {
                 continue;
             }
             let r = (world_radius(n.kind) * self.zoom).clamp(1.5, 40.0);
-            if !rect.expand(r).contains(p) {
+            if hidden(n) || !rect.expand(r).contains(p) {
                 continue;
             }
             let on = taken.contains(&i);
@@ -668,17 +601,22 @@ impl TreeView {
                     color = c;
                 }
             }
+            // Châsse garnie par le build : l'image du joyau à la place de celle de la châsse.
+            let jewel = if n.kind == 3 { jewels.iter().find(|j| j.node == n.skill) } else { None };
+            let icon = jewel.map_or(icon, |j| j.icon.as_str());
             // Icône du jeu dès que le nœud est assez grand à l'écran.
             let tex = if r >= 7.0 { icons.get(icon).cloned() } else { None };
             match tex {
                 Some(tex) => {
                     painter.circle_filled(p, r, Color32::BLACK);
                     let tint = if on { Color32::WHITE } else { Color32::from_gray(95) };
-                    painter.image(tex.id(), Rect::from_center_size(p, Vec2::splat(r * 1.6)), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
+                    // Dans le cercle du nœud, sous son contour.
+                    crate::ui::circle_image(&painter, tex.id(), p, r * 0.92, tint);
                     painter.circle_stroke(p, r, Stroke::new(if on { 2.5_f32 } else { 1.5 }, color));
                 }
                 None => {
-                    painter.circle_filled(p, r, color);
+                    // De loin, une châsse garnie prend la couleur de son joyau.
+                    painter.circle_filled(p, r, jewel.filter(|_| on).map_or(color, |j| j.color));
                 }
             }
             if let Some(&n) = set_of.get(&i) {
@@ -704,18 +642,13 @@ impl TreeView {
                 }
                 let (name, c, _) = ATTRIBUTES[attr_of(n)];
                 let chosen = overrides.contains_key(&n.id);
-                resp.on_hover_ui_at_pointer(|ui| {
-                    ui.label(RichText::new(format!("+5 {name}")).color(c).strong());
-                    let why = if chosen { "ton choix" } else { "choix supposé d'après les gemmes du build" };
-                    ui.label(RichText::new(format!("{why} — clic droit pour changer")).color(Color32::GRAY).small());
-                });
+                let why = if chosen { "ton choix" } else { "choix supposé d'après les gemmes du build" };
+                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &format!("+5 {name}"), c, None, &[], Some(&format!("{why} — clic droit pour changer"))));
+            } else if let Some(j) = jewels.iter().find(|j| n.kind == 3 && j.node == n.skill) {
+                let tex = icons.get(&j.icon).cloned();
+                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, tex.as_ref(), &j.name, j.color, Some(&j.base).filter(|b| !b.is_empty()).map(|b| b.as_str()), &j.lines, None));
             } else if let Some(p) = catalog.passives.get(&n.id) {
-                resp.on_hover_ui_at_pointer(|ui| {
-                    ui.label(RichText::new(&p.name).color(GOLD).strong());
-                    for s in &p.stats {
-                        ui.label(RichText::new(s).color(Color32::from_rgb(136, 136, 255)));
-                    }
-                });
+                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &p.name, GOLD, None, &p.stats, None));
             }
         }
         if let Some(id) = cycle {
@@ -765,6 +698,7 @@ pub fn stats(
     build: Option<&crate::stats::Sheet>,
     build_title: &str,
     penalty: &(f64, String),
+    quests: [f64; 3],
 ) {
     use crate::stats::{Group, Line, RES_CAP, Total};
     let fmt = |v: f64| {
@@ -869,16 +803,21 @@ pub fn stats(
     // Résistance effective : équipement + pénalité (élémentaires), plafonnée.
     let res_row = |ui: &mut egui::Ui, name: &str, idx: usize| {
         let pen = if idx < 3 { penalty.0 } else { 0.0 };
-        let eff = |t: &Total| (t.value + pen).min(RES_CAP);
+        // Résistances données par la campagne (récompenses cochées sur la route).
+        let quest = quests.get(idx).copied().unwrap_or(0.0);
+        let eff = |t: &Total| (t.value + pen + quest).min(RES_CAP);
         let hover = |ui: &mut egui::Ui, t: &Total| {
             breakdown(ui, t, " %");
             ui.separator();
             ui.label(format!("Équipement : {} %", fmt(t.value)));
+            if quest > 0.0 {
+                ui.label(format!("Récompenses de quête : +{} %", fmt(quest)));
+            }
             if idx < 3 {
                 ui.label(format!("Pénalité ({}) : {} %", penalty.1, fmt(pen)));
             }
             ui.label(format!("Plafond : {} %", fmt(RES_CAP)));
-            let over = t.value + pen - RES_CAP;
+            let over = t.value + pen + quest - RES_CAP;
             if over > 0.0 {
                 ui.label(format!("{} % au-dessus du plafond", fmt(over)));
             }

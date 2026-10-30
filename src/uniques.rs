@@ -3,13 +3,12 @@
 use std::collections::HashSet;
 
 use crate::gear::{Gear, Slot, CHARMS, RINGS};
-use crate::guide::{Step, Wanted};
-use crate::item::{self, Rarity};
+use crate::guide::Step;
+use crate::item::Rarity;
 
 /// Un unique du build et les étapes qui le recommandent.
 pub struct Summary {
     pub name: String,
-    pub slot: Option<Slot>,
     pub steps: Vec<String>,
 }
 
@@ -22,23 +21,11 @@ pub fn summary(steps: &[Step]) -> Vec<Summary> {
             match out.iter_mut().find(|s| s.name == w.name) {
                 Some(s) if s.steps.contains(&step.label) => {}
                 Some(s) => s.steps.push(step.label.clone()),
-                None => out.push(Summary { name: w.name.clone(), slot: w.slot, steps: vec![step.label.clone()] }),
+                None => out.push(Summary { name: w.name.clone(), steps: vec![step.label.clone()] }),
             }
         }
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.steps.len()));
-    out
-}
-
-/// Uniques d'une étape, sans doublon : nom, emplacement, nombre d'exemplaires.
-pub fn of_step(step: &Step) -> Vec<(&Wanted, usize)> {
-    let mut out: Vec<(&Wanted, usize)> = Vec::new();
-    for w in &step.uniques {
-        match out.iter_mut().find(|(o, _)| o.name == w.name) {
-            Some((_, n)) => *n += 1,
-            None => out.push((w, 1)),
-        }
-    }
     out
 }
 
@@ -49,15 +36,6 @@ pub fn slot(slot: Option<Slot>, base: Option<&str>) -> Option<Slot> {
         (Some(Slot::LifeFlask), Some(b)) if b.contains("Mana Flask") => Some(Slot::ManaFlask),
         (s, _) => s,
     }
-}
-
-pub fn slot_label(slot: Option<Slot>) -> &'static str {
-    slot.map(Slot::label).unwrap_or("?")
-}
-
-/// Noms des uniques de l'équipement suivi.
-pub fn worn(gear: &Gear) -> HashSet<String> {
-    gear.slots.values().filter_map(|t| item::parse(t)).filter(|i| i.rarity == Rarity::Unique).map(|i| i.name).collect()
 }
 
 /// Cases à marquer d'une étoile : uniques de l'étape pas encore portés, chacun sur sa case
@@ -75,7 +53,8 @@ pub fn missing_by_slot(step: &Step, gear: &Gear, base_of: impl Fn(&str) -> Optio
                 if CHARMS.iter().any(|c| name_in(*c).as_deref() == Some(w.name.as_str())) {
                     continue;
                 }
-                free_charms.next().copied()
+                // Sa place dans la rangée du build si elle est ouverte, sinon un charme libre.
+                CHARMS[..open_charms].get(w.position).copied().or_else(|| free_charms.next().copied())
             }
             // Anneaux : l'un ou l'autre fait l'affaire.
             Some(s @ (Slot::RingLeft | Slot::RingRight)) => {
@@ -104,6 +83,20 @@ pub fn trade_url(league: &str, name: &str, base: Option<&str>) -> String {
     format!("https://www.pathofexile.com/trade2/search/poe2/{}?q={}", encode(league), encode(&q))
 }
 
+/// Recherche d'un type de base sur le site de trade (vendeurs en ligne, moins cher d'abord).
+pub fn base_trade_url(league: &str, base: &str) -> String {
+    let query = serde_json::json!({ "status": { "option": "online" }, "type": base, "filters": { "type_filters": { "filters": { "rarity": { "option": "nonunique" } } } } });
+    let q = serde_json::json!({ "query": query, "sort": { "price": "asc" } }).to_string();
+    format!("https://www.pathofexile.com/trade2/search/poe2/{}?q={}", encode(league), encode(&q))
+}
+
+/// Échange d'un objet du marché sur le site de trade : `want` contre `have` (identifiants du
+/// site, ceux de poe.ninja).
+pub fn exchange_url(league: &str, want: &str, have: &str) -> String {
+    let q = serde_json::json!({ "exchange": { "status": { "option": "online" }, "have": [have], "want": [want] } }).to_string();
+    format!("https://www.pathofexile.com/trade2/exchange/poe2/{}?q={}", encode(league), encode(&q))
+}
+
 fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -116,6 +109,7 @@ fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guide::Wanted;
 
     fn step(label: &str, uniques: &[(&str, Option<Slot>)]) -> Step {
         Step {
@@ -123,8 +117,8 @@ mod tests {
             skills: vec![],
             passives: vec![],
             targets: vec![],
-            uniques: uniques.iter().map(|(n, s)| Wanted { name: n.to_string(), slot: *s }).collect(),
-            passive_sets: Default::default(),
+            uniques: uniques.iter().map(|(n, s)| Wanted { name: n.to_string(), slot: *s, position: 0 }).collect(),
+            passive_sets: Default::default(), side_targets: vec![],
         }
     }
 
@@ -139,7 +133,20 @@ mod tests {
         assert_eq!(s[0].name, "Sadist's Mercy");
         assert_eq!(s[0].steps, ["BUDGET", "94% Block"]);
         assert_eq!(s[1].name, "Svalinn");
-        assert_eq!(of_step(&steps[2])[0].1, 2);
+    }
+
+    #[test]
+    fn charm_uniques_follow_their_place_in_the_row() {
+        let mut st = step("x", &[("The Fall of the Axe", Some(Slot::Charm1)), ("Rite of Passage", Some(Slot::Charm1))]);
+        st.uniques[1].position = 1;
+        // Deux charmes portés (la ceinture n'en annonce qu'un) : chaque unique sur sa case.
+        let mut g = Gear::default();
+        g.slots.insert(Slot::Belt, "Item Class: Belts\nRarity: Rare\nX\nRawhide Belt\n--------\nItem Level: 66\n--------\nHas 1 Charm Slot".into());
+        for c in [Slot::Charm1, Slot::Charm2] {
+            g.slots.insert(c, "Item Class: Charms\nRarity: Normal\nStone Charm\n--------\nItem Level: 10".into());
+        }
+        let m = missing_by_slot(&st, &g, |_| None);
+        assert_eq!(m, vec![(Slot::Charm1, "The Fall of the Axe".into()), (Slot::Charm2, "Rite of Passage".into())]);
     }
 
     #[test]

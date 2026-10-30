@@ -156,7 +156,7 @@ mod tests {
             passives: vec![],
             targets: targets.into_iter().map(|(s, t)| (s, String::new(), t)).collect(),
             uniques: vec![],
-            passive_sets: Default::default(),
+            passive_sets: Default::default(), side_targets: vec![],
         }
     }
 

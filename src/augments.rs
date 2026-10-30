@@ -20,7 +20,7 @@ use crate::trade::template;
 const AUGMENTS: &str = "https://repoe-fork.github.io/poe2/augments.min.json";
 const BASES: &str = "https://repoe-fork.github.io/poe2/base_items.min.json";
 const MODS: &str = "https://repoe-fork.github.io/poe2/mods.min.json";
-const CACHE: &str = "augments_v5.json";
+const CACHE: &str = "augments_v10.json";
 const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +48,29 @@ pub struct Catalog {
     /// sorts de froid).
     #[serde(default)]
     pub classes: HashMap<String, (String, Option<String>)>,
+    /// Compétences accordées par chaque type d'objet (identifiants de gemmes du jeu :
+    /// « Metadata/Items/Gems/SkillGemFreezingShards » pour un Gelid Staff).
+    #[serde(default)]
+    pub skills: HashMap<String, Vec<String>>,
+    /// Fioles et charmes : ce que la base récupère, sa durée et ses charges.
+    #[serde(default)]
+    pub flasks: HashMap<String, FlaskBase>,
+    /// Niveau requis de chaque type d'objet (à défaut, son niveau d'apparition).
+    #[serde(default)]
+    pub req_levels: HashMap<String, u32>,
+    /// Texte des préfixes et suffixes, par identifiant (joyaux de l'arbre).
+    #[serde(default)]
+    pub mod_texts: HashMap<String, String>,
+}
+
+/// Propriétés d'une base de fiole ou de charme (RePoE ; durée en dixièmes de seconde).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct FlaskBase {
+    pub life: f64,
+    pub mana: f64,
+    pub duration: f64,
+    pub charges_max: f64,
+    pub charges_per_use: f64,
 }
 
 /// Ce qu'apporte un type d'objet par lui-même : de quoi juger s'il convient à un build.
@@ -198,12 +221,73 @@ fn base_classes(bases: &serde_json::Value) -> HashMap<String, (String, Option<St
     for b in bases.as_object().into_iter().flatten().map(|(_, b)| b) {
         let Some(name) = b["name"].as_str().filter(|n| !n.is_empty()) else { continue };
         let Some(class) = b["item_class"].as_str() else { continue };
-        if b["domain"].as_str() != Some("item") {
+        // Équipement, fioles et charmes.
+        if !matches!(b["domain"].as_str(), Some("item" | "flask")) {
             continue;
         }
         let tags: Vec<&str> = b["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).collect();
         let element = tags.iter().find_map(|t| t.strip_suffix("_implicit_skill")).map(str::to_string);
         out.entry(name.to_string()).or_insert((class.to_string(), element));
+    }
+    out
+}
+
+/// Texte des préfixes et suffixes d'objets et de joyaux, balisage retiré.
+fn mod_texts(mods: &serde_json::Value) -> HashMap<String, String> {
+    mods.as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, m)| matches!(m["generation_type"].as_str(), Some("prefix" | "suffix")) && matches!(m["domain"].as_str(), Some("item" | "misc")))
+        .filter_map(|(id, m)| Some((id.clone(), crate::statdesc::strip_markup(m["text"].as_str()?).replace('\n', " · "))))
+        .collect()
+}
+
+/// Niveau requis de chaque type d'objet équipable, fioles et charmes compris.
+fn base_req_levels(bases: &serde_json::Value) -> HashMap<String, u32> {
+    let mut out = HashMap::new();
+    for b in bases.as_object().into_iter().flatten().map(|(_, b)| b) {
+        let Some(name) = b["name"].as_str().filter(|n| !n.is_empty()) else { continue };
+        if !matches!(b["domain"].as_str(), Some("item" | "flask")) {
+            continue;
+        }
+        let level = b["requirements"]["level"].as_u64().or_else(|| b["drop_level"].as_u64()).unwrap_or(0) as u32;
+        if level > 0 {
+            out.entry(name.to_string()).or_insert(level);
+        }
+    }
+    out
+}
+
+/// Propriétés des bases de fioles et de charmes.
+fn base_flasks(bases: &serde_json::Value) -> HashMap<String, FlaskBase> {
+    let mut out = HashMap::new();
+    for b in bases.as_object().into_iter().flatten().map(|(_, b)| b) {
+        let Some(name) = b["name"].as_str().filter(|n| !n.is_empty()) else { continue };
+        if b["domain"].as_str() != Some("flask") {
+            continue;
+        }
+        let p = &b["properties"];
+        let get = |k: &str| p[k].as_f64().unwrap_or(0.0);
+        out.entry(name.to_string()).or_insert(FlaskBase {
+            life: get("life_per_use"),
+            mana: get("mana_per_use"),
+            duration: get("duration"),
+            charges_max: get("charges_max"),
+            charges_per_use: get("charges_per_use"),
+        });
+    }
+    out
+}
+
+/// Compétences accordées par chaque type d'objet qui en accorde (bâtons, baguettes…).
+fn base_skills(bases: &serde_json::Value) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for b in bases.as_object().into_iter().flatten().map(|(_, b)| b) {
+        let Some(name) = b["name"].as_str().filter(|n| !n.is_empty()) else { continue };
+        let skills: Vec<String> = b["skills_granted"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
+        if !skills.is_empty() {
+            out.entry(name.to_string()).or_insert(skills);
+        }
     }
     out
 }
@@ -233,8 +317,9 @@ fn download() -> Result<Catalog, Box<dyn std::error::Error>> {
         Ok(ureq::get(url).set("User-Agent", USER_AGENT).timeout(Duration::from_secs(60)).call()?.into_json()?)
     };
     let bases = get(BASES)?;
-    let implicits = base_implicits(&bases, &get(MODS)?);
-    Ok(Catalog { augments: build_catalog(&get(AUGMENTS)?, &bases), defences: base_defences(&bases), implicits, classes: base_classes(&bases) })
+    let mods = get(MODS)?;
+    let implicits = base_implicits(&bases, &mods);
+    Ok(Catalog { augments: build_catalog(&get(AUGMENTS)?, &bases), defences: base_defences(&bases), implicits, classes: base_classes(&bases), skills: base_skills(&bases), flasks: base_flasks(&bases), req_levels: base_req_levels(&bases), mod_texts: mod_texts(&mods) })
 }
 
 fn fresh(path: &Path) -> bool {

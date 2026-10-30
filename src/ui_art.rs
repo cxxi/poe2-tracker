@@ -94,3 +94,25 @@ impl UiArt {
         self.textures.iter().find(|(p, _)| *p == part).map(|(_, t)| t)
     }
 }
+
+#[cfg(test)]
+mod extract_tests {
+    /// Extraction ponctuelle d'images du panneau d'inventaire (outil de développement) :
+    /// `UI_ART_OUT=dossier cargo test extract_inventory_art -- --ignored`.
+    #[test]
+    #[ignore]
+    fn extract_inventory_art() {
+        let out = std::path::PathBuf::from(std::env::var("UI_ART_OUT").unwrap());
+        let game = crate::paths::detect().expect("dossier du jeu");
+        let index = crate::bundles::Index::open(&game).unwrap();
+        for name in std::env::var("UI_ART_FILES").unwrap().split(',') {
+            match index.read(&format!("{}{name}.dds", super::DIR)).and_then(|d| crate::bundles::decode_dds(&d)) {
+                Ok(img) => {
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                    println!("{name}: {}x{}", img.width(), img.height());
+                }
+                Err(e) => println!("{name}: {e}"),
+            }
+        }
+    }
+}

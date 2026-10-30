@@ -75,6 +75,35 @@ impl Slot {
             Slot::Charm1 | Slot::Charm2 | Slot::Charm3 => "Charme",
         }
     }
+
+    /// Côté d'un emplacement parmi plusieurs du même type (anneaux, charmes).
+    pub fn side(self) -> Option<&'static str> {
+        match self {
+            Slot::RingLeft | Slot::Charm1 => Some("gauche"),
+            Slot::Charm2 => Some("centre"),
+            Slot::RingRight | Slot::Charm3 => Some("droite"),
+            Slot::Weapon | Slot::Offhand => Some("set I"),
+            Slot::Weapon2 | Slot::Offhand2 => Some("set II"),
+            _ => None,
+        }
+    }
+
+    /// Libellé avec le côté : « Anneau gauche », « Charme du centre ».
+    pub fn place(self) -> String {
+        match self {
+            Slot::RingRight => "Anneau droit".into(),
+            Slot::Charm1 => "Charme de gauche".into(),
+            Slot::Charm2 => "Charme du centre".into(),
+            Slot::Charm3 => "Charme de droite".into(),
+            Slot::Weapon => "Arme (set I)".into(),
+            Slot::Offhand => "Main gauche (set I)".into(),
+            Slot::Weapon2 | Slot::Offhand2 => self.label().into(),
+            s => match s.side() {
+                Some(side) => format!("{} {side}", s.label()),
+                None => s.label().into(),
+            },
+        }
+    }
 }
 
 /// Type d'emplacement d'une classe d'objet.
@@ -126,6 +155,9 @@ pub struct Gear {
     /// Le texte copié en jeu ne dit pas de quel set vient une arme.
     #[serde(skip)]
     pub set: u8,
+    /// Emplacements de charme ouverts par la campagne (récompense cochée sur la route).
+    #[serde(skip)]
+    pub quest_charm_slots: usize,
 }
 
 impl Gear {
@@ -163,13 +195,11 @@ impl Gear {
     /// Les bonus de quête (+1 emplacement à l'acte 2) ne sont pas visibles d'ici.
     pub fn charm_slots(&self) -> Option<usize> {
         let belt = self.item(Slot::Belt)?;
-        Some(
-            belt.mods
-                .iter()
-                .filter_map(|m| CHARM_SLOTS.captures(m))
-                .map(|c| c[1].parse::<usize>().unwrap_or(0))
-                .sum(),
-        )
+        let from_belt: usize = belt.mods.iter().filter_map(|m| CHARM_SLOTS.captures(m)).map(|c| c[1].parse::<usize>().unwrap_or(0)).sum();
+        // Plus ceux de la campagne ; et d'autres effets peuvent en ouvrir : un charme porté prouve
+        // que sa case est ouverte.
+        let worn = CHARMS.iter().rposition(|c| self.item(*c).is_some()).map_or(0, |i| i + 1);
+        Some((from_belt + self.quest_charm_slots).max(worn).min(CHARMS.len()))
     }
 
     /// Emplacements qu'on s'attend à voir remplis mais qui ne sont pas suivis (le set II
@@ -277,7 +307,7 @@ mod tests {
     }
 
     fn gear() -> Gear {
-        Gear { slots: BTreeMap::new(), path: PathBuf::new(), set: 1 }
+        Gear { slots: BTreeMap::new(), path: PathBuf::new(), set: 1, quest_charm_slots: 0 }
     }
 
     #[test]

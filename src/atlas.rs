@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 
 use crate::bundles;
@@ -221,9 +221,16 @@ pub struct AtlasView {
     zoom: f32,
     pan: Vec2,
     fitted: bool,
+    /// Taille de la vue au dernier cadrage : on recadre quand elle change (plein écran…).
+    fitted_size: Vec2,
 }
 
 impl AtlasView {
+    /// Recadre au prochain affichage.
+    pub fn recenter(&mut self) {
+        self.fitted = false;
+    }
+
     /// Cadre sur les nœuds posés (ou tout l'arbre).
     fn fit(&mut self, rect: Rect, tree: &AtlasTree, taken: &HashSet<usize>) {
         let pts: Vec<Pos2> = tree.nodes.iter().enumerate().filter(|(i, _)| taken.is_empty() || taken.contains(i)).map(|(_, n)| Pos2::new(n.x, n.y)).collect();
@@ -244,7 +251,8 @@ impl AtlasView {
         // Le départ d'un arbre compte comme pris dès qu'un de ses voisins l'est.
         let starts: Vec<usize> = tree.nodes.iter().enumerate().filter(|(_, n)| n.kind == 5 && n.links.iter().any(|(j, _)| taken.contains(j))).map(|(i, _)| i).collect();
         taken.extend(starts);
-        if !self.fitted {
+        if !self.fitted || (self.fitted_size - rect.size()).length() > 1.0 {
+            self.fitted_size = rect.size();
             self.fit(rect, tree, &HashSet::new());
         }
         let resp = ui.interact(rect, ui.id().with("atlas_tree"), Sense::click_and_drag());
@@ -304,7 +312,8 @@ impl AtlasView {
                 Some(tex) => {
                     painter.circle_filled(p, r, Color32::BLACK);
                     let tint = if on { Color32::WHITE } else { Color32::from_gray(95) };
-                    painter.image(tex.id(), Rect::from_center_size(p, Vec2::splat(r * 1.6)), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
+                    // Dans le cercle du nœud, sous son contour.
+                    crate::ui::circle_image(&painter, tex.id(), p, r * 0.92, tint);
                     painter.circle_stroke(p, r, Stroke::new(if on { 2.5_f32 } else { 1.5 }, color));
                 }
                 None => {
@@ -320,17 +329,9 @@ impl AtlasView {
             let r = (radius(n.kind) * self.zoom).clamp(1.5, 40.0);
             painter.circle_stroke(to_screen(Pos2::new(n.x, n.y)), r + 4.0, Stroke::new(1.5_f32, Color32::WHITE));
             let on = taken.contains(&i);
-            resp.on_hover_ui_at_pointer(|ui| {
-                ui.set_max_width(380.0);
-                let name = if n.name.is_empty() { "Départ" } else { n.name.as_str() };
-                ui.label(RichText::new(name).color(GOLD).strong());
-                for s in &n.stats {
-                    ui.label(RichText::new(s).color(Color32::from_rgb(136, 136, 255)));
-                }
-                if n.kind != 5 {
-                    ui.label(RichText::new(if on { "Posé" } else { "Pas posé" }).color(Color32::GRAY).small());
-                }
-            });
+            let name = if n.name.is_empty() { "Départ" } else { n.name.as_str() };
+            let note = (n.kind != 5).then_some(if on { "Posé" } else { "Pas posé" });
+            resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, name, GOLD, None, &n.stats, note));
         }
         let legend = format!("{} passifs posés · glisser : déplacer · molette : zoom · double-clic : recadrer", allocated.len());
         let galley = painter.layout_no_wrap(legend, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);

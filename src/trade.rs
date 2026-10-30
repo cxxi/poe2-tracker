@@ -68,6 +68,20 @@ pub fn category(item_class: &str) -> Option<&'static str> {
     })
 }
 
+/// Classe d'objet du texte en jeu (« Staves ») d'après celle des données de RePoE (« Staff »).
+pub fn text_class(repoe: &str) -> String {
+    match repoe {
+        "Staff" => "Staves".into(),
+        "Focus" => "Foci".into(),
+        "Warstaff" => "Quarterstaves".into(),
+        "LifeFlask" => "Life Flasks".into(),
+        "ManaFlask" => "Mana Flasks".into(),
+        "UtilityFlask" => "Charms".into(),
+        "Boots" | "Gloves" => repoe.into(),
+        c => format!("{c}s"),
+    }
+}
+
 /// Un objet vaut-il une estimation au marché ?
 pub fn priceable(it: &Item) -> bool {
     matches!(it.rarity, Rarity::Rare | Rarity::Magic) && !it.unidentified && category(&it.item_class).is_some()
@@ -372,6 +386,62 @@ pub struct Listing {
     pub icon: String,
     #[serde(default)]
     pub defences: [f64; 3],
+    /// Propriétés telles que le jeu les écrit (« Physical Damage: 52-86 (augmented) »).
+    #[serde(default)]
+    pub properties: Vec<String>,
+    /// Implicites (aussi dans `mods`).
+    #[serde(default)]
+    pub implicits: Vec<String>,
+}
+
+/// Propriétés d'un objet du site de trade, écrites comme dans le texte copié en jeu : le nom
+/// (balises retirées) puis ses valeurs, « (augmented) » pour celles changées par les mods.
+/// Les dégâts élémentaires portent leur élément au lieu de ce drapeau.
+fn properties(item: &serde_json::Value) -> Vec<String> {
+    item["properties"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let name = clean_line(p["name"].as_str()?);
+            let values: Vec<(String, u64)> = p["values"].as_array()?.iter().filter_map(|v| Some((v[0].as_str()?.to_string(), v[1].as_u64().unwrap_or(0)))).collect();
+            if values.is_empty() {
+                return None;
+            }
+            let shown = |(t, k): &(String, u64)| if *k == 1 { format!("{t} (augmented)") } else { t.clone() };
+            // Gabarit « {0} » : les valeurs à leur place ; sinon « nom: valeurs ».
+            if name.contains("{0}") {
+                let mut line = name.clone();
+                for (i, v) in values.iter().enumerate() {
+                    line = line.replace(&format!("{{{i}}}"), &v.0);
+                }
+                return Some(line);
+            }
+            Some(format!("{name}: {}", values.iter().map(shown).collect::<Vec<_>>().join(", ")))
+        })
+        .collect()
+}
+
+impl Listing {
+    /// L'annonce en objet, comme si on l'avait copiée en jeu (`class` : celle de l'objet estimé,
+    /// la recherche ne ramène que des objets de sa catégorie).
+    pub fn as_item(&self, class: &str) -> Option<Item> {
+        let names = if self.name.is_empty() { self.base.clone() } else { format!("{}\n{}", self.name, self.base) };
+        let implicits: Vec<String> = self.implicits.iter().map(|m| format!("{m} (implicit)")).collect();
+        let others: Vec<&String> = self.mods.iter().filter(|m| !self.implicits.contains(m)).collect();
+        let mut text = format!("Item Class: {class}\nRarity: {}\n{names}\n--------\n", if self.rarity.is_empty() { "Rare" } else { &self.rarity });
+        if !self.properties.is_empty() {
+            text.push_str(&format!("{}\n--------\n", self.properties.join("\n")));
+        }
+        text.push_str(&format!("Item Level: {}\n", self.item_level));
+        if !implicits.is_empty() {
+            text.push_str(&format!("--------\n{}\n", implicits.join("\n")));
+        }
+        if !others.is_empty() {
+            text.push_str(&format!("--------\n{}\n", others.iter().map(|m| m.as_str()).collect::<Vec<_>>().join("\n")));
+        }
+        crate::item::parse(&text)
+    }
 }
 
 /// Demi-vie du poids d'une annonce selon son âge : encore en ligne après quelques jours, elle
@@ -898,6 +968,8 @@ fn estimate(
                 rarity: item["rarity"].as_str().unwrap_or_default().to_string(),
                 icon: item["icon"].as_str().unwrap_or_default().to_string(),
                 defences: ["ar", "ev", "es"].map(|k| item["extended"][k].as_f64().unwrap_or(0.0)),
+                properties: properties(item),
+                implicits: item["implicitMods"].as_array().into_iter().flatten().filter_map(|m| m["description"].as_str().or(m.as_str()).map(clean_line)).collect(),
                 mods,
             });
         }
@@ -932,6 +1004,35 @@ fn estimate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listing_reads_like_a_copied_item() {
+        // Annonce réelle du site (Guardian Quarterstaff), propriétés et implicite.
+        let item: Value = serde_json::from_str(r#"{"properties": [{"name": "[Quarterstaff]", "values": []}, {"name": "[Physical] Damage", "values": [["82-132", 1]]}, {"name": "Lightning Damage", "values": [["1-33", 6]]}, {"name": "[Critical|Critical Hit] Chance", "values": [["11.71%", 1]]}, {"name": "Attacks per Second", "values": [["1.40", 0]]}]}"#).unwrap();
+        let props = properties(&item);
+        assert_eq!(props, ["Physical Damage: 82-132 (augmented)", "Lightning Damage: 1-33", "Critical Hit Chance: 11.71% (augmented)", "Attacks per Second: 1.40"]);
+        let l = Listing { name: "Kraken Spire".into(), base: "Guardian Quarterstaff".into(), item_level: 80, properties: props, implicits: vec!["+18% to Block chance".into()], mods: vec!["+18% to Block chance".into(), "Adds 1 to 33 Lightning Damage".into()], ..Default::default() };
+        let it = l.as_item("Quarterstaves").unwrap();
+        assert_eq!((it.name.as_str(), it.base.as_str()), ("Kraken Spire", "Guardian Quarterstaff"));
+        assert_eq!(it.props.get("aps"), Some(&1.4));
+        assert_eq!(it.mods, ["+18% to Block chance", "Adds 1 to 33 Lightning Damage"]);
+        assert_eq!(it.mod_kinds[0], crate::item::ModKind::Implicit);
+    }
+
+    #[test]
+    fn recommended_rare_is_priceable() {
+        // Texte écrit par le tracker pour une recommandation rare du build (base + mods visés).
+        let text = format!("Item Class: {}\nRarity: Rare\nRecommandation du build\nGelid Staff\n--------\nItem Level: 1\n--------\n54% increased Spell Damage\n+2 to Level of all Spell Skills", text_class("Staff"));
+        let it = crate::item::parse(&text).unwrap();
+        assert!(priceable(&it));
+        assert_eq!((it.base.as_str(), it.mods.len()), ("Gelid Staff", 2));
+        assert!(it.mod_kinds.iter().all(|k| *k == ModKind::Explicit));
+        // Fiole recommandée : magique, une seule ligne de nom.
+        let flask = crate::item::parse("Item Class: Mana Flasks\nRarity: Magic\nUltimate Mana Flask\n--------\nItem Level: 1\n--------\n41% increased Amount Recovered").unwrap();
+        assert!(priceable(&flask));
+        assert_eq!((flask.base.as_str(), flask.rarity, flask.mods.len()), ("Ultimate Mana Flask", Rarity::Magic, 1));
+        assert_eq!([text_class("Warstaff"), text_class("Body Armour"), text_class("Gloves"), text_class("ManaFlask")], ["Quarterstaves", "Body Armours", "Gloves", "Mana Flasks"]);
+    }
 
     #[test]
     fn templates() {

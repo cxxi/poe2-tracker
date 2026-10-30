@@ -25,6 +25,9 @@ pub struct CharState {
     /// Récompenses de la route de leveling déjà obtenues (identifiants).
     #[serde(default)]
     pub done: BTreeSet<String>,
+    /// Ce qui a été pris pour chaque récompense au choix (texte du journal, balisage retiré).
+    #[serde(default)]
+    pub picks: BTreeMap<String, Vec<String>>,
     /// Ligue choisie pour ce personnage (le journal du jeu ne la donne pas).
     #[serde(default)]
     pub league: Option<String>,
@@ -45,6 +48,9 @@ struct State {
     /// Tout le log a été relu pour reconstituer les maps de l'endgame.
     #[serde(default)]
     maps_scan: bool,
+    /// Tout le log a été relu pour retrouver ce qui a été pris aux récompenses au choix.
+    #[serde(default)]
+    picks_scan: bool,
     /// Tout le log a été relu pour l'arbre de l'Atlas (après les maps : une relecture de plus,
     /// sans rien recompter grâce au repère `seen` des maps).
     #[serde(default)]
@@ -136,6 +142,23 @@ impl Coach {
 
     pub fn mark_route_scan(&mut self) {
         self.state.route_scan = true;
+    }
+
+    /// Choix précisé à la main pour une récompense que le journal n'annonce pas.
+    pub fn set_pick(&mut self, id: &str, text: &str) {
+        let Some(name) = self.state.active.clone() else { return };
+        if let Some(c) = self.state.characters.get_mut(&name) {
+            c.picks.insert(id.to_string(), vec![text.to_string()]);
+            self.save();
+        }
+    }
+
+    pub fn picks_scan_done(&self) -> bool {
+        self.state.picks_scan
+    }
+
+    pub fn mark_picks_scan(&mut self) {
+        self.state.picks_scan = true;
     }
 
     /// Avant de relire tout le log : personne n'est actif et aucune dernière zone n'est connue,
@@ -292,6 +315,7 @@ impl Coach {
             last_area: None,
             last_seen: 0,
             done: BTreeSet::new(),
+            picks: BTreeMap::new(),
             league: None,
         });
         if let Some(cl) = class {
@@ -473,7 +497,23 @@ impl Coach {
                 let area = self.area.clone();
                 let act = area.as_deref().and_then(logwatch::act_of);
                 let c = self.state.characters.get_mut(&name).unwrap();
-                if let Some(r) = route::match_received(&self.route, &c.done, area.as_deref(), act, text, self.live) {
+                // Récompense au choix : on garde ce qui a été pris (même déjà cochée, pour
+                // retrouver les choix en relisant le journal), et elle se coche.
+                if let Some(r) = route::match_pick(&self.route, area.as_deref(), text) {
+                    let got = crate::statdesc::strip_markup(text).trim_end_matches('.').to_string();
+                    let list = c.picks.entry(r.id.clone()).or_default();
+                    // L'emplacement de charme est la partie fixe des reliques, pas le choix.
+                    if !list.contains(&got) && !got.contains("Charm Slot") {
+                        list.push(got);
+                        let keep = route::picks_allowed(&r.id);
+                        if list.len() > keep {
+                            list.drain(..list.len() - keep);
+                        }
+                    }
+                    if c.done.insert(r.id.clone()) {
+                        out.push(line(FeedKind::Reward, format!("Fait : {} ({})", r.reward, r.what), vec![]));
+                    }
+                } else if let Some(r) = route::match_received(&self.route, &c.done, area.as_deref(), act, text, self.live) {
                     c.done.insert(r.id.clone());
                     out.push(line(FeedKind::Reward, format!("Fait : {} ({})", r.reward, r.what), vec![]));
                 }
@@ -530,8 +570,8 @@ mod tests {
     fn coach() -> Coach {
         let skill = |n: &str, l| Skill { name: n.into(), from_level: l, supports: vec![], weapon_set: None };
         let steps = vec![
-            Step { label: "Act 1".into(), skills: vec![skill("Contagion", 1), skill("Bonestorm", 15)], passives: vec![], targets: vec![], uniques: vec![], passive_sets: Default::default() },
-            Step { label: "Act 2".into(), skills: vec![skill("Ice Nova", 1)], passives: vec![], targets: vec![], uniques: vec![], passive_sets: Default::default() },
+            Step { label: "Act 1".into(), skills: vec![skill("Contagion", 1), skill("Bonestorm", 15)], passives: vec![], targets: vec![], uniques: vec![], passive_sets: Default::default(), side_targets: vec![] },
+            Step { label: "Act 2".into(), skills: vec![skill("Ice Nova", 1)], passives: vec![], targets: vec![], uniques: vec![], passive_sets: Default::default(), side_targets: vec![] },
         ];
         Coach::new(steps, Catalog::default(), PathBuf::from("/nonexistent/state.json"))
     }

@@ -4,7 +4,10 @@
 //! Le jeu écrit chaque récompense permanente dans le log (« X has received +30 to Spirit »,
 //! « You have received 2 Passive Skill Points »), ce qui permet de cocher tout seul ce qui est fait.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use serde::Deserialize;
 
@@ -31,6 +34,43 @@ struct Data {
 
 pub fn load() -> Vec<Reward> {
     serde_json::from_str::<Data>(include_str!("../data/route.json")).map(|d| d.rewards).unwrap_or_default()
+}
+
+/// Ce que les récompenses obtenues sur la route ajoutent au personnage, quand elles sont sûres :
+/// résistances des boss (feu, froid, foudre) et emplacement de charme. Les récompenses au choix
+/// (tatouages, bénédiction de Qimah) ne disent pas ce qui a été pris : non comptées.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bonuses {
+    pub resistances: [f64; 3],
+    pub charm_slots: usize,
+}
+
+static RES_PICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+(\d+)% to (Fire|Cold|Lightning|all Elemental) Resistances?").unwrap());
+
+/// `picks` : ce que le joueur a reçu pour chaque récompense au choix (texte du journal) ; les
+/// résistances choisies (tatouages, bénédiction) s'ajoutent à celles des boss.
+pub fn bonuses(done: &BTreeSet<String>, picks: &BTreeMap<String, Vec<String>>) -> Bonuses {
+    let mut b = Bonuses::default();
+    for text in picks.values().flatten() {
+        if let Some(c) = RES_PICK.captures(text) {
+            let v: f64 = c[1].parse().unwrap_or(0.0);
+            match &c[2] {
+                "Fire" => b.resistances[0] += v,
+                "Cold" => b.resistances[1] += v,
+                "Lightning" => b.resistances[2] += v,
+                _ => b.resistances.iter_mut().for_each(|r| *r += v),
+            }
+        }
+    }
+    for (id, element) in [("a3_res_blackjaw", 0), ("a1_res_beira", 1), ("a2_res_garukhan", 2)] {
+        if done.contains(id) {
+            b.resistances[element] += 10.0;
+        }
+    }
+    if done.contains("a2_charm_relics") {
+        b.charm_slots += 1;
+    }
+    b
 }
 
 /// Nature d'une récompense d'après le texte du log (`None` : rien à cocher).
@@ -73,6 +113,45 @@ pub fn match_received<'a>(rewards: &'a [Reward], done: &BTreeSet<String>, area: 
         .or_else(|| rewards.iter().filter(open).find(|r| fallback && Some(r.act) == act))
 }
 
+/// Options d'une récompense modifiable (on peut retourner changer son choix) : libellé court
+/// (bout de ligne de la route) et texte du jeu. Le journal annonce certains choix ; les
+/// bénédictions de Qimah, jamais.
+pub fn modifiable_options(id: &str) -> &'static [(&'static str, &'static str)] {
+    match id {
+        "a2_charm_relics" => &[("Charges", "30% increased Charm Charges gained"), ("Durée", "30% increased Charm Effect Duration")],
+        "a4_flask_goddess" => &[("Vie", "30% increased Life Recovery from Flasks"), ("Mana", "30% increased Mana Recovery from Flasks")],
+        "p2_boon_qimah" => &[
+            ("Rés. élémentaires", "+5% to all Elemental Resistances"),
+            ("Attributs", "+5 to all Attributes"),
+            ("Défenses", "15% increased Global Defences"),
+            ("Recharge", "12% increased Cooldown Recovery Rate"),
+            ("Présence", "20% increased Presence Area of Effect"),
+            ("Vitesse", "3% increased Movement Speed"),
+            ("Expérience", "5% increased Experience gain"),
+        ],
+        _ => &[],
+    }
+}
+
+/// Nombre de choix que garde une récompense au choix : trois tatouages, un seul ailleurs (le
+/// dernier reçu, une récompense modifiable pouvant être changée).
+pub fn picks_allowed(id: &str) -> usize {
+    if id == "a4_tattoos_halls" { 3 } else { 1 }
+}
+
+/// Récompense au choix que désigne une ligne du journal reçue dans sa zone : on en garde le
+/// texte (ce qui a été pris). Les points de passif, d'ascendance et l'esprit n'en sont jamais.
+pub fn match_pick<'a>(rewards: &'a [Reward], area: Option<&str>, text: &str) -> Option<&'a Reward> {
+    let kind = kind_of(text);
+    if matches!(kind, Some("passive" | "weaponset" | "ascendancy" | "spirit")) {
+        return None;
+    }
+    let area = area?;
+    rewards.iter().filter(|r| is_choice(r)).find(|r| {
+        r.areas.iter().any(|x| x == area) && (r.kind == "other" || kind.is_some_and(|k| r.kind.split('|').any(|x| x == k)))
+    })
+}
+
 /// Récompense laissée au choix du joueur (la ligne décrit les options).
 pub fn is_choice(r: &Reward) -> bool {
     let t = r.reward.to_lowercase();
@@ -92,6 +171,23 @@ pub fn build_choices<'a>(r: &Reward, choices: &'a [crate::builds::QuestChoice]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bonuses_from_done_rewards() {
+        let done: BTreeSet<String> = ["a1_res_beira", "a2_charm_relics", "a4_tattoos_halls"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(bonuses(&done, &BTreeMap::new()), Bonuses { resistances: [0.0, 10.0, 0.0], charm_slots: 1 });
+        let picks = BTreeMap::from([("a4_tattoos_halls".to_string(), vec!["+5% to Fire Resistance".to_string(), "+5 to Intelligence".to_string()])]);
+        assert_eq!(bonuses(&done, &picks).resistances, [5.0, 10.0, 0.0]);
+        let r = load();
+        assert_eq!(match_pick(&r, Some("G4_4_2"), "+5% to Lightning Resistance").unwrap().id, "a4_tattoos_halls");
+        assert_eq!(match_pick(&r, Some("G4_town"), "30% increased Global Armour, Evasion and Energy Shield").unwrap().id, "a4_shark_fin");
+        assert!(match_pick(&r, Some("G4_town"), "2 Passive Skill Points").is_none());
+        // Chaque id de la route utilisé ici existe bien dans les données.
+        let ids: Vec<String> = load().into_iter().map(|r| r.id).collect();
+        for id in ["a3_res_blackjaw", "a1_res_beira", "a2_res_garukhan", "a2_charm_relics"] {
+            assert!(ids.iter().any(|i| i == id), "{id}");
+        }
+    }
 
     #[test]
     fn build_choices_follow_the_quest_zone() {

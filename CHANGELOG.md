@@ -1,5 +1,19 @@
 # Nouveautés
 
+## 0.3.0
+
+- Diagnostic refait pour répondre à « je l'équipe ? » : la pièce entière (agrandie selon la place), et en haut à droite la réponse (mieux, moins bien, à voir, unique du build) avec l'écart de score face à ta pièce. Deux bandeaux, « Comparer à l'équipé » et « Comparer au build », ouvrent la comparaison ligne à ligne en grand, sur toute la fenêtre.
+- Anneaux, charmes et armes comparés à chaque emplacement : gauche / droite, gauche / centre / droite, set I / set II. Une puce par emplacement dans les bandeaux, la meilleure place dans la réponse, chaque case colorée selon sa réponse.
+- Onglet Uniques remplacé par le détail d'une case : clic sur une pièce de l'équipement pour la voir face à ce que recommande le build (✓ ~ ✗ ligne à ligne, score de correspondance, runes, rareté recommandée lue sur Mobalytics, uniques avec toutes leurs lignes, prix et recherche sur le trade). La fenêtre grandit avec la place disponible.
+- Fiche au survol d'une case : la même présentation (mods visés en blanc, les autres en gris, score). L'étoile d'un unique attendu montre sa fiche et son prix.
+- Lignes d'arme comme en jeu (dégâts colorés par élément), avec le DPS au bout de chaque ligne de dégâts et le total (dont le chaos) après les attaques par seconde. Niveau requis en rouge quand il dépasse celui du personnage. Propriétés des fioles et charmes (vie, mana, durée, charges), valeurs changées par les mods en bleu.
+- Armes du set inactif en petit aux extrémités de la grille, avec leurs runes, comme en jeu ; changer de set les échange avec les grandes cases.
+- Monnaies, runes, omens et autres objets du marché d'échange : un écran de détail à la place du diagnostic, avec le prix en grand en ex, chaos et div, la courbe du cours (7 jours, 30 jours ou tout), le volume échangé et les liens vers le trade et poe.ninja. Le même écran s'ouvre au clic sur une ligne de l'onglet Marché.
+- Détail de l'estimation : ta pièce complète à gauche ; chaque annonce avec ses lignes d'arme et son DPS (écart face à ton arme), ses défenses et ses implicites en bleu (écart face aux tiens). Écarts écrits avec un vrai signe moins et une virgule. Réestime un objet pour voir ces détails sur ses annonces déjà lues.
+- Talents et Atlas en plein écran, avec un bouton pour recentrer (sur l'ascendance pour les talents, sans changer le zoom). L'ascendance est au centre de l'arbre avec son illustration : l'onglet Ascendances disparaît. Joyaux recommandés par le build dans leurs emplacements (mets ton build à jour pour les avoir). Infobulles des nœuds de taille fixe quel que soit le zoom, icônes rondes.
+- Route : les récompenses de quête choisies sont retrouvées dans le journal du jeu et montrées en vert ; celles qu'on peut changer ont un libellé court en bout de ligne et un petit choix. Les bonus de quête comptent (résistances, emplacement de charme).
+- Onglet Sorts : le set des gemmes en badge en bout de ligne.
+
 ## 0.2.9
 
 - Mapping, en bas à gauche une fois en endgame (bouton « Route » pour revoir la route de leveling) : la map en cours avec son chronomètre, qui compte le temps passé dans la map hors repaire et AFK et se met en pause au retour en ville ; morts et retours en ville. Dessous, la séance en tableau : maps, temps de jeu, temps moyen, maps par heure, morts et retours.

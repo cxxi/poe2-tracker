@@ -49,16 +49,16 @@ static WEAPON_RATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(Attacks per Second|Critical Hit Chance): (\d+(?:[.,]\d+)?)").unwrap());
 // "2,50" : le jeu peut utiliser la virgule décimale.
 static RECOVERS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^Recovers (\d+(?:[.,]\d+)?) (Life|Mana) over (\d+(?:[.,]\d+)?) Seconds?").unwrap()
+    Regex::new(r"^Recovers (\d+(?:[.,]\d+)?)( \(augmented\))? (Life|Mana) over (\d+(?:[.,]\d+)?)( \(augmented\))? Seconds?").unwrap()
 });
 static LASTS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^Lasts (\d+(?:[.,]\d+)?) Seconds?").unwrap());
+    LazyLock::new(|| Regex::new(r"^Lasts (\d+(?:[.,]\d+)?)( \(augmented\))? Seconds?").unwrap());
 static CONSUMES: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^Consumes (\d+) of (\d+)(?: \(augmented\))? Charges on use").unwrap()
+    Regex::new(r"^Consumes (\d+)( \(augmented\))? of (\d+)( \(augmented\))? Charges on use").unwrap()
 });
 static REQ_LEVEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Level (\d+)").unwrap());
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Rarity {
     Normal,
     Magic,
@@ -226,13 +226,30 @@ pub fn parse(text: &str) -> Option<Item> {
             } else if line == "Unidentified" {
                 item.unidentified = true;
             } else if let Some(m) = RECOVERS.captures(line) {
+                // Valeurs changées par les mods de l'objet : « (augmented) », en bleu en jeu.
                 item.props.insert("recover".into(), num(&m[1]));
-                item.props.insert("recover_time".into(), num(&m[3]));
+                item.props.insert("recover_time".into(), num(&m[4]));
+                for (k, g) in [("recover_aug", 2), ("recover_time_aug", 5)] {
+                    if m.get(g).is_some() {
+                        item.props.insert(k.into(), 1.0);
+                    }
+                }
+                if &m[3] == "Mana" {
+                    item.props.insert("recover_mana".into(), 1.0);
+                }
             } else if let Some(m) = LASTS.captures(line) {
                 item.props.insert("duration".into(), num(&m[1]));
+                if m.get(2).is_some() {
+                    item.props.insert("duration_aug".into(), 1.0);
+                }
             } else if let Some(m) = CONSUMES.captures(line) {
                 item.props.insert("charges_use".into(), num(&m[1]));
-                item.props.insert("charges_max".into(), num(&m[2]));
+                item.props.insert("charges_max".into(), num(&m[3]));
+                for (k, g) in [("charges_use_aug", 2), ("charges_max_aug", 4)] {
+                    if m.get(g).is_some() {
+                        item.props.insert(k.into(), 1.0);
+                    }
+                }
             } else if INSTRUCTIONS.iter().any(|p| line.starts_with(p)) {
                 continue;
             } else if line.starts_with("Requires") {
@@ -242,6 +259,9 @@ pub fn parse(text: &str) -> Option<Item> {
             } else if HEADER_KEYS.iter().any(|k| line.starts_with(k)) || line.ends_with("(augmented)") {
                 if let Some(m) = PROP.captures(line) {
                     item.props.insert(m[1].to_string(), num(&m[2]));
+                    if line.ends_with("(augmented)") {
+                        item.props.insert(format!("{}_aug", &m[1]), 1.0);
+                    }
                 } else if let Some(m) = WEAPON_DAMAGE.captures(line) {
                     // Physique d'un côté, élémentaire et chaos de l'autre (moyenne par coup).
                     let key = if &m[1] == "Physical" { "phys_avg" } else { "ele_avg" };
@@ -357,6 +377,11 @@ Used automatically when condition is met. Can only hold charges while in belt. R
     fn props_and_requirements() {
         let it = parse(GLOOM_TOUCH).unwrap();
         assert_eq!(it.props["Energy Shield"], 33.0);
+        assert!(it.props.contains_key("Energy Shield_aug"));
+        let flask = parse("Item Class: Mana Flasks\nRarity: Magic\nFull-bodied Ultimate Mana Flask\n--------\nRecovers 468 (augmented) Mana over 3 Seconds\nConsumes 10 of 109 (augmented) Charges on use\n--------\nItem Level: 80\n--------\n51% increased Amount Recovered").unwrap();
+        assert_eq!((flask.props["recover"], flask.props["charges_max"]), (468.0, 109.0));
+        assert!(flask.props.contains_key("recover_aug") && flask.props.contains_key("charges_max_aug") && !flask.props.contains_key("charges_use_aug"));
+        assert_eq!(flask.mods, vec!["51% increased Amount Recovered"]);
         assert_eq!(it.req_level, 6);
         assert_eq!(it.mods, vec!["+21 to maximum Life", "+8% to Lightning Resistance"]);
     }

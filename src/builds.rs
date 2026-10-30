@@ -256,7 +256,11 @@ pub const KAMI_RUNES: &str = "kami-runes.json";
 /// Choix de récompenses de quête recommandés (Mobalytics), à côté des fichiers .build.
 pub const QUEST_CHOICES: &str = "quest-choices.json";
 /// Données enregistrées avec les .build, remplacées à chaque mise à jour.
-const EXTRAS: [&str; 4] = [KAMI_RUNES, QUEST_CHOICES, SKILL_SETS, STEP_LINKS];
+const EXTRAS: [&str; 6] = [KAMI_RUNES, QUEST_CHOICES, SKILL_SETS, STEP_LINKS, ITEM_RARITIES, JEWELS];
+/// Joyaux de l'arbre de talents par étape (Mobalytics), à côté des fichiers .build.
+pub const JEWELS: &str = "jewels.json";
+/// Rareté de chaque pièce recommandée (Mobalytics), à côté des fichiers .build.
+pub const ITEM_RARITIES: &str = "item-rarities.json";
 /// Set d'armes de chaque sort (Mobalytics), à côté des fichiers .build.
 pub const SKILL_SETS: &str = "skill-sets.json";
 /// Lien de la page du build ouverte sur chaque étape : nom de l'étape -> adresse.
@@ -291,12 +295,21 @@ const MOBA_DOC: &str = "error data {
     content: contentV2 { id ... on NgfDocumentCmWidgetContentVariantsV1 { data { childrenVariants { id title } } } }
     ... on Poe2UserGeneratedDocument { data {
     questRewards { quests { quest { name act area } reward { bakedDescription } } }
-    buildVariants { values { id skillGems { gems { weaponSet activeSkill { name } } } equipment {
-        helmet { runes { slug } } body { runes { slug } } gloves { runes { slug } } boots { runes { slug } }
-        mainHand { set1 { runes { slug } } set2 { runes { slug } } }
-        offHand { set1 { runes { slug } } set2 { runes { slug } } }
+    buildVariants { values { id passiveTree { jewels { iconURL isUnique jewelSlug nodeSlug prefixSlugs suffixSlugs } }
+    skillGems { gems { weaponSet activeSkill { name } } } equipment {
+        helmet { runes { slug } commonItem { ...affixes } } body { runes { slug } commonItem { ...affixes } }
+        gloves { runes { slug } commonItem { ...affixes } } boots { runes { slug } commonItem { ...affixes } }
+        mainHand { set1 { runes { slug } commonItem { ...affixes } } set2 { runes { slug } commonItem { ...affixes } } }
+        offHand { set1 { runes { slug } commonItem { ...affixes } } set2 { runes { slug } commonItem { ...affixes } } }
+        belt { commonItem { ...affixes } } amulet { commonItem { ...affixes } }
+        leftRing { commonItem { ...affixes } } rightRing { commonItem { ...affixes } }
+        flask1 { commonItem { ...affixes } } flask2 { commonItem { ...affixes } }
+        charm1 { commonItem { ...affixes } } charm2 { commonItem { ...affixes } } charm3 { commonItem { ...affixes } }
     } } } } }
 }";
+
+/// Préfixes et suffixes d'une pièce : Mobalytics en tire sa rareté (voir `mobalytics_rarities`).
+const MOBA_AFFIXES: &str = "fragment affixes on Poe2DocumentUgWidgetEquipmentCommonV1 { isUnique prefixes { slug } suffixes { slug } }";
 
 /// Requête au service GraphQL de Mobalytics (celui de leur site).
 fn mobalytics_query(query: &str, variables: serde_json::Value) -> Res<serde_json::Value> {
@@ -318,7 +331,7 @@ fn mobalytics_document(page_url: &str) -> Res<(serde_json::Value, &'static str)>
     } else {
         return Err("lien Mobalytics non reconnu (attendu : mobalytics.gg/poe-2/builds/… ou …/profile/<auteur>/builds/…)".into());
     };
-    let query = format!("query Build($input: {input_type}!) {{ game: poe2 {{ documents {{ {field}(input: $input) {{ {MOBA_DOC} }} }} }} }}");
+    let query = format!("query Build($input: {input_type}!) {{ game: poe2 {{ documents {{ {field}(input: $input) {{ {MOBA_DOC} }} }} }} }} {MOBA_AFFIXES}");
     let resp = mobalytics_query(&query, serde_json::json!({ "input": input }))?;
     if resp["data"]["game"]["documents"][field]["data"]["id"].as_str().is_none() {
         return Err("build introuvable sur Mobalytics (lien ou format changé ?)".into());
@@ -351,6 +364,13 @@ fn fetch_mobalytics(page_url: &str) -> Res<Vec<BuildFile>> {
     }
     if let Some(steps) = mobalytics_runes(&resp, field) {
         files.push(BuildFile { name: KAMI_RUNES.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())? });
+    }
+    if let Some(steps) = mobalytics_rarities(&resp, field) {
+        files.push(BuildFile { name: ITEM_RARITIES.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())? });
+    }
+    if let Some(mut steps) = mobalytics_jewels(&resp, field) {
+        mobalytics_unique_jewels(&mut steps);
+        files.push(BuildFile { name: JEWELS.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())? });
     }
     if let Some(steps) = mobalytics_skill_sets(&resp, field) {
         files.push(BuildFile { name: SKILL_SETS.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())?,
@@ -408,6 +428,212 @@ fn mobalytics_runes(resp: &serde_json::Value, field: &str) -> Option<Vec<StepRun
         })
         .collect();
     Some(steps)
+}
+
+/// Rareté des pièces d'une étape, comme Mobalytics l'affiche : unique, sinon d'après le plus grand
+/// nombre de préfixes ou de suffixes (2 et plus : rare, 1 : magique, aucun : normal).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StepRarities {
+    pub name: String,
+    pub items: std::collections::BTreeMap<crate::gear::Slot, crate::item::Rarity>,
+}
+
+fn mobalytics_rarities(resp: &serde_json::Value, field: &str) -> Option<Vec<StepRarities>> {
+    use crate::gear::Slot;
+    use crate::item::Rarity;
+    let doc = &resp["data"]["game"]["documents"][field]["data"];
+    let titles = variant_titles(doc)?;
+    let rarity = |v: &serde_json::Value| -> Option<Rarity> {
+        let c = v["commonItem"].as_object()?;
+        if c.get("isUnique").and_then(|u| u.as_bool()) == Some(true) {
+            return Some(Rarity::Unique);
+        }
+        let count = |k: &str| c.get(k).and_then(|a| a.as_array()).map_or(0, Vec::len);
+        Some(match count("prefixes").max(count("suffixes")) {
+            0 => Rarity::Normal,
+            1 => Rarity::Magic,
+            _ => Rarity::Rare,
+        })
+    };
+    let steps = doc["data"]["buildVariants"]["values"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| {
+            let name = titles.get(v["id"].as_str()?)?.clone();
+            let e = &v["equipment"];
+            let slots = [
+                (Slot::Helmet, &e["helmet"]),
+                (Slot::Body, &e["body"]),
+                (Slot::Gloves, &e["gloves"]),
+                (Slot::Boots, &e["boots"]),
+                (Slot::Weapon, &e["mainHand"]["set1"]),
+                (Slot::Offhand, &e["offHand"]["set1"]),
+                (Slot::Weapon2, &e["mainHand"]["set2"]),
+                (Slot::Offhand2, &e["offHand"]["set2"]),
+                (Slot::Belt, &e["belt"]),
+                (Slot::Amulet, &e["amulet"]),
+                (Slot::RingLeft, &e["leftRing"]),
+                (Slot::RingRight, &e["rightRing"]),
+                (Slot::LifeFlask, &e["flask1"]),
+                (Slot::ManaFlask, &e["flask2"]),
+                (Slot::Charm1, &e["charm1"]),
+                (Slot::Charm2, &e["charm2"]),
+                (Slot::Charm3, &e["charm3"]),
+            ];
+            let items = slots.into_iter().filter_map(|(s, v)| Some((s, rarity(v)?))).collect();
+            Some(StepRarities { name, items })
+        })
+        .collect();
+    Some(steps)
+}
+
+/// Joyau posé dans une châsse de l'arbre de talents.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Jewel {
+    /// Numéro du nœud de la châsse (« skill » de l'arbre PoB).
+    pub node: u32,
+    /// Image dans les archives du jeu (« Art/2DItems/Jewels/SapphireJewel.dds »).
+    pub icon: String,
+    pub name: String,
+    pub rarity: crate::item::Rarity,
+    /// Identifiants des mods visés (préfixes puis suffixes), traduits à l'affichage.
+    pub mods: Vec<String>,
+    /// Joyau unique : son type de base et le texte de ses mods (données de Mobalytics), ou ses
+    /// emplacements libres quand le build n'en choisit pas (« Custom Desecrated prefix »).
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub texts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StepJewels {
+    pub name: String,
+    pub jewels: Vec<Jewel>,
+}
+
+/// Nom d'un joyau d'après son identifiant Mobalytics : type de base pour un joyau magique ou
+/// rare (« jewel-jewelint » : Sapphire), nom de l'unique sinon (« …-heart-of-the-well »).
+fn jewel_name(slug: &str, unique: bool) -> String {
+    let base = match slug {
+        "jewel-jewelint" => "Sapphire",
+        "jewel-jewelstr" => "Ruby",
+        "jewel-jeweldex" => "Emerald",
+        "jewel-jewelradiusint" => "Time-Lost Sapphire",
+        "jewel-jewelradiusstr" => "Time-Lost Ruby",
+        "jewel-jewelradiusdex" => "Time-Lost Emerald",
+        "jewel-jeweldiamond" => "Diamond",
+        "jewel-jewelradiusdiamond" => "Time-Lost Diamond",
+        _ => "",
+    };
+    if !base.is_empty() && !unique {
+        return base.to_string();
+    }
+    // « jewel-fouruniquejewel12-heart-of-the-well » : les mots après l'identifiant interne.
+    let words: Vec<&str> = slug.split('-').skip(2).collect();
+    let name = words
+        .iter()
+        .map(|w| if ["of", "the", "and", "in"].contains(w) { w.to_string() } else { w[..1].to_uppercase() + &w[1..] })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if name.is_empty() { slug.to_string() } else { name[..1].to_uppercase() + &name[1..] }
+}
+
+fn mobalytics_jewels(resp: &serde_json::Value, field: &str) -> Option<Vec<StepJewels>> {
+    use crate::item::Rarity;
+    let doc = &resp["data"]["game"]["documents"][field]["data"];
+    let titles = variant_titles(doc)?;
+    let steps = doc["data"]["buildVariants"]["values"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| {
+            let name = titles.get(v["id"].as_str()?)?.clone();
+            let jewels = v["passiveTree"]["jewels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|j| {
+                    let node = j["nodeSlug"].as_str()?.strip_prefix("node-")?.parse().ok()?;
+                    let unique = j["isUnique"].as_bool().unwrap_or(false);
+                    let slugs = |k: &str| -> Vec<String> { j[k].as_array().into_iter().flatten().filter_map(|s| s.as_str()).filter(|s| !s.is_empty()).map(String::from).collect() };
+                    let (prefixes, suffixes) = (slugs("prefixSlugs"), slugs("suffixSlugs"));
+                    let rarity = match (unique, prefixes.len().max(suffixes.len())) {
+                        (true, _) => Rarity::Unique,
+                        (_, 0) => Rarity::Normal,
+                        (_, 1) => Rarity::Magic,
+                        _ => Rarity::Rare,
+                    };
+                    // « https://cdn…/game/Art/2DItems/Jewels/SapphireJewel.avif » -> chemin du jeu.
+                    let url = j["iconURL"].as_str().unwrap_or_default();
+                    let path = url.split("/game/").nth(1).unwrap_or_default();
+                    let icon = path.rsplit_once('.').map_or(path.to_string(), |(p, _)| format!("{p}.dds"));
+                    // Mods d'unique : identifiants propres à Mobalytics, traduits par `mobalytics_unique_jewels`.
+                    let mods = prefixes.into_iter().chain(suffixes).collect();
+                    let slug = j["jewelSlug"].as_str().unwrap_or_default();
+                    // L'identifiant du joyau, gardé dans `base` le temps de le résoudre.
+                    let base = if unique { slug.to_string() } else { String::new() };
+                    Some(Jewel { node, icon, name: jewel_name(slug, unique), rarity, mods, base, texts: vec![] })
+                })
+                .collect();
+            Some(StepJewels { name, jewels })
+        })
+        .collect();
+    Some(steps)
+}
+
+/// Joyaux uniques : type de base et texte de leurs mods, lus dans les données de Mobalytics
+/// (un unique « Desecrated » a des mods propres au site). Sans réponse, ils gardent leur nom.
+fn mobalytics_unique_jewels(steps: &mut [StepJewels]) {
+    let uniques: Vec<&Jewel> = steps.iter().flat_map(|s| &s.jewels).filter(|j| j.rarity == crate::item::Rarity::Unique).collect();
+    if uniques.is_empty() {
+        return;
+    }
+    let mut slugs: Vec<String> = uniques.iter().map(|j| j.base.clone()).collect();
+    slugs.sort();
+    slugs.dedup();
+    let mut mods: Vec<String> = uniques.iter().flat_map(|j| j.mods.clone()).collect();
+    mods.sort();
+    mods.dedup();
+    const STATIC: &str = "query Jewels($jewels: [String!]!, $mods: [String!]!) { game: poe2 { staticData {
+        poe2Jewels(filter: { slug: { values: $jewels } }) { data { slug bakedDescriptions baseItemType { slug } } }
+        poe2Prefixes(filter: { slug: { values: $mods } }) { data { slug combinedDescription } } } } }";
+    let Ok(resp) = mobalytics_query(STATIC, serde_json::json!({ "jewels": slugs, "mods": mods })) else { return };
+    let data = &resp["data"]["game"]["staticData"];
+    let texts: std::collections::HashMap<&str, &str> = data["poe2Prefixes"]["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| Some((m["slug"].as_str()?, m["combinedDescription"].as_str()?)))
+        .collect();
+    let jewels: std::collections::HashMap<&str, &serde_json::Value> =
+        data["poe2Jewels"]["data"].as_array().into_iter().flatten().filter_map(|j| Some((j["slug"].as_str()?, j))).collect();
+    for j in steps.iter_mut().flat_map(|s| s.jewels.iter_mut()).filter(|j| j.rarity == crate::item::Rarity::Unique) {
+        let info = jewels.get(j.base.as_str());
+        // « jeweldiamond » -> type de base lisible.
+        let base = info.and_then(|i| i["baseItemType"]["slug"].as_str()).unwrap_or_default();
+        j.base = jewel_name(&format!("jewel-{base}"), false);
+        if j.base.starts_with("jewel-") || j.base.is_empty() {
+            j.base = base.trim_start_matches("jewel").to_string();
+            if let Some(f) = j.base.get(..1) {
+                j.base = f.to_uppercase() + &j.base[1..];
+            }
+        }
+        j.texts = j.mods.iter().filter_map(|m| texts.get(m.as_str()).map(|t| t.replace('\u{2013}', "-"))).collect();
+        if j.texts.is_empty() {
+            j.texts = info.and_then(|i| i["bakedDescriptions"].as_array()).into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect();
+        }
+        j.mods.clear();
+    }
+}
+
+/// Joyaux de l'arbre d'un build, si on les connaît (Mobalytics).
+pub fn load_jewels(dir: &Path) -> Vec<StepJewels> {
+    std::fs::read(dir.join(JEWELS)).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
+}
+
+/// Rareté des pièces recommandées d'un build, si on la connaît (Mobalytics).
+pub fn load_rarities(dir: &Path) -> Vec<StepRarities> {
+    std::fs::read(dir.join(ITEM_RARITIES)).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
 }
 
 /// Étiquette d'étape de chaque variante Mobalytics, par identifiant (« Act 1 {1} » → « Act 1 »).
@@ -469,11 +695,11 @@ fn mobalytics_skill_sets(resp: &serde_json::Value, field: &str) -> Option<Vec<St
                 .into_iter()
                 .flatten()
                 .filter_map(|g| {
-                    let set = match g["weaponSet"].as_str()? {
-                        "set1" => 1,
-                        "set2" => 2,
-                        "all" => 0,
-                        _ => return None,
+                    // Sans set assigné (null), le sort s'utilise avec les deux.
+                    let set = match g["weaponSet"].as_str() {
+                        Some("set1") => 1,
+                        Some("set2") => 2,
+                        _ => 0,
                     };
                     Some((g["activeSkill"]["name"].as_str()?.to_string(), set))
                 })
@@ -646,6 +872,21 @@ pub fn fetch_url(url: &str) -> Res<Vec<BuildFile>> {
 mod tests {
     use super::*;
 
+    /// Joyaux d'un vrai build Mobalytics (réseau) : `cargo test mobalytics_jewels_live -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn mobalytics_jewels_live() {
+        let url = "https://mobalytics.gg/poe-2/profile/pathofky/builds/cold-caster-chronomancer-leaguestart-to-endgame";
+        let (resp, field) = mobalytics_document(url).unwrap();
+        let mut steps = mobalytics_jewels(&resp, field).unwrap();
+        mobalytics_unique_jewels(&mut steps);
+        for s in steps.iter().filter(|s| !s.jewels.is_empty()) {
+            for j in &s.jewels {
+                eprintln!("{} | {} {} {:?} | {:?} {:?}", s.name, j.name, j.base, j.rarity, j.mods, j.texts);
+            }
+        }
+    }
+
     #[test]
     fn kami_grid_runes() {
         let grid = r#"<script> function load() { return {
@@ -694,7 +935,8 @@ mod tests {
         let steps = mobalytics_skill_sets(&resp, "userGeneratedDocumentBySlug").unwrap();
         assert_eq!(steps[0].name, "Act 3");
         let sets: Vec<(&str, u8)> = steps[0].sets.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-        assert_eq!(sets, [("Elemental Weakness", 2), ("Ice Nova", 1), ("Sigil of Power", 0)]);
+        // Sans set assigné : les deux sets (0), comme « all ».
+        assert_eq!(sets, [("Elemental Weakness", 2), ("Ice Nova", 1), ("Mana Remnants", 0), ("Sigil of Power", 0)]);
     }
 
     /// Réseau : runes de la page Kami-labs du build d'Ulf.

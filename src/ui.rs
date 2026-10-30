@@ -101,6 +101,16 @@ pub fn set_tabs(ui: &mut egui::Ui, center: Pos2, height: f32, id: &str, set: &mu
     changed
 }
 
+/// Petites cases du set inactif, aux extrémités comme en jeu (le fond ne les dessine pas : elles
+/// ont leur propre cadre) : l'arme à gauche, la main gauche à droite, dans la pierre libre de
+/// part et d'autre des grandes cases.
+pub fn mini_layout(slot: Slot) -> [f32; 4] {
+    match slot.in_set(1) {
+        Slot::Offhand => [1189.0, 98.0, 82.0, 196.0],
+        _ => [41.0, 98.0, 82.0, 196.0],
+    }
+}
+
 /// Épaisseur de la bordure dessinée par le fond du jeu autour d'une case (repère du fond) :
 /// la case se dessine à l'intérieur, sans la masquer.
 pub fn slot_inset(slot: Slot) -> f32 {
@@ -171,7 +181,7 @@ pub fn rarity_color(r: Rarity) -> Color32 {
     }
 }
 
-const MOD_COLOR: Color32 = Color32::from_rgb(136, 136, 255);
+pub const MOD_COLOR: Color32 = Color32::from_rgb(136, 136, 255);
 const DIM: Color32 = Color32::from_rgb(127, 127, 127);
 const SLOT_FILL: Color32 = Color32::from_rgb(22, 20, 18);
 const SLOT_EMPTY_STROKE: Color32 = Color32::from_rgb(70, 62, 50);
@@ -179,6 +189,8 @@ const SLOT_EMPTY_STROKE: Color32 = Color32::from_rgb(70, 62, 50);
 pub enum SlotAction {
     None,
     Clear,
+    /// Clic sur la case : ouvrir son détail (portée face à la recommandation, prix, trade).
+    Open,
 }
 
 /// Cases qui ne peuvent pas recevoir de pièce.
@@ -190,8 +202,10 @@ pub enum Blocked<'a> {
 }
 
 /// `framed` : dessiner nos propres cadres (quand le fond du jeu n'est pas disponible).
-pub fn blocked_slot(ui: &mut egui::Ui, rect: Rect, slot: Slot, why: Blocked, framed: bool, star: bool) {
-    let resp = ui.interact(rect, ui.id().with(("blocked", slot)), Sense::hover());
+/// Renvoie vrai au clic : le détail de la case reste consultable (ce que le build y prévoit).
+pub fn blocked_slot(ui: &mut egui::Ui, rect: Rect, slot: Slot, why: Blocked, framed: bool, star: bool) -> bool {
+    let resp = ui.interact(rect, ui.id().with(("blocked", slot)), Sense::click());
+    let clicked = resp.clicked();
     let hovered = resp.hovered() && !over_star(ui, rect, star);
     let painter = ui.painter();
     if framed {
@@ -213,10 +227,11 @@ pub fn blocked_slot(ui: &mut egui::Ui, rect: Rect, slot: Slot, why: Blocked, fra
                 paint_texture(painter, rect, tex, Color32::WHITE);
             }
             if hovered {
-                resp.on_hover_text("Ta ceinture n'ouvre pas cet emplacement de charme");
+                resp.on_hover_text("Ta ceinture n'ouvre pas cet emplacement de charme (clic : ce que le build y prévoit)");
             }
         }
     }
+    clicked
 }
 
 fn paint_texture(painter: &egui::Painter, rect: Rect, tex: &TextureHandle, tint: Color32) {
@@ -241,6 +256,7 @@ pub fn slot(
     sockets: Option<&SocketView>,
     build: Option<&BuildCard>,
     ghost: Option<&TextureHandle>,
+    worn: Option<&WornView>,
 ) -> SlotAction {
     let id = ui.id().with(("slot", slot));
     let resp = ui.interact(rect, id, Sense::click());
@@ -331,25 +347,32 @@ pub fn slot(
         ui.data_mut(|d| d.remove::<f64>(since_id));
     }
 
-    let mut action = if clear { SlotAction::Clear } else { SlotAction::None };
-    if let Some(it) = item {
-        if hovered {
+    let mut action = if clear {
+        SlotAction::Clear
+    } else if resp.clicked() {
+        SlotAction::Open
+    } else {
+        SlotAction::None
+    };
+    // Rune survolée : sa fiche (effets), à la place de celle de la pièce.
+    let rune = if hovered { sockets.and_then(|v| hovered_socket(ui, rect, v)) } else { None };
+    if let Some(r) = rune {
+        resp.clone().on_hover_ui(|ui| rune_tip(ui, r));
+    } else if item.is_some() && hovered {
+        // Même rendu que la colonne « actuellement équipé » du détail (clic).
+        if let Some(w) = worn {
             resp.clone().on_hover_ui(|ui| {
-                // Deux colonnes : la pièce, puis ce que le build recommande à cet emplacement.
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        item_card(ui, it);
-                        if let Some(v) = sockets {
-                            socket_card(ui, v);
-                        }
-                    });
-                    if let Some(b) = build {
-                        ui.separator();
-                        ui.vertical(|ui| build_card(ui, b));
-                    }
+                // Un peu d'air autour du contenu ; largeur du contenu (le bandeau du bas s'y étend),
+                // assez pour le bandeau lui-même.
+                egui::Frame::new().inner_margin(8).show(ui, |ui| {
+                    ui.set_width(worn_width(ui, w).max(300.0).min(520.0));
+                    worn_column(ui, w);
+                    click_hint(ui, "Clic : comparer avec le build", w.score);
                 });
             });
         }
+    }
+    if item.is_some() {
         resp.context_menu(|ui| {
             if ui.button("Ne plus suivre cette pièce").clicked() {
                 action = SlotAction::Clear;
@@ -370,37 +393,119 @@ pub struct SocketView {
     pub unknown: Vec<String>,
     /// Icônes en noir et blanc dans les châsses vides : runes que le build y conseille.
     pub ghosts: Vec<Option<TextureHandle>>,
-    /// À défaut, augments qui collent aux objectifs du build.
-    pub suggestions: Vec<String>,
+    /// Fiche de chaque augment posé (même ordre que `filled`), au survol de sa châsse.
+    pub tips: Vec<RuneLine>,
 }
 
-/// Châsses au milieu de l'image, les unes sous les autres comme en jeu : icône de l'augment
-/// posé, ou châsse vide.
-fn paint_sockets(painter: &egui::Painter, rect: Rect, v: &SocketView) {
+/// Centre et rayon de chaque châsse d'une case, les unes sous les autres au milieu de l'image.
+fn socket_circles(rect: Rect, v: &SocketView) -> Vec<(Pos2, f32)> {
     let n = v.filled.len() + v.unknown.len() + v.empty;
     if n == 0 {
-        return;
+        return vec![];
     }
     // Un écart entre châsses d'un quart de leur taille.
     let size = (rect.width() * 0.34).min(rect.height() * 0.8 / (n as f32 * 1.25)).min(52.0);
     let step = size * 1.25;
     let top = rect.center().y - step * n as f32 / 2.0 + step / 2.0;
-    for i in 0..n {
-        let c = Pos2::new(rect.center().x, top + i as f32 * step);
-        let r = size / 2.0;
+    (0..n).map(|i| (Pos2::new(rect.center().x, top + i as f32 * step), size / 2.0)).collect()
+}
+
+/// Rune posée sous le pointeur, s'il y en a une : sa fiche.
+fn hovered_socket<'a>(ui: &egui::Ui, rect: Rect, v: &'a SocketView) -> Option<&'a RuneLine> {
+    let pointer = ui.ctx().pointer_hover_pos()?;
+    let i = socket_circles(rect, v).iter().position(|(c, r)| c.distance(pointer) <= *r)?;
+    v.tips.get(i)
+}
+
+/// Une rune (ou un augment) sur sa ligne : icône, marque éventuelle, nom, puis le reste
+/// (prix, effets). Une ligne par exemplaire, jamais « ×2 ».
+#[derive(Clone)]
+pub struct RuneLine {
+    pub image: Option<TextureHandle>,
+    pub mark: Option<(&'static str, Color32)>,
+    pub name: String,
+    /// Suite de la ligne, déjà mise en forme (« ≈ 3 ex », « : +10% … ≈ 3 ex »).
+    pub rest: String,
+    pub color: Color32,
+    /// Pour l'infobulle : sorte et niveau (« Rune · niveau 50 »), effets par catégorie d'objet.
+    pub kind: String,
+    pub effects: Vec<(String, Vec<String>)>,
+}
+
+/// Lignes de runes : icône du jeu en tête, à la hauteur du texte.
+pub fn rune_lines(ui: &mut egui::Ui, lines: &[RuneLine]) {
+    for (i, r) in lines.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            // Verdict face au build en tête de ligne, comme pour les mods.
+            if let Some((mark, color)) = r.mark {
+                ui.add(egui::Label::new(RichText::new(mark).color(color).strong()).selectable(false));
+            }
+            let h = ui.text_style_height(&egui::TextStyle::Body) + 2.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(h, h), Sense::hover());
+            if let Some(tex) = &r.image {
+                let s = tex.size_vec2();
+                let k = (h / s.x).min(h / s.y);
+                ui.painter().image(tex.id(), Rect::from_center_size(rect.center(), s * k), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            }
+            // Nom dans sa couleur, prix (et effets) dans celle des prix du reste de l'app.
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add(egui::Label::new(RichText::new(&r.name).color(r.color)).selectable(false));
+            if !r.rest.is_empty() {
+                ui.add(egui::Label::new(RichText::new(&r.rest).color(Color32::from_rgb(225, 220, 210))).selectable(false));
+            }
+        });
+        // Infobulle sur toute la ligne (icône et texte), posée par-dessus.
+        ui.interact(row.response.rect, ui.id().with(("rune_line", i, &r.name)), Sense::hover()).on_hover_ui(|ui| rune_tip(ui, r));
+    }
+}
+
+/// Fiche d'une rune : grande icône, nom, sorte et niveau, effets selon l'objet qui la porte.
+fn rune_tip(ui: &mut egui::Ui, r: &RuneLine) {
+    // Même marge que l'infobulle des pièces.
+    egui::Frame::new().inner_margin(8).show(ui, |ui| rune_tip_body(ui, r));
+}
+
+fn rune_tip_body(ui: &mut egui::Ui, r: &RuneLine) {
+    ui.set_max_width(360.0);
+    ui.horizontal(|ui| {
+        if let Some(tex) = &r.image {
+            let s = tex.size_vec2();
+            let k = (64.0 / s.x).min(64.0 / s.y);
+            ui.add(egui::Image::new((tex.id(), s * k)));
+        }
+        ui.vertical(|ui| {
+            ui.label(RichText::new(&r.name).color(GOLD).size(16.0).strong());
+            if !r.kind.is_empty() {
+                ui.label(RichText::new(&r.kind).color(Color32::GRAY));
+            }
+        });
+    });
+    for (category, lines) in &r.effects {
+        ui.add_space(4.0);
+        ui.label(RichText::new(category).color(Color32::GRAY).small());
+        for l in lines {
+            ui.label(RichText::new(l).color(MOD_COLOR));
+        }
+    }
+    if r.effects.is_empty() {
+        ui.label(RichText::new("Effets inconnus (catalogue pas encore chargé)").color(Color32::GRAY).small());
+    }
+}
+
+/// Châsses au milieu de l'image, les unes sous les autres comme en jeu : icône de l'augment
+/// posé, ou châsse vide.
+fn paint_sockets(painter: &egui::Painter, rect: Rect, v: &SocketView) {
+    for (i, (c, r)) in socket_circles(rect, v).into_iter().enumerate() {
+        let size = r * 2.0;
         painter.circle_filled(c, r, Color32::from_black_alpha(200));
         match v.filled.get(i) {
-            Some((_, tex, good)) => {
+            Some((_, tex, _)) => {
                 if let Some(tex) = tex {
                     painter.image(tex.id(), Rect::from_center_size(c, Vec2::splat(size * 0.86)), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                 }
-                // Vert : la rune conseillée ; rouge : une autre ; doré : le build ne dit rien.
-                let color = match good {
-                    Some(true) => SOCKET_GOOD,
-                    Some(false) => SOCKET_WRONG,
-                    None => GOLD_DIM,
-                };
-                painter.circle_stroke(c, r, Stroke::new(1.5_f32, color));
+                // Contour neutre : la comparaison avec les runes du build est dans le détail.
+                painter.circle_stroke(c, r, Stroke::new(1.5_f32, GOLD_DIM));
             }
             // Effet non reconnu : châsse occupée, sans icône.
             None if i < v.filled.len() + v.unknown.len() => {
@@ -429,36 +534,6 @@ pub const SOCKET_WRONG: Color32 = Color32::from_rgb(230, 85, 70);
 /// Châsse vide : à remplir, c'est un gain facile.
 pub const EMPTY_SOCKET: Color32 = Color32::from_rgb(230, 150, 70);
 
-/// Partie « châsses » de la fiche d'une pièce suivie.
-fn socket_card(ui: &mut egui::Ui, v: &SocketView) {
-    let total = v.filled.len() + v.unknown.len() + v.empty;
-    if total == 0 {
-        return;
-    }
-    ui.separator();
-    ui.label(RichText::new(format!("Châsses : {}/{total} occupées", total - v.empty)).color(Color32::GRAY));
-    for (name, _, good) in &v.filled {
-        let (mark, color) = match good {
-            Some(true) => ("✓", SOCKET_GOOD),
-            Some(false) => ("✗", SOCKET_WRONG),
-            None => ("◆", Color32::from_rgb(136, 136, 255)),
-        };
-        ui.label(RichText::new(format!("  {mark} {name}")).color(color));
-    }
-    for line in &v.unknown {
-        ui.label(RichText::new(format!("  ◆ augment non reconnu : {line}")).color(Color32::GRAY));
-    }
-    if v.empty > 0 {
-        ui.label(RichText::new(format!("{} châsse(s) vide(s)", v.empty)).color(EMPTY_SOCKET).strong());
-        if !v.suggestions.is_empty() {
-            ui.label(RichText::new("Pour ton build :").color(Color32::GRAY).small());
-            for s in &v.suggestions {
-                ui.label(RichText::new(format!("  {s}")).color(GOLD));
-            }
-        }
-    }
-}
-
 /// Ce que le build recommande à un emplacement, comparé à la pièce suivie.
 pub struct BuildCard {
     pub step: String,
@@ -470,8 +545,8 @@ pub struct BuildCard {
     pub unique: Option<String>,
     /// Ligne visée et ce qu'en a la pièce.
     pub lines: Vec<(String, crate::compare::Have)>,
-    /// Runes recommandées (déjà mises en forme).
-    pub runes: Vec<String>,
+    /// Runes recommandées, une ligne par exemplaire.
+    pub runes: Vec<RuneLine>,
     /// Illustration de l'unique ou du type de base recommandé.
     pub image: Option<TextureHandle>,
 }
@@ -483,7 +558,7 @@ impl BuildCard {
 }
 
 /// Colonne « recommandé par le build » de la fiche d'une pièce.
-fn build_card(ui: &mut egui::Ui, b: &BuildCard) {
+pub fn build_card(ui: &mut egui::Ui, b: &BuildCard) {
     ui.set_max_width(320.0);
     ui.label(RichText::new("RECOMMANDÉ PAR LE BUILD").color(GOLD_DIM).small().strong());
     ui.label(RichText::new(&b.step).color(Color32::GRAY).small());
@@ -528,28 +603,33 @@ pub fn build_card_head(ui: &mut egui::Ui, b: &BuildCard) {
 
 /// Bas de la carte : lignes visées marquées ✓ ~ ✗, runes.
 pub fn build_card_lines(ui: &mut egui::Ui, b: &BuildCard) {
-    use crate::compare::Have;
     if !b.lines.is_empty() {
         ui.add_space(4.0);
     }
-    for (line, have) in &b.lines {
+    target_lines(ui, &b.lines);
+    if !b.runes.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Runes :").color(Color32::GRAY).small());
+        rune_lines(ui, &b.runes);
+    }
+}
+
+/// Lignes visées par le build, marquées ✓ ~ ✗ selon ce qu'en a la pièce.
+pub fn target_lines(ui: &mut egui::Ui, lines: &[(String, crate::compare::Have)]) {
+    use crate::compare::Have;
+    for (line, have) in lines {
         let (mark, color) = match have {
             Have::Full(_) => ("✓", SOCKET_GOOD),
             Have::Partial(_) => ("~", EMPTY_SOCKET),
             Have::Missing => ("✗", SOCKET_WRONG),
             Have::Unknown => ("•", GOLD_DIM),
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(mark).color(color).strong());
-            ui.label(RichText::new(line).color(Color32::from_rgb(136, 136, 255)));
-        });
-    }
-    if !b.runes.is_empty() {
-        ui.add_space(4.0);
-        ui.label(RichText::new("Runes :").color(Color32::GRAY).small());
-        for r in &b.runes {
-            ui.label(RichText::new(format!("  {r}")).color(GOLD));
-        }
+        // Un seul texte (marque puis ligne) : même interligne qu'une simple liste de mods.
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let mut job = egui::text::LayoutJob::default();
+        job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), color));
+        job.append(line, 0.0, egui::TextFormat::simple(font, Color32::from_rgb(136, 136, 255)));
+        ui.label(job);
     }
 }
 
@@ -570,18 +650,19 @@ fn over_star(ui: &egui::Ui, rect: Rect, star: bool) -> bool {
     star && ui.rect_contains_pointer(star_rect(rect))
 }
 
-/// Unique recommandé montré dans l'infobulle de l'étoile.
+/// Unique recommandé montré dans l'infobulle de l'étoile : la même fiche qu'une pièce portée
+/// (en-tête, mods), puis son prix au marché.
 pub struct WantedUnique {
-    pub name: String,
-    pub image: Option<TextureHandle>,
-    /// Prix au marché déjà mis en forme.
-    pub price: Option<String>,
+    pub view: WornView,
+    /// Prix (« ≈ 5 div ») et sa couleur, puis sur quoi il repose (« 2528 annonces… »).
+    pub price: (String, Color32),
+    pub basis: Option<String>,
 }
 
 /// Étoile dans le coin d'une case : le build recommande ici un unique pas encore porté.
 /// Renvoie vrai au clic (ouvrir l'onglet Uniques).
 pub fn wanted_star(ui: &mut egui::Ui, rect: Rect, slot: Slot,
-    uniques: &[WantedUnique], step: &str,
+    uniques: &[&WantedUnique], step: &str,
 ) -> bool {
     let hit = star_rect(rect);
     let (center, size) = (hit.center(), hit.width() / 1.1);
@@ -592,85 +673,448 @@ pub fn wanted_star(ui: &mut egui::Ui, rect: Rect, slot: Slot,
     painter.circle_stroke(center, size * 0.55, Stroke::new(if resp.hovered() { 2.0_f32 } else { 1.0 }, unique));
     painter.text(center, Align2::CENTER_CENTER, "★", FontId::proportional(size * 0.75), unique);
     let clicked = resp.clicked();
-    resp.on_hover_ui(|ui| {
-        ui.label(RichText::new(format!("Unique recommandé par le build ({step})")).color(Color32::GRAY));
-        for u in uniques {
-            ui.add_space(4.0);
-            // Icône à gauche, nom et prix au marché à droite.
-            ui.horizontal(|ui| {
-                if let Some(tex) = &u.image {
-                    let size = tex.size_vec2();
-                    let scale = (110.0 / size.y).min(90.0 / size.x).min(1.0);
-                    ui.add(egui::Image::new((tex.id(), size * scale)));
-                }
-                ui.vertical(|ui| {
-            ui.label(RichText::new(&u.name).color(unique).size(15.0).strong());
-                    match &u.price {
-                        Some(p) => {
-                            ui.label(RichText::new(p).color(Color32::from_rgb(225, 220, 210)))
-                        }
-                        None => {
-                            ui.label(RichText::new("pas de prix au marché").color(Color32::GRAY))
-                        }
-                    };
-                });
-            });
-        }
-        ui.add_space(4.0);
-        ui.label(RichText::new("clic : onglet Uniques (prix, recherche sur le trade)").color(Color32::GRAY).small());
-    });
+    // Même fiche que le survol d'une pièce, pour l'unique attendu, et son prix en bas.
+    resp.on_hover_ui(|ui| wanted_tip(ui, uniques, step));
     clicked
 }
 
-/// Fiche d'objet façon infobulle du jeu.
-pub fn item_card(ui: &mut egui::Ui, it: &Item) {
-    ui.set_max_width(360.0);
-    let color = rarity_color(it.rarity);
-    ui.vertical_centered(|ui| {
-        ui.label(RichText::new(&it.name).color(color).size(16.0).strong());
-        if it.base != it.name {
-            ui.label(RichText::new(&it.base).color(color).size(14.0));
+/// Icône de nœud d'arbre dans un disque : l'image couvre tout le disque, ce qui dépasse n'est
+/// pas dessiné (certaines icônes du jeu sont carrées, d'autres déjà rondes).
+pub fn circle_image(painter: &egui::Painter, tex: egui::TextureId, center: Pos2, radius: f32, tint: Color32) {
+    const SEGMENTS: usize = 32;
+    let mut mesh = egui::Mesh::with_texture(tex);
+    mesh.vertices.push(egui::epaint::Vertex { pos: center, uv: Pos2::new(0.5, 0.5), color: tint });
+    for k in 0..=SEGMENTS {
+        let a = k as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        let (sin, cos) = a.sin_cos();
+        // Le disque est inscrit dans l'image : ses bords touchent ceux de l'image.
+        mesh.vertices.push(egui::epaint::Vertex { pos: center + egui::vec2(cos, sin) * radius, uv: Pos2::new(0.5 + 0.5 * cos, 0.5 + 0.5 * sin), color: tint });
+        if k > 0 {
+            mesh.add_triangle(0, k as u32, k as u32 + 1);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Fiche d'un nœud d'arbre (talents, Atlas) : icône éventuelle, titre et précision en gris, lignes
+/// d'effets, note en petit. Largeur et polices fixes, calculées sur le contenu (au plus 420 px) :
+/// la fiche ne dépend ni du zoom ni de la place laissée par le bord de l'écran.
+pub fn node_tip(ui: &mut egui::Ui, icon: Option<&TextureHandle>, title: &str, color: Color32, after: Option<&str>, lines: &[String], note: Option<&str>) {
+    let text_w = |t: &str, size: f32| ui.fonts(|f| f.layout_no_wrap(t.to_string(), FontId::proportional(size), Color32::WHITE).size().x);
+    let head = icon.map_or(0.0, |_| 48.0) + text_w(title, 16.0) + after.map_or(0.0, |a| 8.0 + text_w(a, 14.0));
+    let body = lines.iter().map(|l| text_w(l, 14.0)).chain(note.map(|n| text_w(n, 12.0))).fold(head, f32::max);
+    egui::Frame::new().inner_margin(8).show(ui, |ui| {
+        ui.set_width(body.ceil().clamp(120.0, 420.0));
+        ui.horizontal(|ui| {
+            if let Some(tex) = icon {
+                ui.image((tex.id(), Vec2::splat(40.0)));
+            }
+            ui.label(RichText::new(title).color(color).size(16.0).strong());
+            if let Some(a) = after {
+                ui.label(RichText::new(a).color(Color32::GRAY).size(14.0));
+            }
+        });
+        for l in lines {
+            ui.label(RichText::new(l).color(MOD_COLOR).size(14.0));
+        }
+        if let Some(n) = note {
+            ui.add_space(2.0);
+            ui.label(RichText::new(n).color(Color32::GRAY).size(12.0));
         }
     });
+}
+
+/// Fiche des uniques attendus sur une case (infobulle de l'étoile).
+pub fn wanted_tip(ui: &mut egui::Ui, uniques: &[&WantedUnique], step: &str) {
+    egui::Frame::new().inner_margin(8).show(ui, |ui| {
+        let width = uniques.iter().map(|u| worn_width(ui, &u.view)).fold(300.0_f32, f32::max).min(520.0);
+        ui.set_width(width);
+        ui.label(RichText::new(format!("UNIQUE ATTENDU · {step}")).color(GOLD_DIM).small().strong());
+        ui.add_space(4.0);
+        for (i, u) in uniques.iter().enumerate() {
+            if i > 0 {
+                ui.separator();
+            }
+            worn_header(ui, &format!("wanted_{i}"), &u.view);
+            if !u.view.mods.is_empty() {
+                ui.separator();
+                worn_mods(ui, &u.view);
+            }
+            ui.separator();
+            ui.label(RichText::new("AU MARCHÉ").color(GOLD_DIM).small().strong());
+            ui.label(RichText::new(&u.price.0).color(u.price.1).size(16.0).strong());
+            if let Some(b) = &u.basis {
+                ui.label(RichText::new(b).color(Color32::GRAY).small());
+            }
+        }
+    });
+}
+
+/// En-tête d'objet, le même partout (diagnostic, détail d'une case) : l'image à la hauteur du
+/// texte (entre 64 et 96 px), puis le titre et sa précision en gris, et des lignes en petit
+/// (défenses, implicites…). Renvoie la zone de l'en-tête.
+/// `badge` : place gardée à droite pour un badge dessiné à part (verdict du diagnostic).
+pub fn item_header(ui: &mut egui::Ui, id: &str, image: Option<&TextureHandle>, title: &str, color: Color32, after: Option<&str>, lines: Vec<egui::WidgetText>, badge: Option<(&str, Color32)>) -> Rect {
+    item_header_scaled(ui, id, image, title, color, after, lines, badge, 1.0, false)
+}
+
+/// `item_header` agrandi d'un facteur `scale` (image, textes ; les lignes sont à construire à la
+/// même échelle, voir `header_lines_scaled`).
+#[allow(clippy::too_many_arguments)]
+/// `tall_image` : l'image prend toute la hauteur du texte (en-tête agrandi du diagnostic).
+pub fn item_header_scaled(ui: &mut egui::Ui, id: &str, image: Option<&TextureHandle>, title: &str, color: Color32, after: Option<&str>, lines: Vec<egui::WidgetText>, badge: Option<(&str, Color32)>, scale: f32, tall_image: bool) -> Rect {
+    let text_h_id = ui.id().with(("item_header", id));
+    let text_h: f32 = ui.data(|d| d.get_temp(text_h_id)).unwrap_or(80.0 * scale);
+    let img_h = if tall_image { text_h.max(64.0 * scale) } else { text_h.clamp(64.0 * scale, 96.0 * scale) };
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0 * scale;
+        if let Some(tex) = image {
+            let size = tex.size_vec2();
+            let max_w = if tall_image { 2.0 * 80.0 * scale } else { 80.0 * scale };
+            let k = (img_h / size.y).min(max_w / size.x).min(if tall_image { 3.0 * scale } else { 1.5 * scale });
+            ui.image((tex.id(), size * k));
+        }
+        let text = ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0 * scale;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0 * scale;
+                ui.label(RichText::new(title).color(color).size(17.0 * scale).strong());
+                if let Some(a) = after {
+                    ui.label(RichText::new(a).color(Color32::GRAY).size(13.5 * scale));
+                }
+            });
+            for l in lines {
+                ui.label(l);
+            }
+        });
+        let h = text.response.rect.height();
+        if (h - text_h).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(text_h_id, h));
+            ui.ctx().request_repaint();
+        }
+        if let Some((text, color)) = badge {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| ui.scope_builder(egui::UiBuilder::new().invisible(), |ui| self::badge(ui, text, color)));
+        }
+    })
+    .response
+    .rect
+}
+
+/// Taille des lignes sous le titre d'un en-tête d'objet (propriétés, implicites).
+pub const HEADER_LINE_SIZE: f32 = 13.0;
+
+/// Ligne de propriétés en morceaux : texte, et vrai pour une valeur changée par les mods.
+pub type Parts = Vec<(String, bool)>;
+
+/// Colonne « actuellement équipé » d'une pièce, prête à afficher (détail et survol de la case).
+pub struct WornView {
+    pub image: Option<TextureHandle>,
+    pub title: String,
+    pub after: Option<String>,
+    pub color: Color32,
+    /// Arme : ses lignes de dégâts, coups critiques et attaques par seconde, colorées comme en jeu.
+    pub weapon: Vec<Vec<(String, Color32)>>,
+    /// Défenses, propriétés de fiole, niveau requis.
+    pub props: Vec<Parts>,
+    pub implicits: Vec<String>,
+    /// Mods comparés au build : marque, couleur, texte.
+    pub mods: Vec<(&'static str, Color32, String)>,
+    pub runes: Vec<RuneLine>,
+    pub empty_sockets: usize,
+    /// Correspondance au build, en pourcentage (mods visés), s'il y a de quoi la calculer.
+    pub score: Option<u32>,
+    /// Augments conseillés pour les châsses vides, quand le build n'en recommande pas ici.
+    pub suggestions: Vec<RuneLine>,
+}
+
+/// Trait gris au-dessus des runes (à la place d'un titre), sur la largeur donnée.
+pub fn rune_divider(ui: &mut egui::Ui, width: f32) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(width, 7.0), Sense::hover());
+    ui.painter().hline(r.x_range(), r.center().y, Stroke::new(1.0_f32, Color32::from_gray(60)));
+}
+
+/// Runes posées (sous un trait gris), puis châsses vides et ce qui irait dedans.
+pub fn worn_runes(ui: &mut egui::Ui, w: &WornView, width: f32) {
+    if !w.runes.is_empty() || w.empty_sockets > 0 {
+        rune_divider(ui, width);
+    }
+    if !w.runes.is_empty() {
+        rune_lines(ui, &w.runes);
+    }
+    if w.empty_sockets > 0 {
+        ui.label(RichText::new(format!("{} châsse(s) vide(s)", w.empty_sockets)).color(EMPTY_SOCKET).strong());
+        if !w.suggestions.is_empty() {
+            ui.label(RichText::new("Pour ton build :").color(Color32::GRAY).small());
+            rune_lines(ui, &w.suggestions);
+        }
+    }
+}
+
+
+/// Lignes de l'en-tête (propriétés, implicites, chacune avec sa marque) à l'échelle `scale`.
+pub fn header_lines_scaled(props: &[Parts], marks: &[Option<(&str, Color32)>], implicits: &[String], implicit_marks: &[Option<(&str, Color32)>], scale: f32) -> Vec<egui::WidgetText> {
+    header_lines_full(&[], props, marks, implicits, implicit_marks, scale)
+}
+
+/// Lignes de l'en-tête, avec en tête des lignes déjà colorées (dégâts d'une arme, comme en jeu).
+pub fn header_lines_full(colored: &[Vec<(String, Color32)>], props: &[Parts], marks: &[Option<(&str, Color32)>], implicits: &[String], implicit_marks: &[Option<(&str, Color32)>], scale: f32) -> Vec<egui::WidgetText> {
+    let font = FontId::proportional(HEADER_LINE_SIZE * scale);
+    let colored = colored.iter().map(|line| {
+        let mut job = egui::text::LayoutJob::default();
+        for (text, color) in line {
+            job.append(text, 0.0, egui::TextFormat::simple(font.clone(), *color));
+        }
+        egui::WidgetText::from(job)
+    });
+    let with_mark = |job: egui::text::LayoutJob, mark: Option<&Option<(&str, Color32)>>| -> egui::WidgetText {
+        let Some(Some((m, c))) = mark else { return job.into() };
+        let mut marked = egui::text::LayoutJob::default();
+        marked.append(&format!("{m} "), 0.0, egui::TextFormat::simple(font.clone(), *c));
+        for s in &job.sections {
+            marked.append(&job.text[s.byte_range.clone()], 0.0, s.format.clone());
+        }
+        marked.into()
+    };
+    let implicit_job = |l: &str| {
+        let mut job = egui::text::LayoutJob::default();
+        job.append(l, 0.0, egui::TextFormat::simple(font.clone(), MOD_COLOR));
+        job
+    };
+    colored
+        .chain(props.iter().enumerate().map(|(i, p)| with_mark(prop_line_sized(p, HEADER_LINE_SIZE * scale), marks.get(i))))
+        .chain(implicits.iter().enumerate().map(|(i, l)| with_mark(implicit_job(l), implicit_marks.get(i))))
+        .collect()
+}
+
+/// En-tête de la pièce équipée.
+pub fn worn_header(ui: &mut egui::Ui, id: &str, w: &WornView) -> Rect {
+    worn_header_scaled(ui, id, w, 1.0)
+}
+
+/// `worn_header` agrandi d'un facteur `scale`.
+pub fn worn_header_scaled(ui: &mut egui::Ui, id: &str, w: &WornView, scale: f32) -> Rect {
+    let lines = header_lines_full(&w.weapon, &w.props, &[], &w.implicits, &[], scale);
+    item_header_scaled(ui, id, w.image.as_ref(), &w.title, w.color, w.after.as_deref(), lines, None, scale, false)
+}
+
+/// Agrandissement du texte courant d'une zone (1 par défaut) : la taille du corps de texte
+/// face à celle d'egui.
+pub fn body_scale(ui: &egui::Ui) -> f32 {
+    egui::TextStyle::Body.resolve(ui.style()).size / 12.5
+}
+
+/// Mods de la pièce équipée (blanc : visés par le build, gris : non), précédés d'une marque s'il y en a.
+pub fn worn_mods(ui: &mut egui::Ui, w: &WornView) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    for (mark, color, line) in &w.mods {
+        let mut job = egui::text::LayoutJob::default();
+        if !mark.is_empty() {
+            job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), *color));
+        }
+        job.append(line, 0.0, egui::TextFormat::simple(font.clone(), *color));
+        ui.label(job);
+    }
+}
+
+/// Bandeau d'appel au clic, en bas d'une infobulle : souris (bouton gauche allumé) et action,
+/// et à droite le score de correspondance au build s'il y en a un.
+pub fn click_hint(ui: &mut egui::Ui, text: &str, score: Option<u32>) {
+    ui.add_space(4.0);
     ui.separator();
-    let mut header = Vec::new();
-    for key in ["Armour", "Evasion Rating", "Energy Shield", "Ward", "Spirit"] {
-        if let Some(v) = it.props.get(key) {
-            header.push(format!("{key}: {v}"));
-        }
+    ui.add_space(2.0);
+    click_band(ui, text, score.map(|s| ("score", format!("{s} %"), score_color(s))), true, false);
+}
+/// Une puce d'un bandeau à puces : le côté de l'emplacement, sa valeur (écart, score), et si
+/// elle s'ouvre.
+pub struct Chip {
+    pub label: String,
+    pub value: Option<(String, Color32)>,
+    pub enabled: bool,
+}
+
+/// Bandeau comme `click_band`, avec à droite une puce cliquable par emplacement (anneaux,
+/// charmes). Renvoie la puce cliquée.
+pub fn chip_band(ui: &mut egui::Ui, text: &str, chips: &[Chip]) -> Option<usize> {
+    let any = chips.iter().any(|c| c.enabled);
+    let color = if any { GOLD } else { Color32::from_gray(90) };
+    let mut clicked = None;
+    egui::Frame::new()
+        .fill(if any { GOLD_DIM.gamma_multiply(0.22) } else { Color32::from_gray(25) })
+        .stroke(Stroke::new(1.0_f32, if any { GOLD_DIM } else { Color32::from_gray(60) }))
+        .corner_radius(4)
+        .inner_margin(egui::Margin { left: 8, right: 4, top: 4, bottom: 4 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(RichText::new(text).color(color).strong()).selectable(false));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    // De droite à gauche : la dernière puce d'abord.
+                    for (i, c) in chips.iter().enumerate().rev() {
+                        let id = ui.id().with(("chip", text, i));
+                        let hovered = c.enabled && ui.ctx().data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+                        let fill = if hovered { GOLD_DIM.gamma_multiply(0.55) } else if c.enabled { GOLD_DIM.gamma_multiply(0.3) } else { Color32::from_gray(28) };
+                        let shown = egui::Frame::new()
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0_f32, if c.enabled { GOLD_DIM } else { Color32::from_gray(55) }))
+                            .corner_radius(3)
+                            .inner_margin(egui::Margin::symmetric(8, 2))
+                            .show(ui, |ui| {
+                                // Même largeur d'un bandeau à l'autre : les puces s'alignent en colonnes.
+                                ui.set_min_width(84.0);
+                                // Le bandeau se remplit par la droite : la valeur d'abord, pour lire « côté valeur ».
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 5.0;
+                                    let label = if c.enabled { Color32::from_gray(200) } else { Color32::from_gray(90) };
+                                    if let Some((v, vc)) = &c.value {
+                                        ui.add(egui::Label::new(RichText::new(v).color(*vc).strong()).selectable(false));
+                                    }
+                                    ui.add(egui::Label::new(RichText::new(&c.label).color(label)).selectable(false));
+                                });
+                            });
+                        let resp = ui.interact(shown.response.rect, id.with("hit"), if c.enabled { Sense::click() } else { Sense::hover() });
+                        if c.enabled && resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if resp.hovered() != hovered && c.enabled {
+                            ui.ctx().data_mut(|d| d.insert_temp(id, resp.hovered()));
+                            ui.ctx().request_repaint();
+                        }
+                        if resp.clicked() {
+                            clicked = Some(i);
+                        }
+                    }
+                });
+            });
+        });
+    clicked
+}
+
+
+/// Bandeau d'action (souris, texte, score à droite) : celui du bas des infobulles, et cliquable
+/// (`sense`) dans le diagnostic. Grisé quand `enabled` est faux.
+/// `score` : libellé, valeur affichée et sa couleur, à droite.
+pub fn click_band(ui: &mut egui::Ui, text: &str, score: Option<(&str, String, Color32)>, enabled: bool, sense: bool) -> egui::Response {
+    let id = ui.id().with(("click_band", text));
+    let hovered = sense && enabled && ui.ctx().data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+    let fill = if hovered { GOLD_DIM.gamma_multiply(0.38) } else { GOLD_DIM.gamma_multiply(0.22) };
+    let color = if enabled { GOLD } else { Color32::from_gray(90) };
+    let shown = egui::Frame::new()
+        .fill(if enabled { fill } else { Color32::from_gray(25) })
+        .stroke(Stroke::new(1.0_f32, if enabled { GOLD_DIM } else { Color32::from_gray(60) }))
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                // Souris dessinée : corps arrondi, bouton gauche plein, raie entre les boutons.
+                let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 16.0), Sense::hover());
+                let body = r.shrink2(egui::vec2(0.5, 0.5));
+                let painter = ui.painter();
+                let left = Rect::from_min_max(body.min, egui::pos2(body.center().x, body.min.y + body.height() * 0.45));
+                painter.rect_filled(left, CornerRadius { nw: 5, ne: 0, sw: 0, se: 0 }, color);
+                painter.rect_stroke(body, CornerRadius::same(5), Stroke::new(1.3_f32, color), StrokeKind::Inside);
+                painter.line_segment([egui::pos2(body.min.x, left.max.y), egui::pos2(body.max.x, left.max.y)], Stroke::new(1.0_f32, color));
+                painter.line_segment([egui::pos2(body.center().x, body.min.y), egui::pos2(body.center().x, left.max.y)], Stroke::new(1.0_f32, color));
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(RichText::new(text).color(color).strong()).selectable(false));
+                if let Some((label, value, value_color)) = score {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(egui::Label::new(RichText::new(value).color(value_color).size(16.0).strong()).selectable(false));
+                        ui.add(egui::Label::new(RichText::new(label).color(Color32::GRAY).small()).selectable(false));
+                    });
+                }
+            });
+        });
+    if !sense {
+        return shown.response;
     }
-    if let (Some(r), Some(t)) = (it.props.get("recover"), it.props.get("recover_time")) {
-        header.push(format!("Récupère {r} en {t} s"));
+    let resp = ui.interact(shown.response.rect, id.with("hit"), if enabled { Sense::click() } else { Sense::hover() });
+    if enabled && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    if let Some(d) = it.props.get("duration") {
-        header.push(format!("Dure {d} s"));
+    let now = resp.hovered();
+    if now != hovered {
+        ui.ctx().data_mut(|d| d.insert_temp(id, now));
+        ui.ctx().request_repaint();
     }
-    if let (Some(u), Some(m)) = (it.props.get("charges_use"), it.props.get("charges_max")) {
-        header.push(format!("{u} charges sur {m} par utilisation"));
-    }
-    for h in &header {
-        ui.label(RichText::new(h).color(Color32::from_rgb(200, 200, 200)));
-    }
-    if it.req_level > 0 || it.item_level > 0 {
-        ui.label(RichText::new(format!("Niveau requis {} · niveau d'objet {}", it.req_level, it.item_level)).color(DIM));
-    }
-    if !it.granted_skills.is_empty() {
+    resp
+}
+
+/// Colonne entière de la pièce équipée (infobulle de la case) : en-tête, mods, runes. Sans titre :
+/// au survol de la case, c'est forcément la pièce équipée.
+/// Couleur d'un score de correspondance au build : vert, orange, rouge.
+pub fn score_color(score: u32) -> Color32 {
+    if score >= 80 { SOCKET_GOOD } else if score >= 50 { EMPTY_SOCKET } else { SOCKET_WRONG }
+}
+
+/// Ce que mesure le score de correspondance (au survol).
+pub const SCORE_HELP: &str = "Correspondance au build : mods, implicites et runes visés, chacun à sa part de la valeur visée. \
+    Au-delà de 100 % une fois tout atteint.";
+
+/// Bloc « correspondance » du détail, en bas de la colonne équipée (en face du marché).
+pub fn score_block(ui: &mut egui::Ui, score: u32) {
+    ui.label(RichText::new("CORRESPONDANCE AU BUILD").color(GOLD_DIM).small().strong()).on_hover_text(SCORE_HELP);
+    ui.label(RichText::new(format!("{score} %")).color(score_color(score)).size(16.0 * body_scale(ui)).strong()).on_hover_text(SCORE_HELP);
+    ui.label(RichText::new("mods, implicites et runes visés").color(Color32::GRAY).small());
+}
+
+/// Largeur naturelle de la colonne d'une pièce équipée : sa ligne la plus longue (en-tête avec
+/// l'image, mods, runes), pour ajuster l'infobulle et le détail à leur contenu.
+pub fn worn_width(ui: &egui::Ui, w: &WornView) -> f32 {
+    let text_w = |t: &str, size: f32| ui.fonts(|f| f.layout_no_wrap(t.to_string(), FontId::proportional(size), Color32::WHITE).size().x);
+    let small = HEADER_LINE_SIZE;
+    let joined = |p: &Parts| p.iter().map(|(t, _)| t.as_str()).collect::<String>();
+    let title = text_w(&w.title, 17.0) + w.after.as_deref().map_or(0.0, |a| 8.0 + text_w(a, 13.5));
+    let header = w.props.iter().map(|p| text_w(&joined(p), small)).chain(w.implicits.iter().map(|l| text_w(l, small))).fold(title, f32::max);
+    // Image (au plus 80 px) et son écart avec le texte.
+    let header = header + w.image.as_ref().map_or(0.0, |_| 90.0);
+    let mods = w.mods.iter().map(|(m, _, l)| text_w(&format!("{m}  {l}"), 14.0)).fold(0.0_f32, f32::max);
+    let runes = w.runes.iter().chain(&w.suggestions).map(|r| 30.0 + text_w(&format!("{}{}", r.name, r.rest), 14.0)).fold(0.0_f32, f32::max);
+    header.max(mods).max(runes) + 8.0
+}
+
+pub fn worn_column(ui: &mut egui::Ui, w: &WornView) {
+    worn_header(ui, "hover_worn", w);
+    if !w.mods.is_empty() {
         ui.separator();
-        for s in &it.granted_skills {
-            ui.label(RichText::new(format!("Compétence : {s}")).color(Color32::from_rgb(200, 200, 200)));
-        }
+        worn_mods(ui, w);
     }
-    if !it.mods.is_empty() {
-        ui.separator();
-        for m in &it.mods {
-            ui.label(RichText::new(m).color(MOD_COLOR));
-        }
+    worn_runes(ui, w, ui.available_width());
+}
+
+/// Ligne de propriétés en petit (« Armure 123 », « Récupère 468 mana en 3 s ») : texte gris,
+/// valeurs changées par les mods de l'objet en bleu, comme en jeu.
+/// Marque invisible en tête d'un morceau de ligne de propriété : il s'affiche en rouge.
+const TOO_HIGH: &str = "\u{2060}";
+
+/// « Niveau requis 62 », le chiffre en blanc, ou en rouge s'il dépasse le niveau du personnage.
+pub fn req_level_parts(level: u32, character: u32) -> Parts {
+    let n = if level > character { format!("{TOO_HIGH}{level}") } else { level.to_string() };
+    vec![("Niveau requis ".into(), false), (n, false)]
+}
+
+pub fn prop_line_sized(parts: &[(String, bool)], size: f32) -> egui::text::LayoutJob {
+    let font = FontId::proportional(size);
+    let mut job = egui::text::LayoutJob::default();
+    for (text, augmented) in parts {
+        // Morceau marqué « trop haut » (voir `req_level_parts`) : en rouge, sans sa marque.
+        let (text, color) = match text.strip_prefix(TOO_HIGH) {
+            Some(t) => (t, SOCKET_WRONG),
+            None => (text.as_str(), if *augmented { MOD_COLOR } else { Color32::GRAY }),
+        };
+        job.append(text, 0.0, egui::TextFormat::simple(font.clone(), color));
     }
-    if it.unidentified {
-        ui.label(RichText::new("Non identifié").color(Color32::from_rgb(210, 0, 0)));
-    }
-    if it.corrupted {
-        ui.label(RichText::new("Corrompu").color(Color32::from_rgb(210, 0, 0)));
+    job
+}
+
+/// Titre d'un objet et sa précision en gris : un unique se nomme d'abord, les autres par leur
+/// type de base (leur nom est tiré au hasard).
+pub fn item_title(it: &Item) -> (&str, Option<&str>) {
+    if it.rarity == Rarity::Unique || it.base == it.name {
+        (it.name.as_str(), (it.base != it.name).then_some(it.base.as_str()))
+    } else {
+        (it.base.as_str(), Some(it.name.as_str()))
     }
 }
 
@@ -1033,6 +1477,110 @@ pub fn sparkline(ui: &mut egui::Ui, data: &[f64], color: Color32) {
         points,
         Stroke::new(1.2_f32, color.gamma_multiply(0.8)),
     ));
+}
+
+/// Courbe d'un cours (un point par jour, en exalts) dans `rect` : prix de gauche à droite,
+/// quelques repères de prix à gauche, les dates dessous, et au survol le point du jour.
+/// `fmt` met un montant en exalts dans sa devise.
+pub fn price_chart(ui: &mut egui::Ui, rect: Rect, points: &[(String, f64)], color: Color32, fmt: &dyn Fn(f64) -> String) {
+    let painter = ui.painter_at(rect.expand(2.0));
+    if points.len() < 2 {
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Pas assez de points pour une courbe", egui::FontId::proportional(13.0), Color32::GRAY);
+        return;
+    }
+    let small = egui::FontId::proportional(11.5);
+    let (lo, hi) = points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, v)| (lo.min(*v), hi.max(*v)));
+    let pad = ((hi - lo) * 0.1).max(hi.abs() * 0.02).max(1e-9);
+    let (lo, hi) = ((lo - pad).max(0.0), hi + pad);
+    // Repères de prix à gauche, dates dessous.
+    let gutter = [lo, (lo + hi) / 2.0, hi].iter().map(|v| ui.fonts(|f| f.layout_no_wrap(fmt(*v), small.clone(), Color32::GRAY).size().x)).fold(0.0_f32, f32::max) + 8.0;
+    let plot = Rect::from_min_max(egui::pos2(rect.left() + gutter, rect.top() + 6.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 18.0));
+    let x = |i: usize| plot.left() + plot.width() * i as f32 / (points.len() - 1) as f32;
+    let y = |v: f64| plot.bottom() - plot.height() * ((v - lo) / (hi - lo)) as f32;
+    let grid = Stroke::new(1.0_f32, Color32::from_gray(42));
+    for v in [lo, (lo + hi) / 2.0, hi] {
+        painter.hline(plot.x_range(), y(v), grid);
+        painter.text(egui::pos2(plot.left() - 6.0, y(v)), egui::Align2::RIGHT_CENTER, fmt(v), small.clone(), Color32::GRAY);
+    }
+    // « 2026-10-30 » -> « 30/10 ».
+    let day = |d: &str| match (d.get(8..10), d.get(5..7)) {
+        (Some(dd), Some(mm)) => format!("{dd}/{mm}"),
+        _ => d.to_string(),
+    };
+    let last = points.len() - 1;
+    for (i, align) in [(0, egui::Align2::LEFT_TOP), (last / 2, egui::Align2::CENTER_TOP), (last, egui::Align2::RIGHT_TOP)] {
+        painter.text(egui::pos2(x(i), plot.bottom() + 4.0), align, day(&points[i].0), small.clone(), Color32::GRAY);
+    }
+    // Aire sous la courbe : une bande verticale par segment.
+    let mut mesh = egui::Mesh::default();
+    let fill = color.gamma_multiply(0.18);
+    for (i, w) in points.windows(2).enumerate() {
+        let base = mesh.vertices.len() as u32;
+        let (x0, x1) = (x(i), x(i + 1));
+        mesh.colored_vertex(egui::pos2(x0, y(w[0].1)), fill);
+        mesh.colored_vertex(egui::pos2(x1, y(w[1].1)), fill);
+        mesh.colored_vertex(egui::pos2(x1, plot.bottom()), Color32::TRANSPARENT);
+        mesh.colored_vertex(egui::pos2(x0, plot.bottom()), Color32::TRANSPARENT);
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    let line: Vec<Pos2> = points.iter().enumerate().map(|(i, (_, v))| egui::pos2(x(i), y(*v))).collect();
+    painter.add(egui::Shape::line(line, Stroke::new(2.0_f32, color)));
+    // Survol : le jour le plus proche, son prix.
+    let resp = ui.interact(plot, ui.id().with("price_chart"), Sense::hover());
+    if let Some(p) = resp.hover_pos() {
+        let i = (((p.x - plot.left()) / plot.width()) * last as f32).round().clamp(0.0, last as f32) as usize;
+        let at = egui::pos2(x(i), y(points[i].1));
+        painter.vline(at.x, plot.y_range(), Stroke::new(1.0_f32, Color32::from_gray(90)));
+        painter.circle_filled(at, 4.0, color);
+        resp.on_hover_ui_at_pointer(|ui| {
+            ui.label(RichText::new(day(&points[i].0)).color(Color32::GRAY));
+            ui.label(RichText::new(fmt(points[i].1)).color(Color32::from_rgb(225, 220, 210)).strong());
+        });
+    }
+}
+
+/// Icône des boutons posés sur une vue (arbre de talents, Atlas).
+#[derive(Clone, Copy, PartialEq)]
+pub enum ViewIcon {
+    /// Plein écran : quatre coins tournés vers l'extérieur.
+    Enter,
+    /// Sortie du plein écran : quatre coins tournés vers l'intérieur.
+    Exit,
+    /// Recentrer : une mire.
+    Recenter,
+}
+
+/// Bouton carré dessiné à la main, sur un fond sombre pour rester lisible par-dessus un arbre.
+pub fn view_button(ui: &mut egui::Ui, rect: egui::Rect, icon: ViewIcon) -> egui::Response {
+    let resp = ui.interact(rect, ui.id().with(("view_button", icon as u8)), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let color = if resp.hovered() { GOLD } else { GOLD_DIM };
+    let painter = ui.painter();
+    painter.rect(rect, 4.0, Color32::from_rgba_unmultiplied(12, 11, 10, 220), Stroke::new(1.0_f32, color), egui::StrokeKind::Inside);
+    let inner = rect.shrink(8.0);
+    let stroke = Stroke::new(2.0_f32, color);
+    if icon == ViewIcon::Recenter {
+        let (c, r) = (inner.center(), inner.width() * 0.3);
+        painter.circle_stroke(c, r, stroke);
+        painter.circle_filled(c, 1.5, color);
+        for d in [Vec2::X, -Vec2::X, Vec2::Y, -Vec2::Y] {
+            painter.line_segment([c + d * (r - 2.0), c + d * (inner.width() * 0.5)], stroke);
+        }
+        return resp;
+    }
+    let on = icon == ViewIcon::Exit;
+    let arm = inner.width() * if on { 0.3 } else { 0.4 };
+    for (corner, dx, dy) in [(inner.left_top(), 1.0, 1.0), (inner.right_top(), -1.0, 1.0), (inner.left_bottom(), 1.0, -1.0), (inner.right_bottom(), -1.0, -1.0)] {
+        // Sortie : le coin est posé à l'intérieur, branches tournées vers le bord.
+        let (c, sx, sy) = if on { (corner + Vec2::new(dx, dy) * arm, -dx, -dy) } else { (corner, dx, dy) };
+        painter.line_segment([c, c + Vec2::new(sx * arm, 0.0)], stroke);
+        painter.line_segment([c, c + Vec2::new(0.0, sy * arm)], stroke);
+    }
+    resp
 }
 
 /// Combinaison de touches dessinée comme sur un clavier : « [Ctrl] + [C] ».

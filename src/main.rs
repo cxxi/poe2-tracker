@@ -42,7 +42,8 @@ mod weights;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+use regex::Regex;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
@@ -168,11 +169,15 @@ struct App {
     gem_infos: gem_info::GemInfos,
     /// Augments reconnus par texte d'objet, et suggestions par (texte, étape, niveau).
     socketed: HashMap<String, augments::Socketed>,
-    socket_tips: HashMap<(String, String, u32), Vec<String>>,
+    socket_tips: HashMap<(String, String, u32), Vec<(String, String)>>,
     /// Catalogue d'augments pour lequel ces caches valent.
     catalog_id: usize,
     /// Runes recommandées du build actif (identifiant du build, étapes).
     build_runes: Option<(String, Vec<builds::StepRunes>)>,
+    /// Rareté des pièces recommandées (Mobalytics), par build.
+    build_rarities: Option<(String, Vec<builds::StepRarities>)>,
+    /// Joyaux de l'arbre (Mobalytics), par build.
+    build_jewels: Option<(String, Vec<builds::StepJewels>)>,
     /// Choix de récompenses de quête du build actif.
     build_quests: Option<(String, Vec<builds::QuestChoice>)>,
     /// Fenêtre des nouveautés ouverte : versions à montrer.
@@ -196,6 +201,15 @@ struct App {
     feed: VecDeque<coach::FeedLine>,
     builds: builds::BuildStore,
     add_build: AddBuild,
+    /// Case d'équipement dont le détail est ouvert (clic sur la case ou son étoile).
+    slot_detail: Option<Slot>,
+    /// Bandeaux « comparer » du diagnostic affiché (au-dessus de l'estimation).
+    diag_bands: Option<DiagBands>,
+    /// Ce que montre ce détail : la pièce portée face au build, ou la pièce diagnostiquée face au
+    /// build ou à la pièce portée.
+    detail_mode: DetailMode,
+    /// Récompense modifiable de la route dont on change le choix (petite modale).
+    route_pick: Option<String>,
     data_dir: PathBuf,
     cache_dir: PathBuf,
     /// Arbre de l'Atlas lu dans les fichiers du jeu (au premier affichage de l'onglet).
@@ -207,6 +221,8 @@ struct App {
     /// Hauteur réelle de la barre personnage / build (mesurée à l'affichage).
     bar_h: f32,
     tab: views::Tab,
+    /// Talents ou Atlas sur toute la fenêtre, sans les panneaux autour.
+    full_view: bool,
     /// Onglet du panneau de droite.
     side_tab: views::SideTab,
     /// Bloc en bas à gauche : maps (vrai) ou route de leveling. `None` : les maps dès que le
@@ -224,6 +240,12 @@ struct App {
     market_search: String,
     /// Ligue regardée dans l'onglet Marché quand ce n'est pas celle du personnage, et ses cours.
     market_league: Option<(String, prices::Prices)>,
+    /// Onglet Marché : objet dont le détail est ouvert (par son nom).
+    market_open: Option<String>,
+    /// Historiques des cours (« ligue|identifiant poe.ninja ») : `None` pendant le chargement.
+    market_history: Arc<Mutex<HashMap<String, Option<Result<Vec<(String, f64)>, String>>>>>,
+    /// Période de la courbe du détail : 7 jours, 30 jours, tout.
+    market_period: usize,
     /// Étape affichée dans les onglets du build (`None` = étape actuelle).
     view_step: Option<usize>,
     tree: views::TreeView,
@@ -477,7 +499,7 @@ fn start_coach(ctx: egui::Context, config: &Config, files: Vec<PathBuf>, cache: 
         let mut c = coach::Coach::new(steps, catalog, state);
         // Premier lancement : tout le log, pour retrouver les personnages, leur dernière zone
         // et les récompenses de la route déjà obtenues.
-        let whole = !c.full_scan_done() || !c.route_scan_done() || !c.maps_scan_done();
+        let whole = !c.full_scan_done() || !c.route_scan_done() || !c.maps_scan_done() || !c.picks_scan_done();
         if whole {
             c.begin_replay();
         }
@@ -488,6 +510,7 @@ fn start_coach(ctx: egui::Context, config: &Config, files: Vec<PathBuf>, cache: 
         c.mark_full_scan();
         c.mark_route_scan();
         c.mark_maps_scan();
+        c.mark_picks_scan();
         c.clock = logwatch::log_clock_offset(&log_path);
         c.live = true;
         c.save();
@@ -534,6 +557,8 @@ impl App {
             socket_tips: HashMap::new(),
             catalog_id: 0,
             build_runes: None,
+            build_rarities: None,
+            build_jewels: None,
             build_quests: None,
             step_preview: None,
             market_min_ex: config.market_min_ex,
@@ -550,6 +575,16 @@ impl App {
             builds,
             // Développement : `POE2_TRACKER_BUILDS` ouvre le gestionnaire de builds au démarrage.
             add_build: AddBuild { open: std::env::var_os("POE2_TRACKER_BUILDS").is_some(), ..Default::default() },
+            // Développement : `POE2_TRACKER_SLOT=Body` ouvre le détail d'une case au démarrage.
+            route_pick: None,
+            // Développement : modale du diagnostic (POE2_TRACKER_DETAIL=worn|build).
+            detail_mode: match std::env::var("POE2_TRACKER_DETAIL").as_deref() {
+                Ok("worn") => DetailMode::DiagWorn,
+                Ok("build") => DetailMode::DiagBuild,
+                _ => DetailMode::Worn,
+            },
+            diag_bands: None,
+            slot_detail: std::env::var("POE2_TRACKER_SLOT").ok().and_then(|v| Slot::ALL.into_iter().find(|s| format!("{s:?}") == v)),
             data_dir: dirs.data_dir().to_path_buf(),
             cache_dir: dirs.cache_dir().to_path_buf(),
             atlas_tree: Arc::new(Mutex::new(None)),
@@ -561,6 +596,10 @@ impl App {
             market_category: "Currency".into(),
             market_search: String::new(),
             market_league: None,
+            // Développement : détail d'un objet du marché ouvert (POE2_TRACKER_MARKET=nom).
+            market_open: std::env::var("POE2_TRACKER_MARKET").ok(),
+            market_history: Arc::default(),
+            market_period: 1,
             estimate_open: None,
             // Développement : bloc du bas sur la route (POE2_TRACKER_BOTTOM=route).
             bottom_maps: (std::env::var("POE2_TRACKER_BOTTOM").as_deref() == Ok("route")).then_some(false),
@@ -576,11 +615,11 @@ impl App {
                 Ok("carac") => views::Tab::Stats,
                 Ok("sorts") => views::Tab::Skills,
                 Ok("talents") => views::Tab::Passives,
-                Ok("ascendances") => views::Tab::Ascendancy,
-                Ok("uniques") => views::Tab::Uniques,
                 Ok("atlas") => views::Tab::Atlas,
                 _ => views::Tab::Equipment,
             },
+            // Développement : `POE2_TRACKER_FULL=1` ouvre la vue en plein écran.
+            full_view: std::env::var_os("POE2_TRACKER_FULL").is_some(),
             view_step: None,
             tree: views::TreeView::default(),
             passive_icons: passive_icons::PassiveIcons::new(&cc.egui_ctx, dirs.cache_dir().to_path_buf(), config.game_dir.clone()),
@@ -705,7 +744,7 @@ impl App {
                     ui.label("•  En bas : la route de leveling (points de passif, résistances…), cochée toute seule au fil de la campagne.");
                     ui.add_space(10.0);
                     ui.label(RichText::new("Build (facultatif)").color(ui::GOLD).strong());
-                    ui.label("Sans build, le diagnostic compare simplement à tes pièces. Avec un build (lien Kami-labs ou fichier .build du planificateur), les verdicts suivent ses objectifs et les onglets Sorts, Talents et Ascendances s'ouvrent.");
+                    ui.label("Sans build, le diagnostic compare simplement à tes pièces. Avec un build (lien Kami-labs ou fichier .build du planificateur), les verdicts suivent ses objectifs et les onglets Sorts et Talents (ascendance comprise) s'ouvrent.");
                     if ui.button("Ajouter un build…").clicked() {
                         self.add_build.open = true;
                         self.add_build.message = None;
@@ -772,7 +811,7 @@ impl App {
 
     /// Augments conseillés pour les châsses vides d'une pièce portée en `slot`, selon les
     /// objectifs du build à l'étape en cours, avec leur prix.
-    fn socket_tips(&mut self, it: &Item, slot: Slot) -> Vec<String> {
+    fn socket_tips(&mut self, it: &Item, slot: Slot) -> Vec<(String, String)> {
         let (Some(catalog), Some((_, step))) = (self.augments.get(), self.basis()) else { return vec![] };
         let level = self.coach.as_ref().map(|c| c.level()).unwrap_or(100);
         let key = (it.raw.clone(), step.label.clone(), level);
@@ -780,11 +819,12 @@ impl App {
             return t.clone();
         }
         let prices = self.prices.data.lock().unwrap();
-        let tips: Vec<String> = augments::suggestions(it, &catalog.augments, level, |v| compare::build_value(&step, &[slot], v))
+        // Nom, puis effets et prix.
+        let tips: Vec<(String, String)> = augments::suggestions(it, &catalog.augments, level, |v| compare::build_value(&step, &[slot], v))
             .into_iter()
             .map(|(a, e)| {
                 let price = prices.as_ref().and_then(|p| Some(format!(" ≈ {}", p.fmt(p.currency(&a.name)?)))).unwrap_or_default();
-                format!("{} : {}{price}", a.name, e.text.join(", "))
+                (a.name.clone(), format!(" : {}{price}", e.text.join(", ")))
             })
             .collect();
         drop(prices);
@@ -813,6 +853,38 @@ impl App {
         }
     }
 
+    /// Joyaux que le build pose dans l'arbre à l'étape `label` (Mobalytics), mods traduits.
+    fn tree_jewels(&mut self, label: &str) -> Vec<views::TreeJewel> {
+        let Some(id) = self.builds.active().map(|b| b.id.clone()) else { return vec![] };
+        if self.build_jewels.as_ref().is_none_or(|(b, _)| *b != id) {
+            self.build_jewels = Some((id.clone(), builds::load_jewels(&self.builds.dir_of(&id))));
+        }
+        let catalog = self.augments.get();
+        let steps = &self.build_jewels.as_ref().unwrap().1;
+        let Some(step) = steps.iter().find(|s| s.name == label) else { return vec![] };
+        step.jewels
+            .iter()
+            .map(|j| views::TreeJewel {
+                node: j.node,
+                icon: j.icon.clone(),
+                name: j.name.clone(),
+                base: j.base.clone(),
+                color: ui::rarity_color(j.rarity),
+                // Unique : textes déjà résolus à l'import ; sinon les mods traduits par RePoE.
+                lines: if j.texts.is_empty() {
+                    j.mods.iter().map(|m| catalog.as_ref().and_then(|c| c.mod_texts.get(m).cloned()).unwrap_or_else(|| m.clone())).collect()
+                } else {
+                    j.texts.clone()
+                },
+            })
+            .collect()
+    }
+
+    /// Ce que la campagne a déjà donné au personnage (récompenses cochées sur la route).
+    fn quest_bonuses(&self) -> route::Bonuses {
+        self.coach.as_ref().and_then(|c| c.character()).map(|(_, ch)| route::bonuses(&ch.done, &ch.picks)).unwrap_or_default()
+    }
+
     /// Choix de récompenses de quête que le build recommande (Mobalytics).
     fn quest_choices(&mut self) -> Vec<builds::QuestChoice> {
         let Some(id) = self.builds.active().map(|b| b.id.clone()) else { return vec![] };
@@ -822,29 +894,44 @@ impl App {
         self.build_quests.as_ref().unwrap().1.clone()
     }
 
-    /// « Greater Iron Rune ×2 ≈ 3 ex » : runes regroupées, avec leur prix.
-    fn rune_list(&self, runes: &[String]) -> Vec<String> {
-        let prices = self.prices.data.lock().unwrap();
-        let mut out: Vec<(String, usize)> = Vec::new();
-        for r in runes {
-            match out.iter_mut().find(|(n, _)| n == r) {
-                Some((_, c)) => *c += 1,
-                None => out.push((r.clone(), 1)),
+    /// Runes avec leur icône et leur prix (« Greater Iron Rune ≈ 3 ex »), une ligne par exemplaire.
+    /// `class` : classe de la pièce qui les porte (« Staves »), pour n'en garder que l'effet utile.
+    fn rune_list(&mut self, runes: &[String], class: Option<&str>) -> Vec<ui::RuneLine> {
+        let priced: Vec<(String, String)> = {
+            let prices = self.prices.data.lock().unwrap();
+            runes.iter().map(|n| (n.clone(), prices.as_ref().and_then(|p| Some(format!(" ≈ {}", p.fmt(p.currency(n)?)))).unwrap_or_default())).collect()
+        };
+        priced.into_iter().map(|(name, rest)| self.rune_line(name, rest, class)).collect()
+    }
+
+    /// Ligne d'une rune (ou d'un augment) : icône, nom, suite, et de quoi remplir sa fiche. Avec la
+    /// classe de la pièce qui la porte, la fiche ne montre que l'effet sur ce type d'objet.
+    fn rune_line(&mut self, name: String, rest: String, class: Option<&str>) -> ui::RuneLine {
+        let (kind, effects) = match self.augments.get().and_then(|c| c.augments.iter().find(|a| a.name == name).cloned()) {
+            Some(a) => {
+                let kind = match a.kind.as_str() {
+                    "Rune" => "Rune",
+                    "SoulCore" => "Noyau d'âme",
+                    "Idol" => "Idole",
+                    k => k,
+                };
+                let kind = if a.level > 0 { format!("{kind} · niveau {}", a.level) } else { kind.to_string() };
+                let effects = match class.and_then(|c| a.effect_for(c)) {
+                    Some(e) => vec![(e.category.clone(), e.text.clone())],
+                    None => a.effects.iter().map(|e| (e.category.clone(), e.text.clone())).collect(),
+                };
+                (kind, effects)
             }
-        }
-        out.into_iter()
-            .map(|(n, c)| {
-                let price = prices.as_ref().and_then(|p| Some(format!(" ≈ {}", p.fmt(p.currency(&n)?)))).unwrap_or_default();
-                if c > 1 { format!("{n} ×{c}{price}") } else { format!("{n}{price}") }
-            })
-            .collect()
+            None => (String::new(), vec![]),
+        };
+        ui::RuneLine { image: self.assets.texture_by_name(&name), mark: None, name, rest, color: ui::GOLD, kind, effects }
     }
 
     /// Colonne « recommandé par le build » de la fiche d'une pièce portée en `slot`.
     /// `it` : la pièce portée, comparée ligne par ligne ; `None` pour une case vide.
     fn build_card(&mut self, it: Option<&Item>, slot: Slot) -> Option<ui::BuildCard> {
         let (_, step) = self.basis()?;
-        let base = step.targets.iter().find(|(s, _, _)| *s == slot).map(|(_, b, _)| b.clone()).unwrap_or_default();
+        let base = step.base_for(slot).to_string();
         let unique = self.recommended_unique(&step, slot);
         let catalog = self.augments.get();
         let lines = match it {
@@ -853,16 +940,750 @@ impl App {
         };
         let runes = self.recommended_runes(slot);
         let base_defences = catalog.as_ref().and_then(|c| c.defences.get(&base).copied());
-        let implicits = catalog.as_ref().and_then(|c| c.implicits.get(&base).cloned()).unwrap_or_default();
+        let mut implicits = catalog.as_ref().and_then(|c| c.implicits.get(&base).cloned()).unwrap_or_default();
+        // Compétence accordée par la base (bâton, baguette…), comme sur la fiche de la pièce.
+        if let (Some(skills), Some(coach)) = (catalog.as_ref().and_then(|c| c.skills.get(&base)), self.coach.as_ref()) {
+            implicits.extend(skills.iter().map(|id| format!("Compétence : {}", coach.catalog().gem(id))));
+        }
         let image = match &unique {
             Some(u) => self.assets.texture_unique(u),
             None if !base.is_empty() => self.assets.texture_by_name(&base),
             None => None,
         };
-        let card = ui::BuildCard { step: step.label.clone(), base, base_defences, implicits, unique, lines, runes: self.rune_list(&runes),
+        // Classe de la pièce visée (sa base), à défaut de celle portée : l'effet utile des runes.
+        let class = catalog.as_ref().and_then(|c| c.classes.get(&base)).map(|(c, _)| trade::text_class(c)).or_else(|| it.map(|it| it.item_class.clone()));
+        let runes = self.rune_list(&runes, class.as_deref());
+        let card = ui::BuildCard { step: step.label.clone(), base, base_defences, implicits, unique, lines, runes,
             image,
         };
         (!card.is_empty()).then_some(card)
+    }
+
+    /// Pièce rare que vise le build sur `slot` (type de base et mods visés), écrite comme un
+    /// texte d'objet du jeu pour en estimer le prix au marché.
+    /// Rareté de la pièce que le build vise sur `slot` : celle de Mobalytics quand on la connaît,
+    /// sinon d'après le nombre de mods visés (fioles et charmes : magiques jusqu'à deux).
+    fn recommended_rarity(&mut self, step: &guide::Step, slot: Slot) -> item::Rarity {
+        if let Some(id) = self.builds.active().map(|b| b.id.clone()) {
+            if self.build_rarities.as_ref().is_none_or(|(b, _)| *b != id) {
+                self.build_rarities = Some((id.clone(), builds::load_rarities(&self.builds.dir_of(&id))));
+            }
+            let known = self.build_rarities.as_ref().unwrap().1.iter().find(|s| s.name == step.label).and_then(|s| s.items.get(&slot).copied());
+            if let Some(r) = known {
+                return r;
+            }
+        }
+        let lines = step.targets_for(slot).count();
+        let small = matches!(slot, Slot::LifeFlask | Slot::ManaFlask) || gear::CHARMS.contains(&slot);
+        match lines {
+            0 => item::Rarity::Normal,
+            1 | 2 if small => item::Rarity::Magic,
+            _ => item::Rarity::Rare,
+        }
+    }
+
+    fn recommended_rare(&self, step: &guide::Step, slot: Slot, rarity: item::Rarity) -> Option<Item> {
+        let (_, base, targets) = step.targets.iter().chain(&step.side_targets).find(|(s, b, _)| *s == slot && !b.is_empty())?;
+        let class = self.augments.get()?.classes.get(base)?.0.clone();
+        let mods: Vec<&str> = targets.iter().map(|t| t.line.as_str()).collect();
+        // Fioles et charmes sont au plus magiques : une ligne de nom, celui de la base.
+        // Un objet normal ou magique n'a qu'une ligne de nom (la base) ; un rare en a deux.
+        let head = match rarity {
+            item::Rarity::Rare => format!("Rare\nRecommandation du build\n{base}"),
+            item::Rarity::Magic => format!("Magic\n{base}"),
+            _ => format!("Normal\n{base}"),
+        };
+        let text = format!(
+            "Item Class: {}\nRarity: {head}\n--------\nItem Level: 1\n--------\n{}",
+            trade::text_class(&class),
+            mods.join("\n")
+        );
+        item::parse(&text)
+    }
+
+    /// Détail d'une case d'équipement, posé sur la zone d'équipement (le reste de la fenêtre
+    /// reste utilisable) : la pièce portée face à ce que recommande le build, ligne à ligne
+    /// pour comparer d'un coup d'œil, puis le prix de la recommandation et sa recherche.
+    /// `k_min`, `k_max` : agrandissement, entre les deux selon la place (celles du diagnostic, sur
+    /// toute la fenêtre, ont une taille fixe).
+    fn slot_detail(&mut self, ui: &mut egui::Ui, zone: egui::Rect, k_min: f32, k_max: f32) {
+        let Some(slot) = self.slot_detail else { return };
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.slot_detail = None;
+            return;
+        }
+        let mode = self.detail_mode;
+        // La pièce de gauche : la pièce portée, ou celle du diagnostic.
+        let item = match mode {
+            DetailMode::Worn => self.gear.item(slot),
+            _ => self.diagnosed.clone(),
+        };
+        let card = self.build_card(item.as_ref(), slot);
+        let step = self.basis().map(|(_, s)| s);
+        // Face à la pièce portée : son bloc (en-tête, écarts, runes, score), comparé à la pièce
+        // diagnostiquée.
+        let worn_side = if mode == DetailMode::DiagWorn {
+            item.clone().map(|it| {
+                let comparison = self.compare_at(&it, Some(slot));
+                let worn_item = self.gear.item(slot);
+                let worn_score = worn_item.as_ref().and_then(|w| {
+                    let c = self.build_card(Some(w), slot);
+                    self.worn_view(slot, w, c.as_ref()).score
+                });
+                self.diag_sides(&it, comparison.as_ref(), card.as_ref(), worn_item.as_ref(), &None, None, worn_score, None).0
+            })
+        } else {
+            None
+        };
+        let unique = step.as_ref().and_then(|s| self.recommended_unique(s, slot));
+        let rec_rarity = step.as_ref().map_or(item::Rarity::Rare, |s| self.recommended_rarity(s, slot));
+        let rare = if unique.is_none() { step.as_ref().and_then(|s| self.recommended_rare(s, slot, rec_rarity)) } else { None };
+        // L'estimation de la pièce rare recommandée part à l'ouverture (si le trade est permis).
+        if let Some(r) = rare.as_ref().filter(|_| mode != DetailMode::DiagWorn) {
+            if self.stored.trade_prices && trade::priceable(r) && self.trade.get(r).is_none() {
+                self.trade.request(r);
+            }
+        }
+        let league = self.league.clone();
+        let green = Color32::from_rgb(225, 220, 210);
+        // Prix et recherche de la recommandation : texte, couleur, lien, et s'il est en cours.
+        let mut price: Option<(String, Color32)> = None;
+        let mut basis: Option<String> = None;
+        let mut link: Option<(String, &str)> = None;
+        let mut pending = false;
+        if let Some(u) = &unique {
+            let found = {
+                let data = self.prices.data.lock().unwrap();
+                data.as_ref().and_then(|p| p.unique_by_name(u).map(|(b, div, n)| (b.to_string(), p.to_ex(div), n)))
+            };
+            match found {
+                Some((base, ex, n)) => {
+                    price = Some((format!("≈ {}", self.fmt_price(ex)), green));
+                    basis = Some(if n < prices::MIN_LISTINGS { format!("{n} annonces seulement, cours de poe.ninja") } else { format!("{n} annonces, cours de poe.ninja") });
+                    link = Some((uniques::trade_url(&league, u, Some(&base)), "Chercher sur le trade ↗"));
+                }
+                None => {
+                    price = Some(("pas de prix au marché".into(), Color32::GRAY));
+                    link = Some((uniques::trade_url(&league, u, None), "Chercher sur le trade ↗"));
+                }
+            }
+        } else if let Some(r) = &rare {
+            let fallback = (uniques::base_trade_url(&league, &r.base), "Chercher la base sur le trade ↗");
+            match self.trade.get(r) {
+                Some(e @ trade::Estimate::Done { .. }) => {
+                    let trade::Estimate::Done { total, url, relaxed, .. } = &e else { unreachable!() };
+                    price = Some(match e.value_ex() {
+                        Some(ex) => (format!("≈ {}", self.fmt_price(ex)), ui::confidence_color(e.confidence_pct())),
+                        None => ("pas assez d'annonces pour estimer".into(), Color32::GRAY),
+                    });
+                    let mut b = if *total == 1 { "1 annonce comparable".to_string() } else { format!("{total} annonces comparables") };
+                    if *relaxed > 0 {
+                        b.push_str(&format!(" · recherche élargie ({relaxed} mod{} en moins)", if *relaxed > 1 { "s" } else { "" }));
+                    }
+                    basis = Some(b);
+                    link = Some((url.clone(), "Voir les annonces sur le trade ↗"));
+                }
+                Some(trade::Estimate::Pending(msg)) => {
+                    pending = true;
+                    price = Some((msg, Color32::LIGHT_GRAY));
+                    link = Some(fallback);
+                }
+                Some(trade::Estimate::Failed(err)) => {
+                    price = Some((err, Color32::from_rgb(230, 120, 100)));
+                    link = Some(fallback);
+                }
+                None => {
+                    if !self.stored.trade_prices {
+                        price = Some(("estimation sur le trade coupée dans les réglages".into(), Color32::GRAY));
+                    }
+                    link = Some(fallback);
+                }
+            }
+        }
+        let title = match (&step, mode) {
+            (_, DetailMode::DiagWorn) => format!("{} · comparé à ta pièce", slot.place()),
+            (Some(s), _) => format!("{} · {}", slot.place(), s.label),
+            (None, _) => slot.place(),
+        };
+        let left_title = if mode == DetailMode::Worn { "ACTUELLEMENT ÉQUIPÉ" } else { "PIÈCE DIAGNOSTIQUÉE" };
+        let right_title = if mode == DetailMode::DiagWorn { "ACTUELLEMENT ÉQUIPÉ" } else { "RECOMMANDÉ PAR LE BUILD" };
+
+        // Modale sur la zone d'équipement (fond assombri, un clic à côté la ferme), ajustée à son
+        // contenu : hauteur mesurée au dernier affichage, largeur de chaque colonne d'après ses
+        // lignes ; réduite à la place libre (le contenu défile alors).
+        let height_id = ui.id().with("slot_detail_h");
+        let natural: f32 = ui.data(|d| d.get_temp(height_id)).unwrap_or(400.0);
+        const MODAL_MARGIN: f32 = 24.0;
+        ui.painter_at(zone).rect_filled(zone, 0.0, Color32::from_black_alpha(170));
+        let backdrop = ui.interact(zone, ui.id().with("slot_detail_backdrop"), egui::Sense::click());
+        // Colonne de la pièce équipée, la même que dans l'infobulle de la case.
+        let worn = item.as_ref().map(|it| self.worn_view(slot, it, card.as_ref()));
+        let build_def = card.as_ref().and_then(|b| b.base_defences).map(|d| defence_parts(d, [false; 3])).unwrap_or_default();
+        // Unique recommandé : son texte (PoB), base, implicites et mods avec leurs plages.
+        let unique_text = unique.as_ref().and_then(|u| self.coach.as_ref()?.catalog().uniques.get(u).cloned());
+        let build_impl: Vec<String> = match &unique_text {
+            Some(t) => t.implicits.clone(),
+            None => card.as_ref().map(|b| b.implicits.clone()).unwrap_or_default(),
+        };
+        let unique_base = unique_text.as_ref().map(|t| t.base.clone()).or_else(|| card.as_ref().map(|b| b.base.clone())).filter(|b| !b.is_empty());
+        // Base visée, valeurs ajustées par les mods visés (quantité, durée, charges).
+        let build_flask = match (&card, self.augments.get()) {
+            (Some(b), Some(c)) => {
+                let base = unique_base.clone().unwrap_or_else(|| b.base.clone());
+                c.flasks.get(&base).map(|f| {
+                    let increase = |tpls: &[&str]| -> Option<f64> {
+                        let total: f64 = b.lines.iter().map(|(l, _)| trade::template(l)).filter(|(t, _)| tpls.contains(&t.as_str())).filter_map(|(t, v)| v.map(|v| if t.contains("reduced") { -v } else { v })).sum();
+                        (total != 0.0).then_some(total)
+                    };
+                    let scaled = |base: f64, tpls: &[&str]| -> (f64, bool) {
+                        match increase(tpls) {
+                            Some(p) => ((base * (1.0 + p / 100.0)).round(), true),
+                            None => (base, false),
+                        }
+                    };
+                    let duration = scaled(f.duration / 10.0, &["#% increased Duration", "#% reduced Duration"]);
+                    flask_parts(
+                        scaled(f.life.max(f.mana), &["#% increased Amount Recovered", "#% reduced Amount Recovered"]),
+                        f.mana > 0.0,
+                        duration,
+                        duration,
+                        scaled(f.charges_per_use, &["#% increased Charges per use", "#% reduced Charges per use"]),
+                        scaled(f.charges_max, &["#% increased Charges", "#% reduced Charges"]),
+                    )
+                }).unwrap_or_default()
+            }
+            _ => vec![],
+        };
+        // Niveau requis de la base visée, sous les autres propriétés.
+        let mut build_flask = build_flask;
+        let build_base = unique_base.clone().or_else(|| card.as_ref().map(|b| b.base.clone())).unwrap_or_default();
+        if let Some(level) = self.augments.get().and_then(|c| c.req_levels.get(&build_base).copied()) {
+            build_flask.push(ui::req_level_parts(level, self.char_level()));
+        }
+        // Effet d'un charme pendant son utilisation (celui de la pièce est déjà dans ses mods).
+        let build_buffs: Vec<String> = self.coach.as_ref().and_then(|c| c.catalog().charm_buffs.get(&build_base).cloned()).unwrap_or_default();
+        // Comparaison côté recommandation : ce que vise le build, et si la pièce équipée l'a.
+        let good = ("✓", ui::SOCKET_GOOD);
+        let partial = ("~", ui::EMPTY_SOCKET);
+        let missing = ("✗", ui::SOCKET_WRONG);
+        // Défenses de la base visée face à celles de la pièce (sans les mods : un repère).
+        let build_def_mark = match (&item, card.as_ref().and_then(|b| b.base_defences).filter(|d| d.iter().any(|v| *v > 0.0))) {
+            (Some(it), Some(w)) => {
+                let have = ["Armour", "Evasion Rating", "Energy Shield"].map(|k| it.props.get(k).copied().unwrap_or(0.0));
+                Some(if w.iter().zip(have).any(|(w, h)| *w > 0.0 && h <= 0.0) {
+                    missing
+                } else if w.iter().zip(have).all(|(w, h)| h >= *w) {
+                    good
+                } else {
+                    partial
+                })
+            }
+            _ => None,
+        };
+        // Implicites visés présents sur la pièce (même ligne aux valeurs près ; une compétence,
+        // la même).
+        let worn_implicits: Vec<String> = worn.as_ref().map(|w| w.implicits.clone()).unwrap_or_default();
+        let build_impl_marks: Vec<Option<(&str, Color32)>> = build_impl
+            .iter()
+            .map(|l| {
+                worn.as_ref()?;
+                if let Some(skill) = l.strip_prefix("Compétence : ") {
+                    let same = worn_implicits.iter().any(|w| w.strip_prefix("Compétence : ").is_some_and(|n| n.contains(skill)));
+                    return Some(if same { good } else { missing });
+                }
+                let (tpl, want) = trade::template(l);
+                Some(match worn_implicits.iter().map(|w| trade::template(w)).find(|(t, _)| *t == tpl) {
+                    Some((_, have)) if have.unwrap_or(0.0) < want.unwrap_or(0.0) => partial,
+                    Some(_) => good,
+                    None => missing,
+                })
+            })
+            .collect();
+        // Runes conseillées posées sur la pièce (chacune ne compte qu'une fois).
+        let mut build_runes: Vec<ui::RuneLine> = match &worn_side {
+            Some(ws) => ws.runes.clone(),
+            None => card.as_ref().map(|b| b.runes.clone()).unwrap_or_default(),
+        };
+        if let (Some(w), None) = (&worn, &worn_side) {
+            let mut have: Vec<String> = w.runes.iter().map(|r| r.name.clone()).collect();
+            for r in &mut build_runes {
+                r.mark = Some(match have.iter().position(|h| *h == r.name) {
+                    Some(i) => {
+                        have.remove(i);
+                        good
+                    }
+                    None => missing,
+                });
+            }
+        }
+        // Mods visés : ✓ atteint, ~ en dessous, ✗ absent (sans pièce : tels quels).
+        let target_line = |have: &compare::Have| -> Option<(&'static str, Color32)> {
+            match have {
+                compare::Have::Full(_) => Some(good),
+                compare::Have::Partial(_) => Some(partial),
+                compare::Have::Missing => Some(missing),
+                compare::Have::Unknown => None,
+            }
+        };
+        // Largeur naturelle de chaque colonne : sa ligne la plus longue (en-tête, mods, runes, marché).
+        let (left_w, right_w) = {
+            let text_w = |t: &str, size: f32| ui.fonts(|f| f.layout_no_wrap(t.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x);
+            let (body, small) = (14.0, ui::HEADER_LINE_SIZE);
+            let lines_w = |ls: &[String], size: f32| ls.iter().map(|l| text_w(l, size)).fold(0.0_f32, f32::max);
+            let joined = |p: &ui::Parts| p.iter().map(|(t, _)| t.as_str()).collect::<String>();
+            let head_w = |title: &str, after: Option<&str>, def: &ui::Parts, props: &[ui::Parts], imp: &[String]| {
+                let t = text_w(title, 17.0) + after.map_or(0.0, |a| 8.0 + text_w(a, 13.5));
+                let props_w = props.iter().map(|p| text_w(&joined(p), small)).fold(0.0_f32, f32::max);
+                90.0 + t.max(text_w(&joined(def), small)).max(props_w).max(lines_w(imp, small))
+            };
+            let rune_w = |rs: &[ui::RuneLine]| rs.iter().map(|r| 26.0 + text_w(&format!("{}{}", r.name, r.rest), body)).fold(0.0_f32, f32::max);
+            let left = match &worn {
+                Some(w) => ui::worn_width(ui, w).max(text_w("CORRESPONDANCE AU BUILD", small)),
+                None => head_w("Pas suivie", Some("Ctrl+Alt+C sur ta pièce en jeu"), &vec![], &[], &[]),
+            };
+            let right = match (&worn_side, &card) {
+                (Some(ws), _) => {
+                    let lines: Vec<String> = ws.lines.iter().map(|(_, _, l)| format!("✗  {l}")).chain(ws.notes.iter().cloned()).collect();
+                    head_w(&ws.name, ws.after.as_deref(), &vec![], &ws.props, &ws.implicits).max(lines_w(&lines, body)).max(rune_w(&ws.runes)) + 14.0
+                }
+                (None, Some(b)) => {
+                    let title = unique.as_deref().unwrap_or(&b.base);
+                    let mut targets: Vec<String> = match &unique_text {
+                        Some(t) => t.mods.iter().map(|m| format!("✗  {m}")).collect(),
+                        None => b.lines.iter().map(|(l, _)| format!("✗  {l}")).collect(),
+                    };
+                    targets.extend(build_buffs.iter().cloned());
+                    let market = [price.as_ref().map(|(t, _)| text_w(t, 16.0)).unwrap_or(0.0), basis.as_deref().map_or(0.0, |t| text_w(t, small)), link.as_ref().map_or(0.0, |(_, t)| text_w(t, body) + 20.0)];
+                    head_w(title, unique.as_ref().and(unique_base.as_deref()), &build_def, &build_flask, &build_impl)
+                        .max(lines_w(&targets, body))
+                        .max(rune_w(&b.runes))
+                        .max(market.into_iter().fold(0.0_f32, f32::max))
+                }
+                (None, None) => text_w("Rien de recommandé", 17.0) + 90.0,
+            };
+            // Le titre (et sa croix) doit tenir sur la largeur des deux colonnes.
+            let min_total = text_w(&title, 17.0) + 40.0;
+            let (l, r) = (left.max(200.0) + 8.0, right.max(200.0) + 8.0);
+            let extra = (min_total - (l + r + 24.0)).max(0.0) / 2.0;
+            (l + extra, r + extra)
+        };
+        // Agrandissement : ce que permet la place, marges gardées (6 % de chaque côté, au moins
+        // 24 px), par pas de 0,05 pour ne pas osciller ; la hauteur gardée est celle à l'échelle 1.
+        let margin = (zone.width() * 0.06).max(MODAL_MARGIN);
+        let fit = ((zone.width() - 2.0 * margin - 68.0) / (left_w + right_w)).min((zone.height() - 2.0 * margin) / natural);
+        let k = ((fit * 20.0).floor() / 20.0).clamp(k_min, k_max);
+        let (left_w, right_w) = (left_w * k, right_w * k);
+        let natural = natural * k;
+        for font in ui.style_mut().text_styles.values_mut() {
+            font.size *= k;
+        }
+        ui.spacing_mut().item_spacing *= k;
+        // Colonnes + écart + marges + barre de défilement, réduites ensemble si la place manque.
+        let wanted = left_w + right_w + 24.0 + 32.0 + 12.0;
+        let width = wanted.min(zone.width() - 2.0 * MODAL_MARGIN);
+        let shrink = ((width - 24.0 - 32.0 - 12.0) / (left_w + right_w)).min(1.0);
+        let (left_w, right_w) = (left_w * shrink, right_w * shrink);
+        let panel = egui::Rect::from_center_size(zone.center(), Vec2::new(width, natural.min(zone.height() - 2.0 * MODAL_MARGIN)));
+        // Le panneau garde ses clics (sinon le fond les prendrait, ou les cases dessous).
+        ui.interact(panel, ui.id().with("slot_detail_panel"), egui::Sense::click());
+        let mod_color = Color32::from_rgb(136, 136, 255);
+        let dim = Color32::GRAY;
+        let mut close = false;
+        let mut content_h = 0.0;
+        let frame = egui::Frame::new().fill(Color32::from_rgb(12, 11, 10)).stroke(egui::Stroke::new(1.0_f32, ui::GOLD_DIM)).corner_radius(6);
+        let shown = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(panel), |ui| {
+            frame
+                .inner_margin(16)
+                .show(ui, |ui| {
+                    ui.set_width(width - 32.0);
+                    ui::gold_widgets(ui);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&title).color(ui::GOLD).size(17.0 * k).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| close = ui::text_button(ui, "✕").clicked());
+                    });
+                    // Trait doré sous le titre, comme sous les titres de section (Historique, Mapping…).
+                    ui.add_space(4.0);
+                    let (line, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
+                    ui.painter().hline(line.x_range(), line.center().y, egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.6)));
+                    // En-tête (titre, trait) au-dessus de la partie qui défile.
+                    let top = ui.cursor().top() - (panel.top() + 16.0);
+                    let out = egui::ScrollArea::vertical().max_height(panel.bottom() - 16.0 - ui.cursor().top()).auto_shrink([false, true]).show(ui, |ui| {
+                        egui::Grid::new("slot_detail_grid").num_columns(2).spacing([24.0, 5.0]).show(ui, |ui| {
+                            // Titres de colonne, qui fixent aussi la largeur de chaque colonne.
+                            let widths = [left_w, right_w];
+                            ui.allocate_ui_with_layout(Vec2::new(left_w, 0.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.set_min_width(left_w);
+                                ui.label(RichText::new(left_title).color(ui::GOLD_DIM).small().strong());
+                            });
+                            ui.allocate_ui_with_layout(Vec2::new(right_w, 0.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.set_min_width(right_w);
+                                ui.label(RichText::new(right_title).color(ui::GOLD_DIM).small().strong());
+                            });
+                            ui.end_row();
+                            // En tête de chaque colonne : l'image (case de même taille des deux côtés), et à
+                            // sa droite, alignés sur son haut, le nom, les défenses et les implicites.
+                            // En-tête commun à toute l'app : défenses et implicites en petit sous le titre.
+                            // Les deux en-têtes prennent la hauteur du plus haut, calés en haut (la grille
+                            // centrerait le plus court).
+                            let head_h_id = ui.id().with("detail_head_h");
+                            let head_h: f32 = ui.data(|d| d.get_temp(head_h_id)).unwrap_or(0.0);
+                            let mut tallest: f32 = 0.0;
+                            let mut cell = |ui: &mut egui::Ui, col_w: f32, add: &mut dyn FnMut(&mut egui::Ui) -> egui::Rect| {
+                                ui.allocate_ui_with_layout(Vec2::new(col_w, head_h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    ui.set_min_height(head_h);
+                                    // Un peu d'air sous le titre de la colonne.
+                                    ui.add_space(6.0);
+                                    tallest = tallest.max(add(ui).height() + 6.0);
+                                });
+                            };
+                            cell(ui, left_w, &mut |ui| match &worn {
+                                Some(w) => ui::worn_header_scaled(ui, "detail_worn", w, k),
+                                None => ui::item_header_scaled(ui, "detail_worn", None, "Pas suivie", dim, Some("Ctrl+Alt+C sur ta pièce en jeu"), vec![], None, k, false),
+                            });
+                            // Un rare n'a pas de nom fixe : son type de base en tient lieu.
+                            let build_tex = card.as_ref().and_then(|b| b.image.as_ref());
+                            let mut build_props: Vec<ui::Parts> = Vec::new();
+                            let mut build_prop_marks = Vec::new();
+                            if !build_def.is_empty() {
+                                build_props.push(build_def.clone());
+                                build_prop_marks.push(build_def_mark);
+                            }
+                            build_props.extend(build_flask.iter().cloned());
+                            let build_lines = ui::header_lines_scaled(&build_props, &build_prop_marks, &build_impl, &build_impl_marks, k);
+                            cell(ui, right_w, &mut |ui| match (&worn_side, &unique, &card) {
+                                (Some(ws), _, _) => {
+                                    let lines = ui::header_lines_full(&ws.weapon, &ws.props, &ws.prop_marks, &ws.implicits, &ws.implicit_marks, k);
+                                    ui::item_header_scaled(ui, "detail_build", ws.image.as_ref(), &ws.name, ws.name_color, ws.after.as_deref(), lines, None, k, false)
+                                }
+                                (None, Some(u), _) => ui::item_header_scaled(ui, "detail_build", build_tex, u, ui::rarity_color(item::Rarity::Unique), unique_base.as_deref(), build_lines.clone(), None, k, false),
+                                (None, None, Some(b)) if !b.base.is_empty() => {
+                                    ui::item_header_scaled(ui, "detail_build", build_tex, &b.base, ui::rarity_color(rec_rarity), None, build_lines.clone(), None, k, false)
+                                }
+                                _ => ui::item_header_scaled(ui, "detail_build", build_tex, "Rien de recommandé", dim, None, vec![], None, k, false),
+                            });
+                            if (tallest - head_h).abs() > 0.5 {
+                                ui.data_mut(|d| d.insert_temp(head_h_id, tallest));
+                                ui.ctx().request_repaint();
+                            }
+                            ui.end_row();
+                            for w in widths {
+                                ui.add_sized([w, 6.0], egui::Separator::default().horizontal());
+                            }
+                            ui.end_row();
+                            // Mods : ceux de la pièce comparés au build (✓ ~ • ✗), ceux que vise le build.
+                            ui.vertical(|ui| {
+                                if let Some(w) = &worn {
+                                    ui::worn_mods(ui, w);
+                                }
+                            });
+                            ui.vertical(|ui| {
+                                // Face à la pièce portée : les écarts si on la remplace.
+                                if let Some(ws) = &worn_side {
+                                    let font = egui::TextStyle::Body.resolve(ui.style());
+                                    for (mark, color, text) in &ws.lines {
+                                        let mut job = egui::text::LayoutJob::default();
+                                        if let Some((m, c)) = mark {
+                                            job.append(&format!("{m}  "), 0.0, egui::TextFormat::simple(font.clone(), *c));
+                                        }
+                                        job.append(text, 0.0, egui::TextFormat::simple(font.clone(), *color));
+                                        ui.label(job);
+                                    }
+                                    for n in &ws.notes {
+                                        ui.label(RichText::new(n).color(dim).italics());
+                                    }
+                                    return;
+                                }
+                                // Effet du charme, puis les mods : ceux de l'unique tels quels (plages
+                                // de valeurs du jeu), sinon ceux que vise le build.
+                                for l in &build_buffs {
+                                    ui.label(RichText::new(l).color(mod_color));
+                                }
+                                match (&unique_text, &card) {
+                                    // Unique : ses mods (plages du jeu), comparés à la pièce portée.
+                                    (Some(t), _) => {
+                                        let parts = item.as_ref().map(|it| unique_matches(it, &t.mods));
+                                        let font = egui::TextStyle::Body.resolve(ui.style());
+                                        for (i, m) in t.mods.iter().enumerate() {
+                                            let mut job = egui::text::LayoutJob::default();
+                                            match parts.as_ref().and_then(|p| p.get(i)) {
+                                                Some(&part) => {
+                                                    let (mark, color) = match_mark(part);
+                                                    job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), color));
+                                                    job.append(m, 0.0, egui::TextFormat::simple(font.clone(), color));
+                                                }
+                                                None => job.append(m, 0.0, egui::TextFormat::simple(font.clone(), mod_color)),
+                                            }
+                                            ui.label(job);
+                                        }
+                                    }
+                                    (None, Some(b)) => {
+                                        let font = egui::TextStyle::Body.resolve(ui.style());
+                                        for (l, have) in &b.lines {
+                                            let mut job = egui::text::LayoutJob::default();
+                                            match target_line(have) {
+                                                Some((mark, color)) => {
+                                                    job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), color));
+                                                    job.append(l, 0.0, egui::TextFormat::simple(font.clone(), color));
+                                                }
+                                                None => job.append(l, 0.0, egui::TextFormat::simple(font.clone(), mod_color)),
+                                            }
+                                            ui.label(job);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            });
+                            ui.end_row();
+                            // Runes posées, runes conseillées.
+                            let worn_has = worn.as_ref().is_some_and(|w| !w.runes.is_empty() || w.empty_sockets > 0);
+                            if worn_has || !build_runes.is_empty() {
+                                ui.vertical(|ui| {
+                                    if let Some(w) = &worn {
+                                        ui::worn_runes(ui, w, left_w);
+                                    }
+                                });
+                                ui.vertical(|ui| {
+                                    if !build_runes.is_empty() {
+                                        ui::rune_divider(ui, right_w);
+                                    }
+                                    ui::rune_lines(ui, &build_runes);
+                                });
+                                ui.end_row();
+                            }
+                            // Bas des colonnes (score, marché) : son trait seulement s'il a un contenu,
+                            // la rangée entière seulement si l'une des deux en a un.
+                            let left_score = worn.as_ref().and_then(|w| w.score);
+                            let right_has = match &worn_side {
+                                Some(ws) => ws.score.is_some(),
+                                None => price.is_some() || basis.is_some() || link.is_some(),
+                            };
+                            if left_score.is_none() && !right_has {
+                                return;
+                            }
+                            for (w, has) in widths.into_iter().zip([left_score.is_some(), right_has]) {
+                                if has {
+                                    ui.add_sized([w, 6.0], egui::Separator::default().horizontal());
+                                } else {
+                                    ui.allocate_exact_size(Vec2::new(w, 6.0), egui::Sense::hover());
+                                }
+                            }
+                            ui.end_row();
+                            // Correspondance de la pièce au build, en face du prix de la recommandation.
+                            ui.vertical(|ui| {
+                                if let Some(score) = worn.as_ref().and_then(|w| w.score) {
+                                    ui::score_block(ui, score);
+                                }
+                            });
+                            ui.vertical(|ui| {
+                                // Face à la pièce portée : son score, en face de celui de la pièce de gauche.
+                                if let Some(ws) = &worn_side {
+                                    if let Some(score) = ws.score {
+                                        ui::score_block(ui, score);
+                                    }
+                                    return;
+                                }
+                                if !right_has {
+                                    return;
+                                }
+                                ui.label(RichText::new("AU MARCHÉ").color(ui::GOLD_DIM).small().strong());
+                                if let Some((text, color)) = &price {
+                                    ui.horizontal(|ui| {
+                                        if pending {
+                                            ui.add(egui::Spinner::new().color(ui::GOLD));
+                                        }
+                                        ui.label(RichText::new(text).color(*color).size(16.0 * k).strong());
+                                    });
+                                }
+                                if let Some(b) = &basis {
+                                    ui.label(RichText::new(b).color(dim).small());
+                                }
+                                if let Some((url, text)) = &link {
+                                    ui.add_space(2.0);
+                                    ui.hyperlink_to(*text, url);
+                                }
+                            });
+                            ui.end_row();
+                        });
+                    });
+                    // Un peu de marge : sans elle, un arrondi fait apparaître la barre de défilement.
+                    content_h = top + out.content_size.y + 34.0;
+                });
+        });
+        let _ = shown;
+        if (content_h - natural).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(height_id, content_h / k));
+            ui.ctx().request_repaint();
+        }
+        if close || backdrop.clicked() {
+            self.slot_detail = None;
+        }
+    }
+
+    /// Niveau du personnage suivi (100 sans personnage : rien n'est jugé trop haut).
+    fn char_level(&self) -> u32 {
+        self.coach.as_ref().and_then(|c| c.character().map(|(_, ch)| ch.level)).unwrap_or(100)
+    }
+
+    /// Colonne « actuellement équipé » d'une pièce : en-tête (image, titre, propriétés, implicites),
+    /// mods comparés à ce que vise le build, runes. La même dans le détail et au survol de la case.
+    fn worn_view(&mut self, slot: Slot, it: &Item, card: Option<&ui::BuildCard>) -> ui::WornView {
+        let keys = ["Armour", "Evasion Rating", "Energy Shield"];
+        let mut props = Vec::new();
+        let def = defence_parts(keys.map(|k| it.props.get(k).copied().unwrap_or(0.0)), keys.map(|k| it.props.contains_key(&format!("{k}_aug"))));
+        if !def.is_empty() {
+            props.push(def);
+        }
+        // Arme d'attaque : ses dégâts par seconde, avec la base (ils suivent les lignes d'arme quand
+        // elles sont là).
+        if let Some(d) = compare::weapon_dps(it).filter(|_| weapon_lines(it).is_empty()) {
+            props.push(dps_parts(&d));
+        }
+        let p = |k: &str| (it.props.get(k).copied().unwrap_or(0.0), it.props.contains_key(&format!("{k}_aug")));
+        props.extend(flask_parts(p("recover"), p("recover_mana").0 > 0.0, p("recover_time"), p("duration"), p("charges_use"), p("charges_max")));
+        if it.req_level > 0 {
+            props.push(ui::req_level_parts(it.req_level, self.char_level()));
+        }
+        // Implicites et compétences données par la pièce.
+        let implicits: Vec<String> = it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m.clone())
+            .chain(it.granted_skills.iter().map(|s| format!("Compétence : {s}")))
+            .collect();
+        // Mods de la pièce telle qu'elle est (la comparaison est côté recommandation) : en blanc
+        // ceux que le build vise, en gris les autres.
+        let targets: Vec<String> = card.map(|b| b.lines.iter().map(|(l, _)| trade::template(l).0).collect()).unwrap_or_default();
+        let mods = it
+            .mods
+            .iter()
+            .zip(&it.mod_kinds)
+            .filter(|(_, k)| matches!(k, item::ModKind::Explicit | item::ModKind::Enchant))
+            .map(|(m, _)| {
+                let wanted = targets.is_empty() || targets.contains(&trade::template(m).0);
+                ("", if wanted { Color32::from_gray(225) } else { Color32::from_gray(120) }, m.clone())
+            })
+            .collect();
+        // Châsses vides : à remplir ; si le build n'y conseille rien, les augments qui collent à ses
+        // objectifs.
+        let empty_sockets = self.socketed(it).map_or(0, |s| s.empty());
+        let tips = if empty_sockets > 0 && self.recommended_runes(slot).is_empty() { self.socket_tips(it, slot) } else { vec![] };
+        let suggestions = tips.into_iter().map(|(name, rest)| self.rune_line(name, rest, Some(&it.item_class))).collect();
+        // Runes posées, sans prix : on ne peut pas les retirer de la pièce.
+        let mut runes = self.socketed(it).map(|s| self.rune_list(&s.augments, Some(&it.item_class))).unwrap_or_default();
+        for r in &mut runes {
+            r.rest.clear();
+        }
+        // Correspondance au build : moyenne de ce qu'il vise ici, chaque élément à sa part de la
+        // valeur visée (absent 0) : mods, implicites de la base (une compétence : la même ou
+        // non), runes conseillées (posée ou non). Ce qui dépasse la valeur visée ne compte qu'une
+        // fois tout atteint (le score passe alors 100 %, chaque élément plafonné à 200 %). Un
+        // unique visé : ses mods, au moins le minimum de chaque plage.
+        let ratio = |have: f64, want: Option<f64>| want.filter(|w| *w > 0.0).map_or(1.0, |w| (have / w).clamp(0.0, 2.0));
+        let score = match card {
+            // Unique visé : ses mods face à ceux de la pièce (au moins le minimum de chaque plage).
+            Some(b) if b.unique.is_some() => {
+                let mods = b.unique.as_ref().and_then(|u| self.coach.as_ref()?.catalog().uniques.get(u).map(|t| t.mods.clone())).unwrap_or_default();
+                let parts = unique_matches(it, &mods);
+                if parts.is_empty() {
+                    Some(if b.unique.as_deref() == Some(it.name.as_str()) { 100 } else { 0 })
+                } else {
+                    let capped = parts.iter().map(|p| p.min(1.0)).sum::<f64>() / parts.len() as f64;
+                    let full = parts.iter().sum::<f64>() / parts.len() as f64;
+                    Some((100.0 * if capped >= 0.999 { full } else { capped }).round() as u32)
+                }
+            }
+            Some(b) => {
+                let mut parts: Vec<f64> = b
+                    .lines
+                    .iter()
+                    .map(|(l, have)| {
+                        let want = trade::template(l).1;
+                        match have {
+                            compare::Have::Full(v) => ratio(*v, want).max(1.0),
+                            compare::Have::Partial(v) => ratio(*v, want).min(1.0),
+                            _ => 0.0,
+                        }
+                    })
+                    .collect();
+                for want in &b.implicits {
+                    parts.push(if let Some(skill) = want.strip_prefix("Compétence : ") {
+                        if implicits.iter().any(|h| h.strip_prefix("Compétence : ").is_some_and(|n| n.contains(skill))) { 1.0 } else { 0.0 }
+                    } else {
+                        let (tpl, w) = trade::template(want);
+                        implicits.iter().map(|h| trade::template(h)).find(|(t, _)| *t == tpl).map_or(0.0, |(_, h)| ratio(h.unwrap_or(0.0), w))
+                    });
+                }
+                let mut posed: Vec<&str> = runes.iter().map(|r| r.name.as_str()).collect();
+                for r in &b.runes {
+                    parts.push(match posed.iter().position(|p| *p == r.name) {
+                        Some(i) => {
+                            posed.remove(i);
+                            1.0
+                        }
+                        None => 0.0,
+                    });
+                }
+                (!parts.is_empty()).then(|| {
+                    let mean = |v: &mut dyn Iterator<Item = f64>| v.sum::<f64>() / parts.len() as f64;
+                    let capped = mean(&mut parts.iter().map(|p| p.min(1.0)));
+                    let score = if capped >= 0.999 { mean(&mut parts.iter().copied()) } else { capped };
+                    (100.0 * score).round() as u32
+                })
+            }
+            None => None,
+        };
+        let (title, after) = ui::item_title(it);
+        ui::WornView {
+            weapon: weapon_lines(it),
+            score,
+            empty_sockets,
+            suggestions,
+            image: self.assets.texture(it),
+            title: title.to_string(),
+            after: after.map(String::from),
+            color: ui::rarity_color(it.rarity),
+            props,
+            implicits,
+            mods,
+            runes,
+        }
+    }
+
+    /// Fiche d'un unique attendu, au format de celle d'une pièce portée : image, nom et base,
+    /// défenses et niveau requis de la base, implicites et mods (texte PoB, plages du jeu).
+    fn unique_view(&mut self, name: &str) -> ui::WornView {
+        let text = self.coach.as_ref().and_then(|c| c.catalog().uniques.get(name).cloned()).unwrap_or_default();
+        let catalog = self.augments.get();
+        let mut props = Vec::new();
+        if let Some(d) = catalog.as_ref().and_then(|c| c.defences.get(&text.base).copied()) {
+            let def = defence_parts(d, [false; 3]);
+            if !def.is_empty() {
+                props.push(def);
+            }
+        }
+        if let Some(level) = catalog.as_ref().and_then(|c| c.req_levels.get(&text.base).copied()) {
+            props.push(ui::req_level_parts(level, self.char_level()));
+        }
+        ui::WornView {
+            weapon: vec![],
+            image: self.assets.texture_unique(name),
+            title: name.to_string(),
+            after: Some(text.base.clone()).filter(|b| !b.is_empty()),
+            color: ui::rarity_color(item::Rarity::Unique),
+            props,
+            implicits: text.implicits.clone(),
+            // Effet du charme pendant son utilisation, puis les mods.
+            mods: self
+                .coach
+                .as_ref()
+                .and_then(|c| c.catalog().charm_buffs.get(&text.base).cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .chain(text.mods.iter().cloned())
+                .map(|m| ("", Color32::from_gray(225), m))
+                .collect(),
+            runes: vec![],
+            empty_sockets: 0,
+            score: None,
+            suggestions: vec![],
+        }
     }
 
     /// Unique que le build recommande sur `slot` à cette étape (une fiole de mana est rangée par
@@ -870,7 +1691,12 @@ impl App {
     fn recommended_unique(&self, step: &guide::Step, slot: Slot) -> Option<String> {
         let prices = self.prices.data.lock().unwrap();
         let base = |n: &str| prices.as_ref()?.unique_by_name(n).map(|(b, _, _)| b.to_string());
-        step.uniques.iter().find(|w| uniques::slot(w.slot, base(&w.name).as_deref()) == Some(slot)).map(|w| w.name.clone())
+        // Les charmes sont tous rangés en Charm1 : leur place dans la rangée dit la case.
+        let lands = |w: &guide::Wanted| match uniques::slot(w.slot, base(&w.name).as_deref()) {
+            Some(Slot::Charm1) => gear::CHARMS.get(w.position).copied() == Some(slot),
+            s => s == Some(slot),
+        };
+        step.uniques.iter().find(|w| lands(w)).map(|w| w.name.clone())
     }
 
     /// Pièce recommandée sur une case vide, en noir et blanc : l'unique, sinon le type de base.
@@ -879,7 +1705,7 @@ impl App {
         if let Some(name) = self.recommended_unique(&step, slot) {
             return self.assets.texture_unique_gray(&name);
         }
-        let base = step.targets.iter().find(|(s, _, _)| *s == slot).map(|(_, b, _)| b.clone()).filter(|b| !b.is_empty())?;
+        let base = Some(step.base_for(slot).to_string()).filter(|b| !b.is_empty())?;
         self.assets.texture_by_name_gray(&base)
     }
 
@@ -905,16 +1731,33 @@ impl App {
             })
             .collect();
         let ghosts = missing.iter().take(s.empty()).map(|n| self.assets.texture_by_name_gray(n)).collect();
-        let suggestions = if s.empty() > 0 && wanted.is_empty() { self.socket_tips(it, slot) } else { vec![] };
-        Some(ui::SocketView { filled, empty: s.empty(), unknown: s.unknown, ghosts, suggestions })
+        let tips = s.augments.iter().map(|n| self.rune_line(n.clone(), String::new(), Some(&it.item_class))).collect();
+        Some(ui::SocketView { filled, empty: s.empty(), unknown: s.unknown, ghosts, tips })
     }
 
     fn compare(&self, it: &Item) -> Option<compare::Comparison> {
+        self.compare_at(it, None)
+    }
+
+    /// `compare`, face à un emplacement choisi pour un anneau ou un charme.
+    fn compare_at(&self, it: &Item, at: Option<Slot>) -> Option<compare::Comparison> {
         let basis = self.basis();
         let catalog = self.augments.get();
         let base = self.assets.index.lock().unwrap().as_ref().and_then(|i| i.base_of(it)).unwrap_or_else(|| it.base.clone());
         let item_base = catalog.as_ref().and_then(|c| c.base(&base));
-        compare::compare(it, &self.gear, basis.as_ref().map(|(n, s)| (n.as_str(), s)), item_base, &|n| catalog.as_ref()?.base(n))
+        compare::compare_at(it, &self.gear, basis.as_ref().map(|(n, s)| (n.as_str(), s)), item_base, &|n| catalog.as_ref()?.base(n), at)
+    }
+
+    /// Emplacements où peut aller un anneau (les deux), un charme (ceux ouverts) ou une arme (ses
+    /// deux sets) ; vide pour le reste.
+    fn multi_slots(&self, it: &Item) -> Vec<Slot> {
+        match gear::kind_of(&it.item_class) {
+            Some(gear::Kind::TwoHanded | gear::Kind::Single(Slot::Weapon)) => vec![Slot::Weapon, Slot::Weapon2],
+            Some(gear::Kind::Single(Slot::Offhand)) => vec![Slot::Offhand, Slot::Offhand2],
+            Some(gear::Kind::Ring) => gear::RINGS.to_vec(),
+            Some(gear::Kind::Charm) => gear::CHARMS[..self.gear.charm_slots().unwrap_or(gear::CHARMS.len()).max(1)].to_vec(),
+            _ => Vec::new(),
+        }
     }
 
     /// Active un build et recharge ses étapes dans le guide.
@@ -1550,6 +2393,8 @@ impl App {
                         self.add_build.link_for = None;
                         self.build_runes = None;
                         self.build_quests = None;
+                        self.build_rarities = None;
+                        self.build_jewels = None;
                         // Build en cours d'utilisation : ses nouvelles étapes tout de suite.
                         if self.builds.active().is_some_and(|b| b.id == id) {
                             let files = self.builds.files(&id);
@@ -1777,6 +2622,8 @@ impl App {
     }
 
     fn on_copy(&mut self, ev: CopyEvent) {
+        // Une copie en jeu affiche son résultat dans les panneaux : on quitte le plein écran.
+        self.full_view = false;
         // Waystone : noté pour la prochaine map (onglet Maps), pas diagnostiqué.
         if let Some(w) = mapping::Waystone::parse(&ev.text) {
             let title = format!("Waystone T{} « {} »", w.tier, w.name);
@@ -1885,18 +2732,26 @@ impl App {
     fn listing_cards(&mut self, ui: &mut egui::Ui, it: &Item, listings: &[trade::Listing], score: f64, shares: Option<Vec<f64>>) {
         let mine: Vec<(String, Option<f64>)> = it.mods.iter().map(|m| trade::template(m)).collect();
         let (green, red, gray) = (Color32::from_rgb(110, 200, 110), Color32::from_rgb(220, 95, 85), Color32::from_gray(140));
+        let my_dps = weapon_total_dps(it);
+        // Écart d'une valeur de l'annonce face à celle de l'objet : « +5,5 », « −1 », et sa couleur.
+        let diff = |d: f64| {
+            let n = if (d - d.round()).abs() < 0.05 { format!("{}", d.abs().round()) } else { format!("{:.1}", d.abs()).replace('.', ",") };
+            (format!("{}{n}", if d > 0.0 { "+" } else { "−" }), if d > 0.0 { green } else { red })
+        };
+        // Chaque annonce en objet : ses lignes d'arme (DPS compris), défenses et implicites.
+        let as_items: Vec<Option<Item>> = listings.iter().map(|l| l.as_item(&it.item_class)).collect();
         let note = |v: f64| format!("{v:.1}").replace('.', ",");
         ui.add_space(4.0);
         // Les proches d'abord, puis les autres ; chaque groupe du moins cher au plus cher, avec leur
         // part dans le prix et leur image (chargée à la demande).
-        let ordered: Vec<(&trade::Listing, Option<f64>)> = listings
+        let ordered: Vec<(&trade::Listing, Option<f64>, Option<Item>)> = listings
             .iter()
             .enumerate()
             .filter(|(_, l)| l.kept)
             .chain(listings.iter().enumerate().filter(|(_, l)| !l.kept))
-            .map(|(i, l)| (l, shares.as_ref().and_then(|s| s.get(i).copied())))
+            .map(|(i, l)| (l, shares.as_ref().and_then(|s| s.get(i).copied()), as_items[i].clone()))
             .collect();
-        let images: Vec<Option<egui::TextureHandle>> = ordered.iter().map(|(l, _)| (!l.icon.is_empty()).then(|| self.assets.texture_url(l.icon.clone())).flatten()).collect();
+        let images: Vec<Option<egui::TextureHandle>> = ordered.iter().map(|(l, _, _)| (!l.icon.is_empty()).then(|| self.assets.texture_url(l.icon.clone())).flatten()).collect();
         // Autant de colonnes que la largeur tient de cartes d'au moins 280 px ; les cartes prennent
         // toute la largeur (une colonne : toute la colonne).
         const CARD_MIN: f32 = 280.0;
@@ -1905,7 +2760,7 @@ impl App {
         let width = ui.available_width();
         let columns = (((width + gap) / (CARD_MIN + PAD + gap)).floor() as usize).max(1);
         let card_w = ((width - gap * (columns - 1) as f32) / columns as f32 - PAD).max(120.0);
-        let card = |ui: &mut egui::Ui, l: &trade::Listing, share: Option<f64>, image: Option<&egui::TextureHandle>| {
+        let card = |ui: &mut egui::Ui, l: &trade::Listing, share: Option<f64>, image: Option<&egui::TextureHandle>, li: Option<&Item>| {
             // Annonce éloignée : toute la carte en retrait.
             let fade = if l.kept || score == 0.0 { 1.0 } else { 0.45 };
             let c = |color: Color32| color.gamma_multiply(fade);
@@ -1947,9 +2802,7 @@ impl App {
                                     ui.label(RichText::new(&l.name).color(c(ui::rarity_color(rarity))).size(15.0).strong());
                                 }
                                 ui.label(RichText::new(&l.base).color(c(ui::rarity_color(rarity))).size(14.0));
-                                let mut info = vec![format!("niv. {}", l.item_level)];
-                                info.extend(defences.iter().cloned());
-                                ui.label(RichText::new(info.join(" · ")).color(c(Color32::GRAY)).size(13.0));
+                                ui.label(RichText::new(format!("niv. {}", l.item_level)).color(c(Color32::GRAY)).size(13.0));
                             });
                             ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                                 ui.spacing_mut().item_spacing.y = 1.0;
@@ -1978,6 +2831,42 @@ impl App {
                             ui.label(format!("En vente depuis : {}", age.trim_start_matches("il y a ")));
                         }
                     });
+                    // Lignes d'arme (DPS et écart face à l'objet), défenses, implicites (écart) : comme
+                    // l'en-tête d'une pièce.
+                    let mut lines: Vec<Vec<(String, Color32)>> = li.map(weapon_lines).unwrap_or_default();
+                    if let (Some(mine_dps), Some(theirs)) = (my_dps, li.and_then(weapon_total_dps)) {
+                        if let Some(line) = lines.iter_mut().find(|l| l.first().is_some_and(|(t, _)| t.starts_with("Attaques par seconde"))) {
+                            if (theirs - mine_dps).abs() >= 0.5 {
+                                let (t, col) = diff(theirs - mine_dps);
+                                line.push((format!("  {t}"), col));
+                            }
+                        }
+                    }
+                    let def: Vec<String> = ["Armure", "Évasion", "Bouclier d'énergie"].iter().zip(l.defences).filter(|(_, v)| *v > 0.0).map(|(n, v)| format!("{n} {v:.0}")).collect();
+                    if !def.is_empty() {
+                        lines.push(vec![(def.join(" · "), Color32::GRAY)]);
+                    }
+                    let mut seen = Vec::new();
+                    for m in &l.implicits {
+                        let (t, v) = trade::template(m);
+                        let mut line = vec![(m.clone(), ui::MOD_COLOR)];
+                        if let Some((_, mv)) = mine.iter().find(|(mt, _)| *mt == t) {
+                            seen.push(t.clone());
+                            if let (Some(a), Some(b)) = (v, mv) {
+                                if (a - b).abs() >= 0.05 {
+                                    let (d, col) = diff(a - b);
+                                    line.push((format!("  ({d})"), col));
+                                }
+                            }
+                        }
+                        lines.push(line);
+                    }
+                    if !lines.is_empty() {
+                        ui.add_space(4.0);
+                        for line in ui::header_lines_full(&lines.iter().map(|l| l.iter().map(|(t, col)| (t.clone(), c(*col))).collect()).collect::<Vec<_>>(), &[], &[], &[], &[], 1.0) {
+                            ui.label(line);
+                        }
+                    }
                     // Note et part dans le prix, sur une ligne, entre deux traits discrets.
                     let rule = |ui: &mut egui::Ui| {
                         ui.add_space(3.0);
@@ -2002,8 +2891,7 @@ impl App {
                     } else {
                         ui.add_space(4.0);
                     }
-                    let mut seen = Vec::new();
-                    for m in &l.mods {
+                    for m in l.mods.iter().filter(|m| !l.implicits.contains(m)) {
                         let (t, v) = trade::template(m);
                         let mut text = m.clone();
                         let color = match mine.iter().find(|(mt, _)| *mt == t) {
@@ -2011,10 +2899,9 @@ impl App {
                                 seen.push(t.clone());
                                 match (v, mv) {
                                     (Some(a), Some(b)) if (a - b).abs() >= 0.05 => {
-                                        let d = a - b;
-                                        let d_text = if (d - d.round()).abs() < 0.05 { format!("{}", d.round()) } else { format!("{d:.1}") };
-                                        text = format!("{m}  ({}{d_text})", if d > 0.0 { "+" } else { "" });
-                                        if d > 0.0 { green } else { red }
+                                        let (d, col) = diff(a - b);
+                                        text = format!("{m}  ({d})");
+                                        col
                                     }
                                     _ => Color32::from_gray(210),
                                 }
@@ -2033,8 +2920,8 @@ impl App {
             });
         };
         egui::Grid::new("listings_grid").num_columns(columns).spacing([gap, gap]).show(ui, |ui| {
-            for (i, ((l, share), image)) in ordered.iter().zip(&images).enumerate() {
-                card(ui, l, *share, image.as_ref());
+            for (i, ((l, share, li), image)) in ordered.iter().zip(&images).enumerate() {
+                card(ui, l, *share, image.as_ref(), li.as_ref());
                 if i % columns == columns - 1 {
                     ui.end_row();
                 }
@@ -2137,7 +3024,6 @@ impl App {
             let map_secs: i64 = maps.iter().map(|r| secs(r)).sum();
             let deaths: u32 = sitting.iter().map(|r| r.deaths).sum();
             let returns: u32 = sitting.iter().map(|r| r.returns()).sum();
-            let group = maps.iter().filter(|r| r.group).count();
             ui.add_space(12.0);
             ui.add(egui::Separator::default().spacing(0.0));
             ui.add_space(12.0);
@@ -2148,11 +3034,7 @@ impl App {
             });
             ui.add_space(6.0);
             let mut rows: Vec<(&str, String)> = Vec::new();
-            let mut count = plural(maps.len() as u32, "map");
-            if group > 0 {
-                count.push_str(&format!(" · {} solo, {} en groupe", maps.len() - group, group));
-            }
-            rows.push(("Maps", count));
+            rows.push(("Maps", plural(maps.len() as u32, "map")));
             if bosses > 0 {
                 rows.push(("Boss", plural(bosses as u32, "arène")));
             }
@@ -2184,11 +3066,43 @@ impl App {
         }
     }
 
+    /// Petite modale de choix d'une récompense modifiable de la route : les options, celle du
+    /// build marquée ★ ; un clic l'enregistre et ferme.
+    fn route_pick_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.route_pick.clone() else { return };
+        let quest_choices = self.quest_choices();
+        let Some(c) = &mut self.coach else { return };
+        let Some(r) = c.route.iter().find(|r| r.id == id).cloned() else { return };
+        let current = c.character().and_then(|(_, ch)| ch.picks.get(&id)).and_then(|g| g.first()).cloned();
+        let build: Vec<String> = route::build_choices(&r, &quest_choices).iter().map(|p| p.reward.clone()).collect();
+        let mut pick = None;
+        let (_, close) = ui::modal(ctx, "route_pick", &r.what, true, 360.0, |ui| {
+            ui.label(RichText::new("Ton choix (modifiable en jeu en retournant sur place)").color(Color32::GRAY).small());
+            ui.add_space(4.0);
+            for (short, full) in route::modifiable_options(&id) {
+                let star = if build.iter().any(|b| b.eq_ignore_ascii_case(full)) { "★ " } else { "" };
+                let selected = current.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(full));
+                let text = RichText::new(format!("{star}{full}")).color(if selected { Color32::from_rgb(136, 136, 255) } else { Color32::LIGHT_GRAY });
+                if ui.selectable_label(selected, text).on_hover_text(*short).clicked() {
+                    pick = Some(full.to_string());
+                }
+            }
+        });
+        if let Some(text) = pick {
+            c.set_pick(&id, &text);
+            self.route_pick = None;
+        } else if close {
+            self.route_pick = None;
+        }
+    }
+
     /// Contenus facultatifs à ne pas rater (route de leveling), cochés tout seuls via le log.
     fn route_panel(&mut self, ui: &mut egui::Ui, has_maps: bool) {
         let quest_choices = self.quest_choices();
         let mut to_maps = false;
         let Some(c) = &mut self.coach else { return };
+        // Ce que le joueur a pris pour les récompenses au choix (lu dans le journal).
+        let player_picks = c.character().map(|(_, ch)| ch.picks.clone()).unwrap_or_default();
         let (act, items) = c.reminders();
         let label = match act {
             0 => "ROUTE DE LEVELING".to_string(),
@@ -2202,6 +3116,7 @@ impl App {
             }
         });
         let mut toggle: Option<String> = None;
+        let mut open_pick: Option<String> = None;
         let out = egui::ScrollArea::vertical().id_salt("route").auto_shrink([false, false]).show(ui, |ui| {
             if items.is_empty() {
                 let empty = match act {
@@ -2264,7 +3179,24 @@ impl App {
                         let when = if r.act == 5 { "interludes".to_string() } else { format!("acte {}", r.act) };
                         ui.label(RichText::new(when).color(Color32::from_rgb(200, 150, 100)).small().italics());
                     }
-                    let label = ui.add(egui::Label::new(reward).truncate());
+                    // Récompense modifiable : libellé court au bout de la ligne (orange tant que le
+                    // choix n'est pas connu), un clic ouvre le choix.
+                    let options = route::modifiable_options(&r.id);
+                    let with_pick = done && !options.is_empty();
+                    let short = player_picks.get(&r.id).and_then(|g| g.first()).map(|p| options.iter().find(|(_, full)| full.eq_ignore_ascii_case(p)).map_or(p.as_str(), |(s, _)| *s));
+                    let tag = match short {
+                        Some(s) => RichText::new(s).color(Color32::from_rgb(136, 136, 255)).small(),
+                        None => RichText::new("à préciser").color(ui::EMPTY_SOCKET).small(),
+                    };
+                    let tag_w = if with_pick { ui.fonts(|f| f.layout_no_wrap(tag.text().to_string(), egui::TextStyle::Small.resolve(ui.style()), Color32::WHITE).size().x) + 12.0 } else { 0.0 };
+                    let text_w = ui.available_width() - tag_w;
+                    let label = ui.allocate_ui(Vec2::new(text_w.max(40.0), ui.spacing().interact_size.y), |ui| ui.add(egui::Label::new(reward).truncate())).inner;
+                    if with_pick {
+                        let tag = ui.add(egui::Label::new(tag).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Changer ce choix");
+                        if tag.clicked() {
+                            open_pick = Some(r.id.clone());
+                        }
+                    }
                     (check, label)
                 });
                 // Fiche au survol, en blocs : la récompense, comment l'obtenir, où, le choix du build.
@@ -2283,6 +3215,14 @@ impl App {
                     if behind && !done {
                         let when = if r.act == 5 { "Oubliée aux interludes".to_string() } else { format!("Oubliée à l'acte {}", r.act) };
                         ui.label(RichText::new(when).color(Color32::from_rgb(200, 150, 100)).small().italics());
+                    }
+                    // Ce que le joueur a pris (lu dans le journal du jeu).
+                    if let Some(got) = player_picks.get(&r.id).filter(|g| !g.is_empty()) {
+                        ui.separator();
+                        ui.label(RichText::new("TON CHOIX").color(ui::GOLD_DIM).small().strong());
+                        for g in got {
+                            ui.label(RichText::new(g).color(Color32::from_rgb(110, 210, 110)));
+                        }
                     }
                     if !picks.is_empty() {
                         ui.separator();
@@ -2307,6 +3247,9 @@ impl App {
         ui::fade_scroll_on(ui, &out, false, ui::CARD_FILL);
         if let Some(id) = toggle {
             c.toggle_done(&id);
+        }
+        if let Some(id) = open_pick {
+            self.route_pick = Some(id);
         }
         if to_maps {
             self.bottom_maps = Some(true);
@@ -2380,7 +3323,44 @@ impl App {
         } else {
             self.build_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         }
+        if matches!(self.tab, views::Tab::Passives | views::Tab::Atlas) {
+            self.full_view_button(ui, ui::place(area, scale, ui::VIEW_AREA));
+        }
+        // Détail d'une case : sur l'équipement ; ceux du diagnostic, sur n'importe quel onglet.
+        // Détail d'une case : sur l'équipement. Ceux du diagnostic s'ouvrent sur toute la fenêtre
+        // (voir `update`).
+        if self.detail_mode == DetailMode::Worn {
+            if equipment {
+                self.slot_detail(ui, whole, 1.0, 1.8);
+            } else {
+                self.slot_detail = None;
+            }
+        }
         self.tab_row(ui, tabs);
+    }
+
+    /// Boutons du coin haut droit de la vue : recentrer, puis plein écran (entrée et sortie).
+    fn full_view_button(&mut self, ui: &mut egui::Ui, view: egui::Rect) {
+        let size = 30.0;
+        let full = egui::Rect::from_min_size(egui::pos2(view.max.x - size, view.min.y), Vec2::splat(size));
+        let center = full.translate(Vec2::new(-(size + 6.0), 0.0));
+        let tip = if self.tab == views::Tab::Atlas { "Recentrer (ou double-clic)" } else { "Centrer sur l'ascendance (double-clic : tout le build)" };
+        if ui::view_button(ui, center, ui::ViewIcon::Recenter).on_hover_text(tip).clicked() {
+            self.recenter_view();
+        }
+        let (icon, tip) = if self.full_view { (ui::ViewIcon::Exit, "Quitter le plein écran (Échap)") } else { (ui::ViewIcon::Enter, "Plein écran") };
+        if ui::view_button(ui, full, icon).on_hover_text(tip).clicked() {
+            // La vue change de taille : elle se recadre d'elle-même.
+            self.full_view = !self.full_view;
+        }
+    }
+
+    fn recenter_view(&mut self) {
+        if self.tab == views::Tab::Atlas {
+            self.atlas_view.recenter();
+        } else {
+            self.tree.recenter();
+        }
     }
 
     fn tab_row(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
@@ -2410,6 +3390,7 @@ impl App {
             }
             None => (&no_steps, None, (0.0, "acte 1".into()), None),
         };
+        let quests = self.quest_bonuses();
         let (view_step, gear) = (&mut self.view_step, &mut self.gear);
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             let mut shown = None;
@@ -2471,7 +3452,7 @@ impl App {
             let title = step
                 .map(|s| format!("Build · {}", s.label))
                 .unwrap_or_else(|| "Build (aucun)".into());
-            views::stats(ui, &worn, build.as_ref(), &title, &penalty);
+            views::stats(ui, &worn, build.as_ref(), &title, &penalty, quests.resistances);
         });
     }
 
@@ -2507,8 +3488,11 @@ impl App {
         }
     }
 
-    /// Onglets Sorts, Talents et Ascendances, pour l'étape choisie.
+    /// Onglets Sorts, Talents (ascendance au centre) et Uniques, pour l'étape choisie.
     fn build_view(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        // Joyaux de l'étape affichée, posés dans les châsses de l'arbre.
+        let shown_label = self.coach.as_ref().and_then(|c| c.steps.get(self.view_step.or(c.current_step_index()).unwrap_or(0)).map(|s| s.label.clone()));
+        let tree_jewels = self.tree_jewels(shown_label.as_deref().unwrap_or_default());
         let Some(coach) = self.coach.as_ref() else {
             ui.put(rect, egui::Label::new(RichText::new("Chargement du guide…").color(Color32::GRAY)));
             return;
@@ -2540,7 +3524,6 @@ impl App {
         if let Some(b) = self.builds.active() {
             self.tree.use_overrides_file(self.builds.dir_of(&b.id).join("attributes.json"));
         }
-        let (worn, prices, league) = (uniques::worn(&self.gear), self.prices.data.clone(), self.league.clone());
         let gem_infos = self.gem_infos.get();
         let (tab, view_step, assets, tree, icons, weapon_set) =
             (self.tab, &mut self.view_step, &mut self.assets, &mut self.tree, &mut self.passive_icons, &mut self.gear.set);
@@ -2550,10 +3533,8 @@ impl App {
             // gardent le style de l'application.
             ui.horizontal(|ui| {
                 ui::gold_widgets(ui);
-                if tab != views::Tab::Ascendancy {
-                    ui.label(RichText::new("Étape").color(ui::GOLD_DIM));
-                    shown = views::step_selector(ui, &coach.steps, view_step, current);
-                }
+                ui.label(RichText::new("Étape").color(ui::GOLD_DIM));
+                shown = views::step_selector(ui, &coach.steps, view_step, current);
                 // Set d'armes, partagé avec l'écran d'équipement.
                 if tab == views::Tab::Passives && coach.steps.iter().any(|s| !s.passive_sets.is_empty()) {
                     ui.add_space(12.0);
@@ -2575,18 +3556,9 @@ impl App {
                 views::Tab::Skills => {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| views::skills(ui, step, prev, level, assets, gem_infos.as_deref()));
                 }
-                views::Tab::Ascendancy => {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| views::ascendancy(ui, &coach.steps, current, coach.catalog()));
-                }
                 views::Tab::Passives => {
                     let r = ui.available_rect_before_wrap();
-                    tree.show(ui, r, step, prev, coach.catalog(), icons, key, (*weapon_set).max(1));
-                }
-                views::Tab::Uniques => {
-                    let prices = prices.lock().unwrap();
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| views::uniques(ui, &coach.steps, shown, &worn, prices.as_ref(), &league, assets));
+                    tree.show(ui, r, step, prev, coach.catalog(), icons, key, (*weapon_set).max(1), &tree_jewels);
                 }
                 views::Tab::Equipment | views::Tab::Stats | views::Tab::Atlas => {}
             }
@@ -2630,41 +3602,30 @@ impl App {
             }
             None => (vec![], String::new()),
         };
-        // Pour l'infobulle de l'étoile : icône et prix au marché de chaque unique.
-        let star_info: HashMap<String, (Option<egui::TextureHandle>, Option<String>)> = wanted
-            .iter()
-            .map(|(_, n)| {
-                let price = {
-                    let prices = self.prices.data.lock().unwrap();
-                    prices.as_ref().and_then(|p| {
-                        p.unique_by_name(n)
-                            .map(|(_, div, listings)| (p.to_ex(div), listings))
-                    })
-                };
-                let price = price.map(|(ex, listings)| {
-                    let doubt = if listings < prices::MIN_LISTINGS {
-                        format!(" ({listings} annonces seulement)")
-                    } else {
-                        String::new()
-                    };
-                    format!("≈ {} au marché{doubt}", self.fmt_price(ex))
-                });
-                (n.clone(), (self.assets.texture_unique(n), price))
-            })
-            .collect();
+        // Pour l'infobulle de l'étoile : la fiche de chaque unique attendu et son prix au marché.
+        let names: Vec<String> = wanted.iter().map(|(_, n)| n.clone()).collect();
+        let star_info: HashMap<String, ui::WantedUnique> = names.into_iter().map(|n| {
+            let found = {
+                let prices = self.prices.data.lock().unwrap();
+                prices.as_ref().and_then(|p| p.unique_by_name(&n).map(|(_, div, listings)| (p.to_ex(div), listings)))
+            };
+            let (price, basis) = match found {
+                Some((ex, listings)) => (
+                    (format!("≈ {}", self.fmt_price(ex)), Color32::from_rgb(225, 220, 210)),
+                    Some(if listings < prices::MIN_LISTINGS { format!("{listings} annonces seulement, cours de poe.ninja") } else { format!("{listings} annonces, cours de poe.ninja") }),
+                ),
+                None => (("pas de prix au marché".to_string(), Color32::GRAY), None),
+            };
+            let view = self.unique_view(&n);
+            (n, ui::WantedUnique { view, price, basis })
+        }).collect();
         let has_star = |slot: Slot| wanted.iter().any(|(s, _)| *s == slot);
-        let mut open_uniques = false;
+        let mut open_detail = None;
+        let mut clicked = None;
         let mut star = |ui: &mut egui::Ui, rect: egui::Rect, slot: Slot| {
-            let names: Vec<ui::WantedUnique> = wanted.iter().filter(|(s, _)| *s == slot).map(|(_, n)| {
-                    let (image, price) = star_info.get(n).cloned().unwrap_or_default();
-                    ui::WantedUnique {
-                        name: n.clone(),
-                        image,
-                        price,
-                    }
-                }).collect();
+            let names: Vec<&ui::WantedUnique> = wanted.iter().filter(|(s, _)| *s == slot).filter_map(|(_, n)| star_info.get(n)).collect();
             if !names.is_empty() && ui::wanted_star(ui, rect, slot, &names, &step_label) {
-                open_uniques = true;
+                open_detail = Some(slot);
             }
         };
         // Set d'armes : l'arme et la main gauche affichées suivent le set choisi.
@@ -2685,28 +3646,69 @@ impl App {
             if item.is_none() {
                 if base == Slot::Offhand && two_handed {
                     let weapon_tex = self.gear.item(Slot::Weapon.in_set(set)).and_then(|w| self.assets.texture(&w));
-                    ui::blocked_slot(ui, rect, slot, ui::Blocked::ByTwoHander(weapon_tex.as_ref()), framed, has_star(slot));
+                    if ui::blocked_slot(ui, rect, slot, ui::Blocked::ByTwoHander(weapon_tex.as_ref()), framed, has_star(slot)) {
+                        clicked = Some(slot);
+                    }
                     star(ui, rect, slot);
                     continue;
                 }
                 let charm_index = gear::CHARMS.iter().position(|c| *c == slot);
                 if let (Some(i), Some(open)) = (charm_index, charm_slots) {
                     if i >= open {
-                        ui::blocked_slot(ui, rect, slot, ui::Blocked::ClosedCharm(blocker.as_ref()), framed, false);
+                        if ui::blocked_slot(ui, rect, slot, ui::Blocked::ClosedCharm(blocker.as_ref()), framed, false) {
+                            clicked = Some(slot);
+                        }
                         continue;
                     }
                 }
             }
-            if let ui::SlotAction::Clear = ui::slot(ui, rect, slot, item.as_ref(), tex.as_ref(), glow.get(&slot).copied(), framed, has_star(slot), sockets.as_ref(), card.as_ref(), ghost.as_ref()) {
-                to_clear = Some(slot);
+            // Pièce survolée : sa colonne du détail (calculée pour celle-là seulement).
+            let worn = match &item {
+                Some(it) if ui.rect_contains_pointer(rect) => Some(self.worn_view(slot, it, card.as_ref())),
+                _ => None,
+            };
+            match ui::slot(ui, rect, slot, item.as_ref(), tex.as_ref(), glow.get(&slot).copied(), framed, has_star(slot), sockets.as_ref(), card.as_ref(), ghost.as_ref(), worn.as_ref()) {
+                ui::SlotAction::Clear => to_clear = Some(slot),
+                ui::SlotAction::Open => clicked = Some(slot),
+                ui::SlotAction::None => {}
             }
             star(ui, rect, slot);
 
         }
+        // Set inactif : ses armes en petit aux extrémités (comme en jeu), avec leur propre cadre.
+        let other = if set == 2 { 1 } else { 2 };
+        let other_two_handed = self.gear.item(Slot::Weapon.in_set(other)).is_some_and(|w| gear::kind_of(&w.item_class) == Some(gear::Kind::TwoHanded));
+        for base in [Slot::Weapon, Slot::Offhand] {
+            let slot = base.in_set(other);
+            let rect = ui::place(area, scale, ui::mini_layout(base));
+            let item = self.gear.item(slot);
+            if item.is_none() && base == Slot::Offhand && other_two_handed {
+                let weapon_tex = self.gear.item(Slot::Weapon.in_set(other)).and_then(|w| self.assets.texture(&w));
+                if ui::blocked_slot(ui, rect, slot, ui::Blocked::ByTwoHander(weapon_tex.as_ref()), true, has_star(slot)) {
+                    clicked = Some(slot);
+                }
+                star(ui, rect, slot);
+                continue;
+            }
+            let tex = item.as_ref().and_then(|it| self.assets.texture(it));
+            let card = self.build_card(item.as_ref(), slot);
+            let worn = match &item {
+                Some(it) if ui.rect_contains_pointer(rect) => Some(self.worn_view(slot, it, card.as_ref())),
+                _ => None,
+            };
+            // Runes en petit : les châsses suivent la taille de la case.
+            let sockets = item.as_ref().and_then(|it| self.socket_view(it, slot));
+            match ui::slot(ui, rect, slot, item.as_ref(), tex.as_ref(), glow.get(&slot).copied(), true, has_star(slot), sockets.as_ref(), card.as_ref(), None, worn.as_ref()) {
+                ui::SlotAction::Clear => to_clear = Some(slot),
+                ui::SlotAction::Open => clicked = Some(slot),
+                ui::SlotAction::None => {}
+            }
+            star(ui, rect, slot);
+        }
         self.gear.set = new_set;
-        if open_uniques {
-            self.tab = views::Tab::Uniques;
-            self.view_step = None;
+        if let Some(slot) = open_detail.or(clicked) {
+            self.slot_detail = Some(slot);
+            self.detail_mode = DetailMode::Worn;
         }
         if let Some(slot) = to_clear {
             self.gear.clear(slot);
@@ -3051,51 +4053,79 @@ impl App {
     /// En-tête d'un objet : image, nom, base, défenses de base, implicites, niveau requis ; la
     /// fiche complète au survol. `verdict` : place gardée à droite pour le badge (dessiné à part,
     /// il ne défile pas).
-    fn item_preview(&mut self, ui: &mut egui::Ui, it: &Item, verdict: Option<(&'static str, Color32)>) {
+    fn item_preview(&mut self, ui: &mut egui::Ui, it: &Item, verdict: Option<(&'static str, Color32)>, view: Option<&ui::WornView>) {
         // Survol de l'aperçu = fiche complète en infobulle (rien ne se déplie dans le panneau).
-        // L'image prend la hauteur du texte à côté (mesurée à l'affichage précédent) : elle ne
-        // grandit pas l'en-tête.
-        let base_defences = self.base_defences_text(it);
-        let text_h_id = ui.id().with("diag_text_h");
-        let text_h: f32 = ui.data(|d| d.get_temp(text_h_id)).unwrap_or(80.0);
-        let preview = ui.horizontal(|ui| {
-            if let Some(tex) = self.assets.texture(it) {
-                let size = tex.size_vec2();
-                let scale = (text_h / size.y).min(80.0 / size.x).min(1.5);
-                ui.image((tex.id(), size * scale));
-            }
-            let text = ui.vertical(|ui| {
-                ui.label(RichText::new(&it.name).color(ui::rarity_color(it.rarity)).size(17.0).strong());
-                if it.base != it.name {
-                    ui.label(RichText::new(&it.base).color(ui::rarity_color(it.rarity)));
+        // En-tête commun à toute l'app (voir `ui::item_header`) : avec sa fiche, les mêmes lignes
+        // que l'en-tête d'une pièce équipée (défenses, propriétés, niveau requis, implicites).
+        // Avec sa fiche : la pièce entière, comme l'infobulle d'une pièce équipée (en-tête, mods,
+        // runes), sans survol à faire.
+        if let Some(w) = view {
+            // Agrandie selon la place : la taille de la fiche à l'échelle 1 (mesurée) et la place
+            // laissée par le panneau donnent le facteur, entre 1 et 1,8.
+            let natural_id = ui.id().with("diag_natural");
+            let natural: Vec2 = ui.data(|d| d.get_temp(natural_id)).unwrap_or(Vec2::new(400.0, 300.0));
+            let room = Vec2::new(ui.available_width(), ui.clip_rect().bottom() - ui.cursor().top() - 24.0);
+            let scale = (room.x / natural.x).min(room.y / natural.y).clamp(1.0, 1.8);
+            // Le texte grossit moins que la place ne le permettrait ; l'image, elle, suit la hauteur.
+            let scale = 1.0 + (scale - 1.0) * 0.6;
+            let start = ui.cursor().min;
+            ui.scope(|ui| {
+                // Corps de texte (mods, runes) à la même échelle que l'en-tête.
+                for (style, font) in ui.style_mut().text_styles.iter_mut() {
+                    if matches!(style, egui::TextStyle::Body | egui::TextStyle::Small) {
+                        font.size *= scale;
+                    }
                 }
-                // Défenses de base du type, puis implicites.
-                if let Some(d) = base_defences {
-                    ui.label(RichText::new(d).color(Color32::GRAY).small());
+                ui.spacing_mut().item_spacing.y *= scale;
+                let lines = ui::header_lines_full(&w.weapon, &w.props, &[], &w.implicits, &[], scale);
+                ui::item_header_scaled(ui, "diag", w.image.as_ref(), &w.title, w.color, w.after.as_deref(), lines, verdict, scale, true);
+                if !w.mods.is_empty() {
+                    ui.separator();
+                    ui::worn_mods(ui, w);
                 }
-                for m in it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m) {
-                    ui.label(RichText::new(m).color(Color32::from_rgb(136, 136, 255)).small());
-                }
-                if it.req_level > 0 {
-                    ui.label(RichText::new(format!("Niveau requis {}", it.req_level)).color(Color32::GRAY));
-                }
-                ui.label(RichText::new("survole pour la fiche complète").color(Color32::DARK_GRAY).italics());
+                ui::worn_runes(ui, w, ui.available_width());
             });
-            let h = text.response.rect.height();
-            if (h - text_h).abs() > 0.5 {
-                ui.data_mut(|d| d.insert_temp(text_h_id, h));
+            // Taille à l'échelle 1 : hauteur ramenée, largeur de la ligne la plus longue.
+            let h = (ui.cursor().top() - start.y) / scale;
+            let w_nat = ui::worn_width(ui, w) + 160.0;
+            let fresh = Vec2::new(w_nat, h);
+            if (fresh - natural).length() > 1.0 {
+                ui.data_mut(|d| d.insert_temp(natural_id, fresh));
                 ui.ctx().request_repaint();
             }
-            // Place gardée pour le verdict, dessiné à part (il ne défile pas).
-            if let Some((text, color)) = verdict {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| ui.scope_builder(egui::UiBuilder::new().invisible(), |ui| ui::badge(ui, text, color)));
+            return;
+        }
+        let base_defences = self.base_defences_text(it);
+        // Défenses de base du type, implicites, niveau requis.
+        let mut lines: Vec<egui::WidgetText> = Vec::new();
+        if let Some(d) = base_defences {
+            lines.push(RichText::new(d).color(Color32::GRAY).size(ui::HEADER_LINE_SIZE).into());
+        }
+        for m in it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m) {
+            lines.push(RichText::new(m).color(Color32::from_rgb(136, 136, 255)).size(ui::HEADER_LINE_SIZE).into());
+        }
+        if it.req_level > 0 {
+            let mut job = egui::text::LayoutJob::default();
+            let font = egui::FontId::proportional(ui::HEADER_LINE_SIZE);
+            job.append("Niveau requis ", 0.0, egui::TextFormat::simple(font.clone(), Color32::GRAY));
+            let color = if it.req_level > self.char_level() { ui::SOCKET_WRONG } else { Color32::from_gray(225) };
+            job.append(&it.req_level.to_string(), 0.0, egui::TextFormat::simple(font, color));
+            lines.push(job.into());
+        }
+        let tex = self.assets.texture(it);
+        let (title, after) = ui::item_title(it);
+        ui::item_header(ui, "diag", tex.as_ref(), title, ui::rarity_color(it.rarity), after, lines.into_iter().map(Into::into).collect(), verdict);
+        // Objet qui ne se porte pas (monnaie, omen, gemme…) : son texte, tel quel.
+        let text: Vec<&String> = it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k != item::ModKind::Implicit).map(|(m, _)| m).collect();
+        if !text.is_empty() {
+            ui.separator();
+            for m in text {
+                ui.label(RichText::new(m).color(Color32::from_gray(225)));
             }
-        })
-        .response;
-        ui.interact(preview.rect, ui.id().with("preview"), egui::Sense::hover()).on_hover_ui(|ui| ui::item_card(ui, it));
+        }
     }
 
-    fn diagnostic(&mut self, ui: &mut egui::Ui, comparison: Option<&compare::Comparison>) -> Option<(&'static str, Color32)> {
+    fn diagnostic(&mut self, ui: &mut egui::Ui, comparison: Option<&compare::Comparison>) -> Option<(String, Color32)> {
         // Sans objet ouvert : l'historique. Avec : le détail, qui le remplace.
         let Some(it) = self.diagnosed.clone() else {
             self.history_panel(ui);
@@ -3119,86 +4149,296 @@ impl App {
             (None, Some(c)) => Some(ui::verdict_style(c.verdict)),
             (None, None) => None,
         };
-        self.item_preview(ui, &it, verdict);
-        // Châsses de la pièce : augments déjà posés (leurs stats sont dans les comparaisons) et
-        // châsses vides.
-        if let Some(sk) = self.socketed(&it) {
-            ui.add_space(4.0);
-            if !sk.augments.is_empty() || !sk.unknown.is_empty() {
-                let mut names = sk.augments.clone();
-                names.extend(sk.unknown.iter().map(|l| format!("? ({l})")));
-                ui.label(RichText::new(format!("Enchâssé : {}", names.join(", "))).color(Color32::from_rgb(136, 136, 255)));
-            }
-            if sk.empty() > 0 {
-                ui.label(RichText::new(format!("{} châsse(s) vide(s) sur {} : potentiel en plus", sk.empty(), sk.sockets)).color(ui::EMPTY_SOCKET));
-            }
-        }
-
-        // Zone 2 : comparaison avec la pièce portée.
-        match comparison {
-            Some(c) => {
-                let against = if c.verdict == compare::Verdict::Same { String::new() } else { c.against_name.clone() };
-                let title = ui::zone_title(ui, "COMPARÉ À TA PIÈCE", &against);
-                if !c.basis.is_empty() {
-                    title.on_hover_text("Écarts pesés selon les objectifs du build à cette étape");
-                }
-                for d in &c.deltas {
-                    // Écarts neutres (hors build, mods en plus d'une fiole…) : en retrait.
-                    let text = match d.sign {
-                        1 => RichText::new(&d.text).color(Color32::from_rgb(110, 210, 110)),
-                        -1 => RichText::new(&d.text).color(Color32::from_rgb(230, 100, 90)),
-                        _ => RichText::new(&d.text).color(Color32::from_gray(115)),
-                    };
-                    ui.label(text);
-                    if d.headline {
-                        ui.add_space(6.0);
-                    }
-                }
-                for n in &c.notes {
-                    ui.label(RichText::new(n).color(Color32::GRAY).italics());
-                }
-                // Augments de la pièce remplacée : perdus avec elle (ils ne se récupèrent pas).
-                if c.verdict != compare::Verdict::Same {
-                    let worn: Vec<Item> = c.against.iter().filter_map(|s| self.gear.item(*s)).collect();
-                    let lost: Vec<String> = worn.iter().filter_map(|w| self.socketed(w)).flat_map(|s| s.augments).collect();
-                    if !lost.is_empty() {
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(format!("Perdus si tu remplaces ta pièce : {}", lost.join(", "))).color(Color32::from_rgb(230, 150, 90)))
-                            .on_hover_text("Un augment posé ne se récupère pas : il disparaît avec la pièce, ou si on en pose un autre par-dessus.");
-                    }
-                }
-            }
-            None if recommended.is_none() => {
-                ui::zone_title(ui, "COMPARÉ À TA PIÈCE", "");
-                ui.label(RichText::new("Ne se porte pas : pas de comparaison.").color(Color32::GRAY));
-            }
-            None => {}
-        }
-
-        // Zone 3 : comparaison avec ce que le build recommande à cet emplacement.
-        let slot = comparison.and_then(|c| c.against.first().copied()).or_else(|| self.target_slot(&it));
-        let card = slot.and_then(|s| self.build_card(Some(&it), s));
-        if recommended.is_some() || card.is_some() {
-            ui::zone_title(ui, "SELON LE BUILD", judged.as_deref().unwrap_or_default());
-            if let Some((steps, current)) = &recommended {
-                let when = if *current { "unique recommandé à cette étape".to_string() } else { format!("unique recommandé à : {}", steps.join(", ")) };
-                ui.label(RichText::new(when).color(Color32::from_rgb(200, 170, 110)));
-            }
-            if let Some(card) = &card {
-                // Petite image de la pièce recommandée, à la taille de celles de l'historique.
-                ui.horizontal_top(|ui| {
-                    if let Some(tex) = &card.image {
-                        let size = tex.size_vec2();
-                        let scale = (32.0 / size.y).min(32.0 / size.x);
-                        ui.add_sized([34.0, 34.0], egui::Image::new((tex.id(), size * scale)));
-                    }
-                    ui.vertical(|ui| ui::build_card_head(ui, card));
+        // Emplacements jugés : celui de la pièce, ou chacun de ceux d'un anneau ou d'un charme, avec
+        // pour chacun la pièce portée, la réponse et les scores.
+        let multi = self.multi_slots(&it);
+        let candidates: Vec<Slot> = if multi.is_empty() {
+            comparison.and_then(|c| c.against.first().copied()).or_else(|| self.target_slot(&it)).into_iter().collect()
+        } else {
+            multi.clone()
+        };
+        let per_slot: Vec<SlotDiag> = candidates
+            .iter()
+            .map(|&s| {
+                let at = if multi.is_empty() { None } else { self.compare_at(&it, Some(s)) };
+                let c = if multi.is_empty() { comparison } else { at.as_ref() };
+                let card = self.build_card(Some(&it), s);
+                let it_score = self.worn_view(s, &it, card.as_ref()).score;
+                let worn = self.gear.item(s);
+                let worn_score = worn.as_ref().and_then(|w| {
+                    let worn_card = self.build_card(Some(w), s);
+                    self.worn_view(s, w, worn_card.as_ref()).score
                 });
-                ui::build_card_lines(ui, card);
+                let gap = match (it_score, worn_score) {
+                    (Some(a), Some(w)) if worn.is_some() => Some(a as i64 - w as i64),
+                    _ => None,
+                };
+                SlotDiag { slot: s, worn: worn.is_some(), build: card.is_some(), it_score, gap, answer: Self::diag_verdict(c, &recommended, it_score, worn_score) }
+            })
+            .collect();
+        // La meilleure place : la meilleure réponse, puis le plus grand écart, puis le score.
+        let rank = |a: &str| if a.contains("UNIQUE") { 4 } else if a.contains("MIEUX") { 3 } else if a.contains("VOIR") { 2 } else { 1 };
+        let best = per_slot.iter().max_by_key(|d| (rank(d.answer.0), d.gap.unwrap_or(i64::MIN), d.it_score.unwrap_or(0))).cloned();
+        // Emplacement montré, la pièce portée là, ce qu'y vise le build.
+        let slot = best.as_ref().map(|b| b.slot);
+        let card = slot.and_then(|s| self.build_card(Some(&it), s));
+        // L'objet tel quel (mods visés en blanc, les autres en gris) face au build.
+        let view = slot.map(|s| self.worn_view(s, &it, card.as_ref()));
+        // Bande de titre à la hauteur du badge et du prix (dessinés à part en haut à droite) : la
+        // fiche commence dessous et ne passe jamais sous eux.
+        // Badge de la réponse (voir la fin) : le titre s'arrête avant lui, quitte à passer à la ligne.
+        let badge = best.as_ref().filter(|_| comparison.is_some()).map(|b| {
+            let side = b.slot.side().filter(|_| per_slot.len() > 1).map(|s| format!(" · {s}")).unwrap_or_default();
+            let gap = b.gap.map(|d| format!(" ({}{} %)", if d > 0 { "+" } else if d < 0 { "−" } else { "" }, d.abs())).unwrap_or_default();
+            (format!("{}{side}{gap}", b.answer.0), b.answer.1)
+        });
+        let badge_w = badge.as_ref().map_or(0.0, |(t, _)| ui.fonts(|f| f.layout_no_wrap(t.clone(), egui::FontId::proportional(17.0), Color32::WHITE).size().x) + 36.0);
+        ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 72.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_min_height(72.0);
+            ui.add_space(4.0);
+            ui.set_max_width((ui.available_width() - badge_w).max(120.0));
+            ui.add(egui::Label::new(RichText::new(if slot.is_some() { "PIÈCE DIAGNOSTIQUÉE" } else { "OBJET DIAGNOSTIQUÉ" }).color(ui::GOLD).size(15.5).strong()).wrap());
+            let place = slot.map(|s| s.label().to_string()).unwrap_or_else(|| "ne se porte pas".into());
+            ui.label(RichText::new(place).color(Color32::GRAY));
+        });
+        ui.separator();
+        self.item_preview(ui, &it, None, view.as_ref());
+        ui.add_space(6.0);
+        // Les bandeaux « comparer » sont en bas, au-dessus de l'estimation (voir `diag_bands`).
+        self.diag_bands = (!per_slot.is_empty()).then(|| DiagBands { slots: per_slot.clone() });
+        ui.add_space(8.0);
+        // Le badge de l'en-tête porte la réponse (mieux, moins bien, à voir).
+        let _ = verdict;
+        // Pas de verdict pour un objet qui ne se porte pas : seul son prix compte. Sinon la meilleure
+        // place s'il y en a plusieurs, et l'écart de score face à ta pièce (comme le bandeau
+        // « comparer à l'équipé »).
+        badge
+    }
+
+    /// Réponse du diagnostic, le badge de l'en-tête : faut-il l'équiper ? Mieux que ta pièce et
+    /// pas plus loin du build (mieux), l'inverse (moins bien), ou les deux qui se contredisent.
+    fn diag_verdict(comparison: Option<&compare::Comparison>, recommended: &Option<(Vec<String>, bool)>, it_score: Option<u32>, worn_score: Option<u32>) -> (&'static str, Color32) {
+        if recommended.as_ref().is_some_and(|(_, now)| *now) {
+            return ("★ UNIQUE DU BUILD", ui::rarity_color(item::Rarity::Unique));
+        }
+        let Some(c) = comparison else { return ("▼ MOINS BIEN", ui::SOCKET_WRONG) };
+        // Base qui ne convient pas au build : moins bien, quoi qu'il arrive.
+        if c.deltas.iter().any(|d| d.headline && d.text.starts_with("pas pour ce build")) {
+            return ("▼ MOINS BIEN", ui::SOCKET_WRONG);
+        }
+        let better = match c.verdict {
+            compare::Verdict::Better => Some(true),
+            compare::Verdict::Worse => Some(false),
+            _ => None,
+        };
+        let closer = match (it_score, worn_score) {
+            (Some(a), Some(b)) => Some(a >= b),
+            (Some(a), None) => Some(a > 0),
+            _ => None,
+        };
+        match (better, closer) {
+            (Some(true), Some(true) | None) => ("▲ MIEUX", ui::SOCKET_GOOD),
+            (Some(false), Some(false) | None) | (None, Some(false)) => ("▼ MOINS BIEN", ui::SOCKET_WRONG),
+            _ => ("? À VOIR", ui::EMPTY_SOCKET),
+        }
+    }
+
+    /// Sous l'en-tête du diagnostic : la pièce portée et la pièce visée par le build, chacune
+    /// comparée à la pièce diagnostiquée, prêtes à afficher.
+    #[allow(clippy::too_many_arguments)]
+    fn diag_sides(
+        &mut self,
+        it: &Item,
+        comparison: Option<&compare::Comparison>,
+        card: Option<&ui::BuildCard>,
+        worn: Option<&Item>,
+        recommended: &Option<(Vec<String>, bool)>,
+        judged: Option<&str>,
+        worn_score: Option<u32>,
+        it_score: Option<u32>,
+    ) -> (DiagSide, Option<DiagSide>) {
+        let good = ("✓", ui::SOCKET_GOOD);
+        let partial = ("~", ui::EMPTY_SOCKET);
+        let missing = ("✗", ui::SOCKET_WRONG);
+        // Ta pièce : ce qu'on gagne (+) et ce qu'on perd (✗) en la remplaçant.
+        let mut left = DiagSide { score: worn_score, ..Default::default() };
+        match (comparison, worn) {
+            (Some(c), Some(w)) => {
+                let slot = c.against.first().copied().unwrap_or(Slot::Weapon);
+                let worn_card = self.build_card(Some(w), slot);
+                let view = self.worn_view(slot, w, worn_card.as_ref());
+                // Défenses et DPS de ta pièce face à ceux de la pièce diagnostiquée.
+                let keys = ["Armour", "Evasion Rating", "Energy Shield"];
+                let (mine, new) = (keys.map(|k| w.props.get(k).copied().unwrap_or(0.0)), keys.map(|k| it.props.get(k).copied().unwrap_or(0.0)));
+                let mut marks: Vec<Option<(&'static str, Color32)>> = vec![None; view.props.len()];
+                if mine.iter().any(|v| *v > 0.0) && !marks.is_empty() {
+                    marks[0] = Some(if mine.iter().zip(new).any(|(m, n)| *m > 0.0 && n <= 0.0) {
+                        missing
+                    } else if mine.iter().zip(new).all(|(m, n)| n >= *m) {
+                        ("+", ui::SOCKET_GOOD)
+                    } else {
+                        partial
+                    });
+                }
+                let mut weapon = view.weapon.clone();
+                if let (Some(m), Some(n)) = (compare::weapon_dps(w), compare::weapon_dps(it)) {
+                    let mark = if n.total() >= m.total() { ("+", ui::SOCKET_GOOD) } else { missing };
+                    // Le DPS total est au bout de la ligne des attaques par seconde (sinon sur sa ligne).
+                    if let Some(line) = weapon.iter_mut().find(|l| l.first().is_some_and(|(t, _)| t.starts_with("Attaques par seconde"))) {
+                        line.insert(0, (format!("{} ", mark.0), mark.1));
+                    } else if let Some(i) = view.props.iter().position(|p| p.first().is_some_and(|(t, _)| t == "DPS ")) {
+                        marks[i] = Some(mark);
+                    }
+                }
+                left.weapon = weapon;
+                left.image = view.image.clone();
+                left.name = view.title.clone();
+                left.name_color = view.color;
+                left.after = view.after.clone();
+                left.props = view.props.clone();
+                left.prop_marks = marks;
+                left.implicits = view.implicits.clone();
+                // Implicites et compétence de ta pièce : gardés par la pièce diagnostiquée (+), en
+                // moins (~) ou perdus (✗).
+                let it_implicits: Vec<String> = it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m.clone())
+                    .chain(it.granted_skills.iter().map(|s| format!("Compétence : {s}")))
+                    .collect();
+                let kept = ("+", ui::SOCKET_GOOD);
+                left.implicit_marks = left
+                    .implicits
+                    .iter()
+                    .map(|l| {
+                        if let Some(skill) = l.strip_prefix("Compétence : ") {
+                            let same = it_implicits.iter().any(|w| w.strip_prefix("Compétence : ").is_some_and(|n| skill_name(n) == skill_name(skill)));
+                            return Some(if same { kept } else { missing });
+                        }
+                        let (tpl, mine) = trade::template(l);
+                        Some(match it_implicits.iter().map(|w| trade::template(w)).find(|(t, _)| *t == tpl) {
+                            Some((_, new)) if new.unwrap_or(0.0) < mine.unwrap_or(0.0) => partial,
+                            Some(_) => kept,
+                            None => missing,
+                        })
+                    })
+                    .collect();
+                // Runes de ta pièce : la pièce diagnostiquée porte la même (+), sinon perdue (✗).
+                let mut have: Vec<String> = self.socketed(it).map(|s| s.augments).unwrap_or_default();
+                left.runes = view.runes.clone();
+                for r in &mut left.runes {
+                    r.mark = Some(match have.iter().position(|h| *h == r.name) {
+                        Some(i) => {
+                            have.remove(i);
+                            kept
+                        }
+                        None => missing,
+                    });
+                }
+                // Le constat sur la base et les dégâts de l'arme sont avec les en-têtes.
+                left.lines = c
+                    .deltas
+                    .iter()
+                    .filter(|d| !d.headline && !d.dps)
+                    .map(|d| match d.sign {
+                        1 => (Some(("+", ui::SOCKET_GOOD)), ui::SOCKET_GOOD, d.text.clone()),
+                        -1 => (Some(missing), ui::SOCKET_WRONG, d.text.clone()),
+                        _ => (Some(("•", Color32::from_gray(115))), Color32::from_gray(115), d.text.clone()),
+                    })
+                    .collect();
+                left.notes = c.notes.clone();
+            }
+            (Some(c), None) => {
+                left.notes = if c.notes.is_empty() { vec!["Pas de pièce suivie à cet emplacement.".into()] } else { c.notes.clone() };
+            }
+            (None, _) => left.notes = vec!["Ne se porte pas : pas de comparaison.".into()],
+        }
+        // Pièce du build : ce qu'il vise, et si la pièce diagnostiquée l'a (✓ ~ ✗).
+        if recommended.is_none() && card.is_none() {
+            return (left, None);
+        }
+        let _ = judged;
+        let mut right = DiagSide { score: it_score, ..Default::default() };
+        if let Some((steps, current)) = recommended {
+            right.notes.push(if *current { "unique recommandé à cette étape".to_string() } else { format!("unique recommandé à : {}", steps.join(", ")) });
+        }
+        let Some(b) = card else { return (left, Some(right)) };
+        let unique_text = b.unique.as_ref().and_then(|u| self.coach.as_ref()?.catalog().uniques.get(u).cloned());
+        let base = unique_text.as_ref().map(|t| t.base.clone()).unwrap_or_else(|| b.base.clone());
+        right.image = b.image.clone();
+        right.name = b.unique.clone().unwrap_or_else(|| b.base.clone());
+        right.name_color = ui::rarity_color(if b.unique.is_some() { item::Rarity::Unique } else { item::Rarity::Rare });
+        right.after = b.unique.as_ref().map(|_| base.clone()).filter(|s| !s.is_empty());
+        if let Some(d) = b.base_defences {
+            let def = defence_parts(d, [false; 3]);
+            if !def.is_empty() {
+                let have = ["Armour", "Evasion Rating", "Energy Shield"].map(|k| it.props.get(k).copied().unwrap_or(0.0));
+                right.prop_marks.push(Some(if d.iter().zip(have).any(|(w, h)| *w > 0.0 && h <= 0.0) {
+                    missing
+                } else if d.iter().zip(have).all(|(w, h)| h >= *w) {
+                    good
+                } else {
+                    partial
+                }));
+                right.props.push(def);
             }
         }
-        ui.add_space(8.0);
-        verdict
+        if let Some(level) = self.augments.get().and_then(|c| c.req_levels.get(&base).copied()) {
+            right.props.push(ui::req_level_parts(level, self.char_level()));
+            right.prop_marks.push(None);
+        }
+        right.implicits = unique_text.as_ref().map(|t| t.implicits.clone()).unwrap_or_else(|| b.implicits.clone());
+        let it_implicits: Vec<String> = it.mods.iter().zip(&it.mod_kinds).filter(|(_, k)| **k == item::ModKind::Implicit).map(|(m, _)| m.clone())
+            .chain(it.granted_skills.iter().map(|s| format!("Compétence : {s}")))
+            .collect();
+        right.implicit_marks = right
+            .implicits
+            .iter()
+            .map(|l| {
+                if let Some(skill) = l.strip_prefix("Compétence : ") {
+                    let same = it_implicits.iter().any(|w| w.strip_prefix("Compétence : ").is_some_and(|n| n.contains(skill)));
+                    return Some(if same { good } else { missing });
+                }
+                let (tpl, want) = trade::template(l);
+                Some(match it_implicits.iter().map(|w| trade::template(w)).find(|(t, _)| *t == tpl) {
+                    Some((_, have)) if have.unwrap_or(0.0) < want.unwrap_or(0.0) => partial,
+                    Some(_) => good,
+                    None => missing,
+                })
+            })
+            .collect();
+        right.lines = match unique_text.as_ref().map(|t| t.mods.clone()) {
+            Some(mods) => mods
+                .iter()
+                .zip(unique_matches(it, &mods))
+                .map(|(m, part)| {
+                    let (mark, c) = match_mark(part);
+                    (Some((mark, c)), c, m.clone())
+                })
+                .collect(),
+            None => b
+                .lines
+                .iter()
+                .map(|(l, have)| {
+                    let (mark, c) = match have {
+                        compare::Have::Full(_) => good,
+                        compare::Have::Partial(_) => partial,
+                        _ => missing,
+                    };
+                    (Some((mark, c)), c, l.clone())
+                })
+                .collect(),
+        };
+        // Runes conseillées, posées ou non sur la pièce diagnostiquée.
+        let mut have: Vec<String> = self.socketed(it).map(|s| s.augments).unwrap_or_default();
+        right.runes = b.runes.clone();
+        for r in &mut right.runes {
+            r.mark = Some(match have.iter().position(|h| *h == r.name) {
+                Some(i) => {
+                    have.remove(i);
+                    good
+                }
+                None => missing,
+            });
+        }
+        (left, Some(right))
     }
 
     /// « Base : Energy Shield 40 » : défenses du type de base d'une pièce (un objet magique
@@ -3571,21 +4811,7 @@ impl App {
     }
 
     fn market_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        const CATEGORIES: &[(&str, &str)] = &[
-            ("Currency", "Monnaie"),
-            ("Fragments", "Fragments"),
-            ("Runes", "Runes"),
-            ("Essences", "Essences"),
-            ("SoulCores", "Cœurs d'âme"),
-            ("Idols", "Idoles"),
-            ("Expedition", "Expédition"),
-            ("Ritual", "Rituel"),
-            ("Delirium", "Délire"),
-            ("Breach", "Brèche"),
-            ("Abyss", "Abîme"),
-            ("UncutGems", "Gemmes non taillées"),
-            ("LineageSupportGems", "Gemmes de lignée"),
-        ];
+        const CATEGORIES: &[(&str, &str)] = MARKET_CATEGORIES;
         // Cours de la ligue regardée : celle du personnage, ou une autre choisie ici.
         let prices = self
             .market_league
@@ -3600,6 +4826,39 @@ impl App {
         let busy = prices.busy();
         if busy {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+        // Détail d'un objet ouvert depuis la liste : il la remplace, « Retour » y ramène.
+        let opened = self.market_open.as_ref().and_then(|name| prices.data.lock().unwrap().as_ref()?.market.iter().find(|l| &l.name == name).cloned());
+        if let Some(line) = opened {
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                let margin = egui::Margin { left: 0, right: 8, top: 0, bottom: 0 };
+                let mut back = false;
+                egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(22.0);
+                        let r = ui.add(egui::Label::new(RichText::new("MARCHÉ").color(ui::GOLD_DIM).size(13.0).strong().underline()).sense(egui::Sense::click()));
+                        back |= r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                        ui.label(RichText::new("›").color(ui::GOLD_DIM).size(14.0));
+                        ui.label(RichText::new("DÉTAIL").color(ui::GOLD).size(13.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            back |= ui::action_button(ui, "⬅  Retour").on_hover_text("Revenir à la liste").clicked();
+                        });
+                    });
+                    ui.add_space(2.0);
+                    let line = ui.available_rect_before_wrap();
+                    ui.painter().hline(line.x_range(), line.top(), egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.6)));
+                    ui.add_space(8.0);
+                });
+                let out = egui::ScrollArea::vertical().id_salt("market_detail").auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Frame::new().inner_margin(margin).show(ui, |ui| self.market_detail(ui, &line, None, &prices, &shown_league, "COURS DU MARCHÉ"));
+                });
+                ui::fade_scroll(ui, &out, true);
+                if back {
+                    self.market_open = None;
+                }
+            });
+            return;
         }
         let age = prices.age();
         // Lignes de la catégorie, filtrées par la recherche, les plus chères d'abord.
@@ -3634,16 +4893,8 @@ impl App {
             Some((_, chaos)) if chaos > 1.0 && ex >= chaos => Self::fmt_in(ex, (chaos, "chaos")),
             _ => Self::fmt_in(ex, (1.0, "ex")),
         };
-        let all = |ex: f64| match rates {
-            Some((div, chaos)) if div > 0.0 && chaos > 0.0 => format!(
-                "{} · {} · {}",
-                Self::fmt_in(ex, (1.0, "ex")),
-                Self::fmt_in(ex, (chaos, "chaos")),
-                Self::fmt_in(ex, (div, "div"))
-            ),
-            _ => Self::fmt_in(ex, (1.0, "ex")),
-        };
         let mut league_pick: Option<String> = None;
+        let mut open: Option<String> = None;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             egui::Frame::new()
                 .inner_margin(egui::Margin {
@@ -3824,23 +5075,220 @@ impl App {
                                         },
                                     );
                                 });
-                                row.response.on_hover_ui(|ui| {
-                                    ui.label(RichText::new(&l.name).strong());
-                                    ui.label(all(ex));
-                                    ui.label(format!("Variation sur 7 jours : {:+.1} %", l.change));
-                                    ui.label(format!("Volume échangé : {} div", l.volume.round()));
-                                });
+                                // Clic : l'écran de détail de l'objet.
+                                let click = ui.interact(row.response.rect, ui.id().with(("market_row", &l.id)), egui::Sense::click());
+                                if click.hovered() {
+                                    ui.painter().rect_filled(row.response.rect.expand2(Vec2::new(4.0, 2.0)), 3.0, Color32::from_white_alpha(6));
+                                }
+                                if click.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                    open = Some(l.name.clone());
+                                }
                             }
                         });
                     ui::fade_scroll(ui, &out, true);
                 });
         });
+        if open.is_some() {
+            self.market_open = open;
+        }
         if let Some(l) = league_pick {
             self.market_league = (l != self.league).then(|| {
                 let p = prices::Prices::start(self.dirs.cache_dir().to_path_buf(), l.clone());
                 (l, p)
             });
         }
+    }
+
+    /// Ligne du marché d'échange d'un objet diagnostiqué qui ne se porte pas (monnaie, rune,
+    /// omen…) : il a alors l'écran de détail du marché à la place du diagnostic.
+    fn market_line_for(&self, it: &Item) -> Option<prices::MarketLine> {
+        if self.target_slot(it).is_some() || it.rarity == item::Rarity::Unique {
+            return None;
+        }
+        let data = self.prices.data.lock().unwrap();
+        data.as_ref()?.market.iter().find(|l| l.name == it.base || l.name == it.name).cloned()
+    }
+
+    /// Historique du cours d'une ligne du marché, chargé en arrière-plan à la première demande.
+    fn market_history(&self, line: &prices::MarketLine, league: &str, ex_per_div: f64) -> Option<Result<Vec<(String, f64)>, String>> {
+        let key = format!("{league}|{}", line.details_id);
+        let mut map = self.market_history.lock().unwrap();
+        if let Some(h) = map.get(&key) {
+            return h.clone();
+        }
+        map.insert(key.clone(), None);
+        let (shared, league, category, id) = (self.market_history.clone(), league.to_string(), line.category.clone(), line.details_id.clone());
+        std::thread::spawn(move || {
+            let got = prices::history(&league, &category, &id, ex_per_div).map_err(|e| e.to_string());
+            shared.lock().unwrap().insert(key, Some(got));
+        });
+        None
+    }
+
+    /// Écran de détail d'un objet du marché : son en-tête et son texte (ceux de l'objet
+    /// diagnostiqué, sinon d'un objet du même type dans l'historique), puis jusqu'en bas son cours
+    /// en grand dans les trois devises, sa courbe, le volume échangé et les liens.
+    fn market_detail(&mut self, ui: &mut egui::Ui, line: &prices::MarketLine, it: Option<&Item>, prices: &prices::Prices, league: &str, title: &str) {
+        let (ex_per_div, chaos_ex) = {
+            let data = prices.data.lock().unwrap();
+            data.as_ref().map(|p| (p.exalted_per_divine, p.currency("Chaos Orb").map(|c| p.to_ex(c)).unwrap_or(0.0))).unwrap_or((0.0, 0.0))
+        };
+        let ex = line.value * ex_per_div;
+        let unit = |v: f64| {
+            if ex_per_div > 0.0 && v >= ex_per_div {
+                (ex_per_div, "div")
+            } else if chaos_ex > 1.0 && v >= chaos_ex {
+                (chaos_ex, "chaos")
+            } else {
+                (1.0, "ex")
+            }
+        };
+        let fmt = |v: f64| Self::fmt_in(v, unit(v));
+        // Bande de titre, comme au diagnostic.
+        let category = MARKET_CATEGORIES.iter().find(|(k, _)| *k == line.category).map(|(_, l)| *l).unwrap_or(line.category.as_str());
+        ui.add_space(4.0);
+        ui.label(RichText::new(title).color(ui::GOLD).size(15.5).strong());
+        ui.label(RichText::new(format!("{category} · {league}")).color(Color32::GRAY));
+        ui.add_space(6.0);
+        ui.separator();
+        let known = it.cloned().or_else(|| self.history.iter().find(|h| h.base == line.name || h.name == line.name).cloned());
+        match &known {
+            Some(it) => self.item_preview(ui, it, None, None),
+            None => {
+                let tex = self.assets.texture_url(format!("{}{}", prices::IMAGE_HOST, line.image));
+                ui::item_header(ui, "market", tex.as_ref(), &line.name, ui::rarity_color(item::Rarity::Currency), None, Vec::new(), None);
+            }
+        }
+        ui.add_space(10.0);
+        // Le cours, dans une carte qui va jusqu'en bas.
+        let bottom = ui.clip_rect().bottom() - 8.0;
+        let card_h = (bottom - ui.cursor().top()).max(320.0);
+        let up = line.change >= 0.0;
+        let trend = if up { ui::SOCKET_GOOD } else { ui::SOCKET_WRONG };
+        let history = (!line.details_id.is_empty() && ex_per_div > 0.0).then(|| self.market_history(line, league, ex_per_div)).flatten();
+        let mut period = self.market_period;
+        egui::Frame::new()
+            .fill(ui::CARD_FILL)
+            .stroke(egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.55)))
+            .corner_radius(6)
+            .inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 10 })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let top = ui.cursor().top();
+                // Prix en grand dans les trois devises, la plus parlante en or.
+                ui.horizontal(|ui| {
+                    let main = unit(ex).1;
+                    let mut parts = vec![(1.0, "ex")];
+                    if chaos_ex > 0.0 {
+                        parts.push((chaos_ex, "chaos"));
+                    }
+                    if ex_per_div > 0.0 {
+                        parts.push((ex_per_div, "div"));
+                    }
+                    for (i, (per, name)) in parts.into_iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(18.0);
+                        }
+                        let v = ex / per;
+                        let n = if v >= 100.0 {
+                            format!("{v:.0}")
+                        } else if v >= 1.0 {
+                            format!("{v:.1}").replace('.', ",").trim_end_matches(",0").to_string()
+                        } else if v >= 0.001 {
+                            format!("{v:.3}").replace('.', ",").trim_end_matches('0').to_string()
+                        } else {
+                            "< 0,001".into()
+                        };
+                        let (size, color) = if name == main { (30.0, Color32::from_rgb(235, 200, 60)) } else { (22.0, Color32::from_rgb(225, 220, 210)) };
+                        ui.label(RichText::new(n).size(size).color(color).strong());
+                        ui.label(RichText::new(name).size(size * 0.6).color(Color32::GRAY));
+                    }
+                });
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{}{:.0} %", if up { "+" } else { "" }, line.change)).color(trend).strong());
+                    ui.label(RichText::new("sur 7 jours").color(Color32::GRAY));
+                });
+                ui.add_space(8.0);
+                // Titre de la courbe et choix de la période.
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("ÉVOLUTION DU COURS").color(ui::GOLD).size(13.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        for (i, label) in ["Tout", "30 j", "7 j"].iter().enumerate().map(|(i, l)| (2 - i, l)) {
+                            let on = period == i;
+                            let text = RichText::new(*label).size(12.5).color(if on { ui::GOLD } else { Color32::GRAY });
+                            let r = ui.add(egui::Label::new(if on { text.strong().underline() } else { text }).sense(egui::Sense::click()));
+                            if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                period = i;
+                            }
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                // La courbe prend la place laissée par le pied (mesuré à l'image précédente).
+                let foot_id = ui.id().with("market_foot");
+                let foot_h: f32 = ui.data(|d| d.get_temp(foot_id)).unwrap_or(70.0);
+                let used = ui.cursor().top() - top;
+                let chart_h = (card_h - 20.0 - used - foot_h - 12.0).max(140.0);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), chart_h), egui::Sense::hover());
+                match &history {
+                    Some(Ok(points)) => {
+                        // Repères dans la devise du prix, avec deux décimales au besoin.
+                        let (per, name) = unit(ex);
+                        let axis = |v: f64| {
+                            let v = v / per;
+                            let n = if v >= 100.0 { format!("{v:.0}") } else if v >= 10.0 { format!("{v:.1}") } else { format!("{v:.2}") };
+                            format!("{} {name}", n.replace('.', ","))
+                        };
+                        let n = [7, 30, usize::MAX][period].min(points.len());
+                        ui::price_chart(ui, rect, &points[points.len() - n..], trend, &axis);
+                    }
+                    Some(Err(e)) => {
+                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, format!("Historique indisponible : {e}"), egui::FontId::proportional(13.0), Color32::GRAY);
+                    }
+                    None => {
+                        ui.put(egui::Rect::from_center_size(rect.center(), Vec2::splat(24.0)), egui::Spinner::new().size(22.0).color(ui::GOLD));
+                        ui.ctx().request_repaint_after(Duration::from_millis(250));
+                    }
+                }
+                ui.add_space(12.0);
+                let foot_top = ui.cursor().top();
+                // Volume : poe.ninja ne compte pas d'annonces sur le marché d'échange, mais ce qui s'échange.
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Volume échangé :").color(Color32::from_gray(225)).strong());
+                    let units = if line.value > 0.0 { format!(" (≈ {} unités)", Self::fmt_count(line.volume / line.value)) } else { String::new() };
+                    ui.label(RichText::new(format!("{} par jour{units}", fmt(line.volume * ex_per_div))).color(Color32::LIGHT_GRAY));
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    let have = if line.id == "divine" { "exalted" } else if line.value >= 1.0 || line.id == "exalted" { "divine" } else { "exalted" };
+                    ui.hyperlink_to("Acheter ou vendre sur le trade ↗", uniques::exchange_url(league, &line.id, have));
+                    if let Some(url) = prices.data.lock().unwrap().as_ref().and_then(|p| p.page_url(false, &line.name, &line.name)) {
+                        ui.add_space(12.0);
+                        ui.hyperlink_to("Voir sur poe.ninja ↗", url);
+                    }
+                });
+                let h = ui.cursor().top() - foot_top;
+                if (h - foot_h).abs() > 0.5 {
+                    ui.data_mut(|d| d.insert_temp(foot_id, h));
+                    ui.ctx().request_repaint();
+                }
+            });
+        self.market_period = period;
+    }
+
+    /// « 11 100 » : un nombre entier, les milliers séparés.
+    fn fmt_count(n: f64) -> String {
+        let digits = format!("{}", n.round().max(0.0) as u64);
+        let mut out = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                out.push('\u{202f}');
+            }
+            out.push(c);
+        }
+        out
     }
 
     /// Bas du diagnostic, toujours visible en entier : conseil, prix, confiance, puis comment
@@ -3937,7 +5385,7 @@ impl App {
             return;
         }
         ui.add_space(4.0);
-        self.item_preview(ui, it, None);
+        self.item_preview(ui, it, None, None);
         // Le prix : les mêmes lignes qu'au diagnostic.
         self.price_title(ui, it, true);
         self.value_rows(ui, it, &None);
@@ -4190,7 +5638,12 @@ impl App {
             ui.label(RichText::new(t).color(Color32::GRAY));
         };
         ui.add_space(4.0);
-        self.item_preview(ui, it, None);
+        // La pièce entière, comme au diagnostic (lignes d'arme et DPS, implicites, mods).
+        let view = self.target_slot(it).map(|s| {
+            let card = self.build_card(Some(it), s);
+            self.worn_view(s, it, card.as_ref())
+        });
+        self.item_preview(ui, it, None, view.as_ref());
         // Le prix : les mêmes lignes qu'au diagnostic.
         self.price_title(ui, it, false);
         self.value_rows(ui, it, &Some(e.clone()));
@@ -4275,6 +5728,30 @@ impl eframe::App for App {
             }
         }
 
+        // Emplacement de charme donné par la campagne : compte dans les charmes ouverts.
+        self.gear.quest_charm_slots = self.quest_bonuses().charm_slots;
+        // Plein écran (Talents, Atlas) : la vue seule, sans barre ni panneaux.
+        let full = self.full_view && matches!(self.tab, views::Tab::Passives | views::Tab::Atlas);
+        if full && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.full_view = false;
+        }
+        if full && self.full_view {
+            self.sync_league(ctx);
+            self.settings_window(ctx);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(Color32::from_rgb(12, 11, 10)).inner_margin(12))
+                .show(ctx, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    if self.tab == views::Tab::Atlas {
+                        self.atlas_view(ui, rect);
+                    } else {
+                        self.build_view(ui, rect);
+                    }
+                    self.full_view_button(ui, rect);
+                });
+            return;
+        }
+
         egui::TopBottomPanel::bottom("status")
             .frame(egui::Frame::new().fill(Color32::from_rgb(12, 11, 10)).inner_margin(egui::Margin { left: 12, right: 6, top: 10, bottom: 10 }))
             .show(ctx, |ui| {
@@ -4308,6 +5785,7 @@ impl eframe::App for App {
         self.changelog_window(ctx);
         self.settings_window(ctx);
         self.add_build_window(ctx);
+        self.route_pick_window(ctx);
         // La grille garde ses proportions et prend toute la place possible ; le diagnostic
         // (à droite) et le fil (en bas) absorbent le reste, sans bande vide autour du fond.
         let free = ctx.available_rect();
@@ -4316,10 +5794,14 @@ impl eframe::App for App {
         let feed_h = (free.height() - ui::CANVAS_H * scale - ui::top_pad(scale, self.bar_h) - TAB_H).max(FEED_MIN);
         egui::TopBottomPanel::bottom("feed").resizable(false).exact_height(feed_h).show(ctx, |ui| self.feed_panel(ui));
         let comparison = self.diagnosed.as_ref().and_then(|it| self.compare(it));
-        let glow: HashMap<Slot, Color32> = comparison
+        let mut glow: HashMap<Slot, Color32> = comparison
             .iter()
             .flat_map(|c| c.against.iter().map(|s| (*s, ui::verdict_style(c.verdict).1)))
             .collect();
+        // Anneau, charme : chaque emplacement à la couleur de sa réponse.
+        if let Some(b) = self.diag_bands.as_ref().filter(|b| comparison.is_some() && b.slots.len() > 1) {
+            glow = b.slots.iter().map(|d| (d.slot, d.answer.1)).collect();
+        }
         egui::SidePanel::right("diagnostic").resizable(false).exact_width(side_w).show(ctx, |ui| {
             // Onglets en bas, sur la même ligne que ceux de gauche ; le contenu au-dessus.
             let side = ui.available_rect_before_wrap();
@@ -4352,7 +5834,9 @@ impl eframe::App for App {
             let diagnosed = self.diagnosed.clone();
             let detail = diagnosed.as_ref().is_some_and(|d| self.estimate_open.as_deref() == Some(d.raw.as_str()));
             let value_h_id = ui.id().with("value_h");
-            let value_h: f32 = if diagnosed.is_some() && !detail { ui.data(|d| d.get_temp(value_h_id)).unwrap_or(160.0) } else { 0.0 };
+            // Objet qui ne se porte pas, coté sur le marché d'échange : l'écran de détail du marché.
+            let market_line = diagnosed.as_ref().filter(|_| !detail).and_then(|it| self.market_line_for(it));
+            let value_h: f32 = if diagnosed.is_some() && !detail && market_line.is_none() { ui.data(|d| d.get_temp(value_h_id)).unwrap_or(160.0) } else { 0.0 };
             let split = full.max.y - value_h;
             let top = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x, split));
             let scroll = ui
@@ -4458,6 +5942,11 @@ impl eframe::App for App {
                             ui::fade_scroll(ui, &listings.inner, true);
                             out
                         }
+                        (Some(it), _) if market_line.is_some() => egui::ScrollArea::vertical().id_salt("diagnostic_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                            let (prices, league) = (self.prices.clone(), self.league.clone());
+                            egui::Frame::new().inner_margin(margin).show(ui, |ui| self.market_detail(ui, market_line.as_ref().unwrap(), Some(it), &prices, &league, "OBJET DIAGNOSTIQUÉ"));
+                            None
+                        }),
                         _ => egui::ScrollArea::vertical().id_salt("diagnostic_scroll").auto_shrink([false, false]).show(ui, |ui| {
                             egui::Frame::new().inner_margin(margin).show(ui, |ui| self.diagnostic(ui, comparison.as_ref())).inner
                         }),
@@ -4467,11 +5956,11 @@ impl eframe::App for App {
             ui::fade_scroll(ui, &scroll, true);
             // Verdict du diagnostic, et dessous le prix comme dans l'historique (loader le temps de
             // l'estimation) : à leur place dans l'en-tête, mais fixes, par-dessus ce qui défile.
-            if let Some(it) = diagnosed.as_ref().filter(|_| !detail) {
+            if let Some(it) = diagnosed.as_ref().filter(|_| !detail && market_line.is_none()) {
                 let anchor = egui::Rect::from_min_max(scroll.inner_rect.min + Vec2::new(0.0, 4.0), egui::pos2(scroll.inner_rect.max.x - 8.0, scroll.inner_rect.min.y + 90.0));
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(anchor).layout(egui::Layout::top_down(egui::Align::Max)), |ui| {
                     if let Some((text, color)) = scroll.inner {
-                        ui::badge(ui, text, color);
+                        ui::badge(ui, &text, color);
                         ui.add_space(6.0);
                     }
                     match self.trade.get(it) {
@@ -4493,10 +5982,56 @@ impl eframe::App for App {
                     }
                 });
             }
-            if let Some(it) = diagnosed.filter(|_| !detail) {
+            if let Some(it) = diagnosed.filter(|_| !detail && market_line.is_none()) {
                 let bottom = egui::Rect::from_min_max(egui::pos2(full.min.x, split), full.max);
                 let shown = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bottom), |ui| {
-                    egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 8 }).show(ui, |ui| self.value_panel(ui, &it));
+                    egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 8 }).show(ui, |ui| {
+                        // Comparer à l'équipé, comparer au build : les modales de comparaison.
+                        if let Some(b) = self.diag_bands.clone() {
+                            let mut open = None;
+                            // Face à ta pièce : de combien cette pièce rapproche (ou éloigne) du build.
+                            let gap = |d: &SlotDiag| {
+                                d.gap.map(|g| {
+                                    let color = if g > 0 { ui::SOCKET_GOOD } else if g < 0 { ui::SOCKET_WRONG } else { Color32::GRAY };
+                                    (format!("{}{} %", if g > 0 { "+" } else if g < 0 { "−" } else { "" }, g.abs()), color)
+                                })
+                            };
+                            let build = |d: &SlotDiag| d.it_score.filter(|_| d.build).map(|s| (format!("{s} %"), ui::score_color(s)));
+                            match b.slots.as_slice() {
+                                [d] => {
+                                    if ui::click_band(ui, "Comparer à l'équipé", gap(d).map(|(v, c)| ("vers le build", v, c)), d.worn, true).clicked() {
+                                        open = Some((d.slot, DetailMode::DiagWorn));
+                                    }
+                                    ui.add_space(4.0);
+                                    if ui::click_band(ui, "Comparer au build", build(d).map(|(v, c)| ("cette pièce", v, c)), d.build, true).clicked() {
+                                        open = Some((d.slot, DetailMode::DiagBuild));
+                                    }
+                                }
+                                // Anneau, charme : une puce par emplacement, chacune ouvre sa modale.
+                                slots => {
+                                    let chips = |f: &dyn Fn(&SlotDiag) -> (Option<(String, Color32)>, bool)| -> Vec<ui::Chip> {
+                                        slots.iter().map(|d| {
+                                            let (value, enabled) = f(d);
+                                            ui::Chip { label: d.slot.side().unwrap_or("").to_string(), value, enabled }
+                                        }).collect()
+                                    };
+                                    if let Some(i) = ui::chip_band(ui, "Comparer à l'équipé", &chips(&|d| (gap(d), d.worn))) {
+                                        open = Some((slots[i].slot, DetailMode::DiagWorn));
+                                    }
+                                    ui.add_space(4.0);
+                                    if let Some(i) = ui::chip_band(ui, "Comparer au build", &chips(&|d| (build(d), d.build))) {
+                                        open = Some((slots[i].slot, DetailMode::DiagBuild));
+                                    }
+                                }
+                            }
+                            if let Some((slot, mode)) = open {
+                                self.slot_detail = Some(slot);
+                                self.detail_mode = mode;
+                            }
+                            ui.add_space(6.0);
+                        }
+                        self.value_panel(ui, &it)
+                    });
                 });
                 let h = shown.response.rect.height();
                 if (h - value_h).abs() > 0.5 {
@@ -4508,8 +6043,284 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::from_rgb(12, 11, 10)))
             .show(ctx, |ui| self.central(ui, &glow));
+        // Comparaisons ouvertes depuis le diagnostic : par-dessus toute la fenêtre, en plus grand.
+        if self.slot_detail.is_some() && self.detail_mode != DetailMode::Worn {
+            let screen = ctx.screen_rect();
+            egui::Area::new(egui::Id::new("diag_detail")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+                ui.set_clip_rect(screen);
+                self.slot_detail(ui, screen, 1.4, 1.4);
+            });
+        }
     }
 }
+
+/// Catégories poe.ninja du marché d'échange et leur nom affiché.
+const MARKET_CATEGORIES: &[(&str, &str)] = &[
+    ("Currency", "Monnaie"),
+    ("Fragments", "Fragments"),
+    ("Runes", "Runes"),
+    ("Essences", "Essences"),
+    ("SoulCores", "Cœurs d'âme"),
+    ("Idols", "Idoles"),
+    ("Expedition", "Expédition"),
+    ("Ritual", "Rituel"),
+    ("Delirium", "Délire"),
+    ("Breach", "Brèche"),
+    ("Abyss", "Abîme"),
+    ("UncutGems", "Gemmes non taillées"),
+    ("LineageSupportGems", "Gemmes de lignée"),
+];
+
+static RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\)").unwrap());
+
+/// Mods d'un unique (texte PoB, plages « (10-20) ») face à ceux d'une pièce : pour chacun, sa
+/// part atteinte (1 et plus : au moins le minimum de la plage ; 0 : absent). Un mod sans valeur
+/// compte s'il est présent.
+fn unique_matches(it: &Item, mods: &[String]) -> Vec<f64> {
+    let have: Vec<(String, Option<f64>)> = it.mods.iter().map(|m| trade::template(m)).collect();
+    mods.iter()
+        .map(|m| {
+            // La plage devient son minimum : c'est ce qu'il faut au moins avoir.
+            let (tpl, want) = trade::template(&RANGE.replace_all(m, "$1"));
+            match have.iter().find(|(t, _)| *t == tpl) {
+                None => 0.0,
+                Some((_, h)) => match want.filter(|w| *w > 0.0) {
+                    Some(w) => (h.unwrap_or(0.0) / w).clamp(0.0, 2.0),
+                    None => 1.0,
+                },
+            }
+        })
+        .collect()
+}
+
+/// Marque d'une part atteinte : ✓ au moins visée, ~ en dessous, ✗ absente.
+fn match_mark(part: f64) -> (&'static str, Color32) {
+    if part >= 1.0 {
+        ("✓", ui::SOCKET_GOOD)
+    } else if part > 0.0 {
+        ("~", ui::EMPTY_SOCKET)
+    } else {
+        ("✗", ui::SOCKET_WRONG)
+    }
+}
+
+/// De quoi afficher les bandeaux « comparer » du diagnostic : un emplacement, ou chacun de
+/// ceux d'un anneau ou d'un charme.
+#[derive(Clone)]
+struct DiagBands {
+    slots: Vec<SlotDiag>,
+}
+
+/// La pièce diagnostiquée face à un emplacement : pièce portée et recommandation présentes,
+/// scores, écart, réponse.
+#[derive(Clone)]
+struct SlotDiag {
+    slot: Slot,
+    worn: bool,
+    build: bool,
+    it_score: Option<u32>,
+    gap: Option<i64>,
+    answer: (&'static str, Color32),
+}
+
+/// Contenu de la modale de comparaison.
+#[derive(Clone, Copy, PartialEq)]
+enum DetailMode {
+    /// Clic sur une case : la pièce portée face à ce que recommande le build.
+    Worn,
+    /// Diagnostic : la pièce diagnostiquée face à ce que recommande le build.
+    DiagBuild,
+    /// Diagnostic : la pièce diagnostiquée face à la pièce portée.
+    DiagWorn,
+}
+
+/// Un bloc de comparaison (ta pièce, ou celle du build), face à la pièce diagnostiquée : en-tête
+/// de la pièce, lignes marquées, runes, score.
+#[derive(Default)]
+struct DiagSide {
+    image: Option<egui::TextureHandle>,
+    name: String,
+    name_color: Color32,
+    after: Option<String>,
+    /// Lignes d'arme (dégâts, critique, attaques par seconde), colorées comme en jeu.
+    weapon: Vec<Vec<(String, Color32)>>,
+    props: Vec<ui::Parts>,
+    prop_marks: Vec<Option<(&'static str, Color32)>>,
+    implicits: Vec<String>,
+    implicit_marks: Vec<Option<(&'static str, Color32)>>,
+    /// Ligne : marque, couleur, texte.
+    lines: Vec<(Option<(&'static str, Color32)>, Color32, String)>,
+    notes: Vec<String>,
+    runes: Vec<ui::RuneLine>,
+    score: Option<u32>,
+}
+
+static WEAPON_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(Physical|Elemental|Fire|Cold|Lightning|Chaos) Damage: (.+)$").unwrap());
+static RANGE_PART: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)-(\d+)( \(augmented\))?").unwrap());
+static ADDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Adds (\d+) to (\d+) (Fire|Cold|Lightning|Chaos|Physical) Damage").unwrap());
+static RATE_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(Critical Hit Chance|Attacks per Second|Reload Time): (.+?)( \(augmented\))?$").unwrap());
+
+/// Couleur d'un type de dégâts, comme en jeu.
+fn damage_color(kind: &str) -> Color32 {
+    match kind {
+        "Fire" => Color32::from_rgb(220, 90, 60),
+        "Cold" => Color32::from_rgb(100, 150, 240),
+        "Lightning" => Color32::from_rgb(240, 210, 60),
+        "Chaos" => Color32::from_rgb(210, 70, 170),
+        _ => Color32::from_gray(225),
+    }
+}
+
+/// Lignes d'une arme comme en jeu : dégâts physiques, dégâts élémentaires (chaque fourchette dans
+/// la couleur de son élément, retrouvé d'après les mods « Adds X to Y … Damage »), chaos, coups
+/// critiques, attaques par seconde ; valeurs changées par les mods en bleu.
+fn weapon_lines(it: &Item) -> Vec<Vec<(String, Color32)>> {
+    let (label, aug) = (Color32::GRAY, Color32::from_rgb(136, 136, 255));
+    let adds: Vec<(String, String, String)> = it.mods.iter().filter_map(|m| ADDS.captures(m).map(|c| (c[1].to_string(), c[2].to_string(), c[3].to_string()))).collect();
+    // Dégâts par seconde entre parenthèses au bout des lignes : physiques, élémentaires, et le
+    // total après les attaques par seconde.
+    // Chaque ligne de dégâts donne le sien (moyenne de ses fourchettes × attaques par seconde) ;
+    // le total compte le chaos, rappelé à part.
+    let aps = it.props.get("aps").copied().unwrap_or(0.0);
+    let tail = |v: f64| vec![(" (DPS ".to_string(), label), (format!("{v:.0}"), Color32::from_gray(225)), (")".to_string(), label)];
+    let (mut total, mut chaos) = (0.0, 0.0);
+    let mut rate_line = None;
+    let mut out = Vec::new();
+    for line in it.raw.lines().map(str::trim) {
+        if let Some(c) = WEAPON_LINE.captures(line) {
+            let kind = &c[1];
+            let name = match kind {
+                "Physical" => "Dégâts physiques",
+                "Chaos" => "Dégâts de chaos",
+                _ => "Dégâts élémentaires",
+            };
+            let mut parts = vec![(format!("{name} : "), label)];
+            for (k, r) in RANGE_PART.captures_iter(&c[2]).enumerate() {
+                if k > 0 {
+                    parts.push((", ".into(), label));
+                }
+                let color = match kind {
+                    "Physical" => if r.get(3).is_some() { aug } else { Color32::from_gray(225) },
+                    "Elemental" => adds.iter().find(|(a, b, _)| *a == r[1] && *b == r[2]).map_or(Color32::from_gray(225), |(_, _, e)| damage_color(e)),
+                    other => damage_color(other),
+                };
+                parts.push((format!("{}-{}", &r[1], &r[2]), color));
+            }
+            let dps: f64 = RANGE_PART.captures_iter(&c[2]).map(|r| (r[1].parse::<f64>().unwrap_or(0.0) + r[2].parse::<f64>().unwrap_or(0.0)) / 2.0).sum::<f64>() * aps;
+            if dps > 0.0 {
+                parts.extend(tail(dps));
+                total += dps;
+                if kind == "Chaos" {
+                    chaos += dps;
+                }
+            }
+            out.push(parts);
+        } else if let Some(c) = RATE_LINE.captures(line) {
+            let name = match &c[1] {
+                "Critical Hit Chance" => "Coups critiques",
+                "Attacks per Second" => "Attaques par seconde",
+                _ => "Rechargement",
+            };
+            let parts = vec![(format!("{name} : "), label), (c[2].to_string(), if c.get(3).is_some() { aug } else { Color32::from_gray(225) })];
+            if name == "Attaques par seconde" {
+                rate_line = Some(out.len());
+            }
+            out.push(parts);
+        }
+    }
+    // Total après les attaques par seconde (les lignes de dégâts peuvent venir après).
+    if let Some(i) = rate_line.filter(|_| total > 0.0) {
+        let mut t = tail(total);
+        if chaos > 0.0 {
+            t.pop();
+            t.push((", dont ".into(), label));
+            t.push((format!("{chaos:.0}"), Color32::from_gray(225)));
+            t.push((" DPS chaos)".into(), label));
+        }
+        out[i].extend(t);
+    }
+    out
+}
+
+/// DPS total d'une arme d'attaque (physique, élémentaire et chaos), comme au bout de la ligne
+/// des attaques par seconde ; `None` sans dégâts ni attaques par seconde.
+fn weapon_total_dps(it: &Item) -> Option<f64> {
+    let aps = it.props.get("aps").copied()?;
+    let total: f64 = it
+        .raw
+        .lines()
+        .filter_map(|l| WEAPON_LINE.captures(l.trim()))
+        .flat_map(|c| RANGE_PART.captures_iter(&c[2]).map(|r| (r[1].parse::<f64>().unwrap_or(0.0) + r[2].parse::<f64>().unwrap_or(0.0)) / 2.0).collect::<Vec<_>>())
+        .sum::<f64>()
+        * aps;
+    (total > 0.0).then_some(total)
+}
+
+/// Nom d'une compétence accordée : « Level 15 Freezing Shards (Max Level 18) » -> « Freezing Shards ».
+fn skill_name(text: &str) -> &str {
+    let text = text.split(" (").next().unwrap_or(text);
+    match text.strip_prefix("Level ") {
+        Some(rest) => rest.split_once(' ').map_or(rest, |(_, name)| name),
+        None => text,
+    }
+    .trim()
+}
+
+/// « DPS 152 · physique 98 · élémentaire 54 ».
+fn dps_parts(d: &compare::Dps) -> ui::Parts {
+    let mut out: ui::Parts = vec![("DPS ".into(), false), (format!("{:.0}", d.total()), true)];
+    if d.phys > 0.0 && d.ele > 0.0 {
+        out.push((format!(" · physique {:.0} · élémentaire {:.0}", d.phys, d.ele), false));
+    }
+    out
+}
+
+/// « 3 » ou « 2.5 ».
+fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 { format!("{v:.0}") } else { format!("{v:.1}") }
+}
+
+/// Défenses en morceaux de texte, valeurs changées par les mods en bleu (`aug`).
+fn defence_parts(d: [f64; 3], aug: [bool; 3]) -> ui::Parts {
+    let mut out: ui::Parts = Vec::new();
+    for ((n, v), a) in ["Armure", "Évasion", "Bouclier d'énergie"].iter().zip(d).zip(aug).filter(|((_, v), _)| *v > 0.0) {
+        if !out.is_empty() {
+            out.push((" · ".into(), false));
+        }
+        out.push((format!("{n} "), false));
+        out.push((format!("{v:.0}"), a));
+    }
+    out
+}
+
+/// Fioles et charmes : ce qu'ils récupèrent (ou leur durée) et leurs charges. Chaque valeur
+/// vient avec un drapeau : changée par les mods (bleu).
+fn flask_parts(recover: (f64, bool), mana: bool, time: (f64, bool), duration: (f64, bool), per_use: (f64, bool), max: (f64, bool)) -> Vec<ui::Parts> {
+    let mut out = Vec::new();
+    if recover.0 > 0.0 {
+        out.push(vec![
+            ("Récupère ".into(), false),
+            (format!("{:.0}", recover.0), recover.1),
+            (format!(" {} en ", if mana { "mana" } else { "vie" }), false),
+            (fmt_num(time.0), time.1),
+            (" s".into(), false),
+        ]);
+    } else if duration.0 > 0.0 {
+        out.push(vec![("Dure ".into(), false), (fmt_num(duration.0), duration.1), (" s".into(), false)]);
+    }
+    if max.0 > 0.0 {
+        out.push(vec![
+            (format!("{:.0}", per_use.0), per_use.1),
+            (" charges sur ".into(), false),
+            (format!("{:.0}", max.0), max.1),
+            (" par utilisation".into(), false),
+        ]);
+    }
+    out
+}
+
+/// Taille minimale de la fenêtre.
+const MIN_WINDOW: [f32; 2] = [1200.0, 1000.0];
 
 /// Polices système en secours pour les symboles absents de la police par défaut (▲ ▼ ● ≈).
 const SYMBOL_FONTS: &[&str] = &[
@@ -4666,7 +6477,11 @@ fn main() -> eframe::Result {
     }
 
     std::thread::spawn(desktop::install);
-    let mut viewport = egui::ViewportBuilder::default().with_title("poe2-tracker").with_app_id(desktop::APP_ID);
+    // Lancé depuis le dépôt (`target/debug` ou `target/release`) : version de développement, à
+    // distinguer de l'application installée dans la barre de titre.
+    let dev = std::env::current_exe().is_ok_and(|p| p.components().any(|c| c.as_os_str() == "target"));
+    let title = if dev { "poe2-tracker-dev" } else { "poe2-tracker" };
+    let mut viewport = egui::ViewportBuilder::default().with_title(title).with_app_id(desktop::APP_ID);
     if let Some(icon) = desktop::window_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -4678,8 +6493,42 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: viewport
             .with_inner_size(size)
-            .with_min_inner_size([1200.0, 1000.0]),
+            .with_min_inner_size(MIN_WINDOW),
         ..Default::default()
     };
     eframe::run_native("poe2-tracker", options, Box::new(move |cc| Ok(Box::new(App::new(cc, dirs, stored, config)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unique_lines_against_worn() {
+        let it = item::parse("Item Class: Charms\nRarity: Unique\nRite of Passage\nGolden Charm\n--------\nItem Level: 80\n--------\nPossessed by a random Spirit for 15 seconds on use\n+8% to Fire Resistance").unwrap();
+        let mods = ["Possessed by a random Spirit for (10-20) seconds on use", "+(10-15)% to Fire Resistance", "Grants Onslaught"].map(String::from);
+        let parts = unique_matches(&it, &mods);
+        assert_eq!(parts[0], 1.5);
+        assert!((parts[1] - 0.8).abs() < 1e-9);
+        assert_eq!(parts[2], 0.0);
+        assert_eq!([match_mark(parts[0]).0, match_mark(parts[1]).0, match_mark(parts[2]).0], ["✓", "~", "✗"]);
+        assert_eq!(skill_name("Level 15 Freezing Shards (Max Level 18)"), "Freezing Shards");
+        assert_eq!(skill_name("Freezing Shards"), "Freezing Shards");
+        // Arme : fourchettes élémentaires rangées par élément d'après les mods.
+        let staff = item::parse("Item Class: Quarterstaves\nRarity: Rare\nBramble Goad\nGuardian Quarterstaff\n--------\nPhysical Damage: 41-68 (augmented)\nElemental Damage: 4-87 (augmented)\nCritical Hit Chance: 10.00%\nAttacks per Second: 1.40\n--------\nItem Level: 70\n--------\nAdds 4 to 87 Lightning Damage").unwrap();
+        let lines = weapon_lines(&staff);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[1][1], ("4-87".to_string(), damage_color("Lightning")));
+        // DPS au bout des lignes : physiques, élémentaires, total après les attaques par seconde.
+        let text = |l: &Vec<(String, Color32)>| l.iter().map(|(t, _)| t.as_str()).collect::<String>();
+        assert_eq!(text(&lines[0]), "Dégâts physiques : 41-68 (DPS 76)");
+        assert_eq!(text(&lines[1]), "Dégâts élémentaires : 4-87 (DPS 64)");
+        assert_eq!(text(&lines[3]), "Attaques par seconde : 1.40 (DPS 140)");
+        // Ligne d'un seul élément (« Lightning Damage ») et chaos compté dans le total.
+        let staff = item::parse("Item Class: Quarterstaves\nRarity: Rare\nBramble Goad\nGuardian Quarterstaff\n--------\nPhysical Damage: 52-86 (augmented)\nLightning Damage: 4-87 (augmented)\nChaos Damage: 10-20 (augmented)\nCritical Hit Chance: 10.00%\nAttacks per Second: 1.40\n--------\nItem Level: 70\n--------\nAdds 4 to 87 Lightning Damage").unwrap();
+        let lines = weapon_lines(&staff);
+        assert_eq!(text(&lines[1]), "Dégâts élémentaires : 4-87 (DPS 64)");
+        assert_eq!(text(&lines[2]), "Dégâts de chaos : 10-20 (DPS 21)");
+        assert_eq!(text(&lines[4]), "Attaques par seconde : 1.40 (DPS 181, dont 21 DPS chaos)");
+    }
 }

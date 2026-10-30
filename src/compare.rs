@@ -84,8 +84,11 @@ pub struct Delta {
     pub text: String,
     /// Positif = mieux pour toi, négatif = moins bien, 0 = neutre.
     pub sign: i8,
-    /// Constat sur la pièce entière (sa base), affiché à part avant les écarts ligne à ligne.
+    /// Constat sur la pièce entière (sa base) : il pèse sur le verdict, l'affichage le montre
+    /// ailleurs (marques des défenses, pièce visée).
     pub headline: bool,
+    /// Ligne sur les dégâts de l'arme : l'affichage les met avec la base (voir `weapon_dps`).
+    pub dps: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +100,7 @@ pub struct Comparison {
     pub deltas: Vec<Delta>,
     pub notes: Vec<String>,
     /// Référence du jugement : « Ky Ice Nova — Act 3 », ou vide (jugement générique).
+    #[allow(dead_code)] // plus affichée depuis la refonte du diagnostic ; vérifiée par les tests
     pub basis: String,
 }
 
@@ -132,7 +136,7 @@ fn uses(it: &Item) -> f64 {
 }
 
 fn delta(text: String, sign: i8) -> Delta {
-    Delta { text, sign, headline: false }
+    Delta { text, sign, headline: false, dps: false }
 }
 
 /// Fioles : comme les dégâts pour une arme, la quantité rendue par gorgée passe avant tout.
@@ -189,18 +193,19 @@ fn compare_charm(it: &Item, worn: &Item) -> (Verdict, Vec<Delta>) {
 /// Dégâts par seconde d'une arme d'attaque (physique, élémentaire + chaos), d'après ses
 /// lignes de base, mods locaux compris. `None` pour un bâton de sorts, un bouclier…
 #[derive(Clone, Copy, Default)]
-struct Dps {
-    phys: f64,
-    ele: f64,
+pub struct Dps {
+    pub phys: f64,
+    pub ele: f64,
 }
 
 impl Dps {
-    fn total(&self) -> f64 {
+    pub fn total(&self) -> f64 {
         self.phys + self.ele
     }
 }
 
-fn weapon_dps(it: &Item) -> Option<Dps> {
+/// Dégâts par seconde d'une arme d'attaque (rien pour une arme de lanceur de sorts).
+pub fn weapon_dps(it: &Item) -> Option<Dps> {
     let aps = *it.props.get("aps")?;
     let get = |k: &str| it.props.get(k).copied().unwrap_or(0.0);
     let dps = Dps { phys: get("phys_avg") * aps, ele: get("ele_avg") * aps };
@@ -408,7 +413,7 @@ pub fn check_targets(it: &Item, step: &Step, slot: Slot, base_defences: impl Fn(
     let mut out = Vec::new();
     let mut local: Vec<&str> = Vec::new();
     if armour_piece {
-        let base_name = step.targets.iter().find(|(s, _, _)| *s == slot).map(|(_, b, _)| b.as_str()).unwrap_or_default();
+        let base_name = step.base_for(slot);
         let base = base_defences(base_name).unwrap_or_default();
         let targets: Vec<&crate::guide::Target> = step.targets_for(slot).collect();
         for (i, (prop, flat, incs)) in ARMOUR_DEFENCES.iter().enumerate() {
@@ -583,8 +588,15 @@ fn base_fit(have: &BaseMeta, want: &BaseMeta, want_name: &str) -> Fit {
 /// `item_base` : le type de base de `it` (classe, défenses…) ; `bases` : celui d'un type nommé
 /// (la base visée par le build).
 pub fn compare(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_base: Option<BaseMeta>, bases: &dyn Fn(&str) -> Option<BaseMeta>) -> Option<Comparison> {
+    compare_at(it, gear, build, item_base, bases, None)
+}
+
+/// `compare`, face à un seul des emplacements d'un anneau ou d'un charme (`at`) plutôt qu'au
+/// plus faible (anneaux) ou à celui du même type (charmes).
+pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_base: Option<BaseMeta>, bases: &dyn Fn(&str) -> Option<BaseMeta>, at: Option<Slot>) -> Option<Comparison> {
     let kind = gear::kind_of(&it.item_class)?;
-    if let Some((&slot, _)) = gear.slots.iter().find(|(_, t)| **t == it.raw) {
+    let at = at.filter(|_| matches!(kind, Kind::Ring | Kind::Charm | Kind::TwoHanded | Kind::Single(Slot::Weapon | Slot::Offhand)));
+    if let Some((&slot, _)) = gear.slots.iter().find(|(s, t)| **t == it.raw && at.is_none_or(|a| a == **s)) {
         return Some(Comparison {
             verdict: Verdict::Same,
             against: vec![slot],
@@ -594,12 +606,17 @@ pub fn compare(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_base: 
             basis: String::new(),
         });
     }
-    // Les armes se comparent à celles du set affiché.
-    let set = gear.set;
+    // Les armes se comparent à celles du set affiché, ou du set de l'emplacement choisi.
+    let set = match at {
+        Some(Slot::Weapon2 | Slot::Offhand2) => 2,
+        Some(Slot::Weapon | Slot::Offhand) => 1,
+        _ => gear.set,
+    };
     let worn = |s: Slot| gear.item(s).map(|i| (s, i));
     let refs: Vec<(Slot, Item)> = match kind {
         Kind::Single(s) => worn(s.in_set(set)).into_iter().collect(),
         Kind::TwoHanded => [Slot::Weapon.in_set(set), Slot::Offhand.in_set(set)].into_iter().filter_map(worn).collect(),
+        Kind::Ring | Kind::Charm if at.is_some() => at.and_then(worn).into_iter().collect(),
         Kind::Ring => RINGS
             .into_iter()
             .filter_map(worn)
@@ -624,10 +641,11 @@ pub fn compare(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_base: 
     let target = match kind {
         Kind::Single(s) => s.in_set(set),
         Kind::TwoHanded => Slot::Weapon.in_set(set),
-        Kind::Ring => Slot::RingLeft,
-        Kind::Charm => Slot::Charm1,
+        Kind::Ring => at.unwrap_or(Slot::RingLeft),
+        Kind::Charm => at.unwrap_or(Slot::Charm1),
     };
-    if refs.is_empty() && target == Slot::Offhand.in_set(set) && gear.two_handed() {
+    let two_handed = gear.item(Slot::Weapon.in_set(set)).is_some_and(|w| gear::kind_of(&w.item_class) == Some(Kind::TwoHanded));
+    if refs.is_empty() && target == Slot::Offhand.in_set(set) && two_handed {
         return Some(Comparison::unknown(
             "ta main gauche est prise par ton arme à deux mains : il faudrait aussi changer d'arme".into(),
             vec![Slot::Weapon.in_set(set)],
@@ -649,7 +667,7 @@ pub fn compare(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_base: 
     let profile_slots: Vec<Slot> = match kind {
         Kind::Single(s) => vec![s.in_set(set)],
         Kind::TwoHanded => vec![Slot::Weapon.in_set(set), Slot::Offhand.in_set(set)],
-        Kind::Ring => RINGS.to_vec(),
+        Kind::Ring => at.map_or(RINGS.to_vec(), |s| vec![s]),
         Kind::Charm => vec![],
     };
     // Base visée par le build sur cet emplacement.
@@ -663,6 +681,10 @@ pub fn compare(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_base: 
     let mut basis = String::new();
     let (verdict, deltas) = if matches!(kind, Kind::Single(Slot::LifeFlask | Slot::ManaFlask)) {
         compare_flask(it, &refs[0].1)
+    } else if kind == Kind::Charm && refs[0].1.base != it.base {
+        // Face à un charme d'un autre type (emplacement choisi) : pas de comparaison qui tienne.
+        notes.push(format!("autre type de charme ({})", refs[0].1.base));
+        (Verdict::Unknown, vec![])
     } else if kind == Kind::Charm {
         compare_charm(it, &refs[0].1)
     } else if let Some((name, step, profile)) = &profile {
@@ -703,19 +725,19 @@ pub fn compare(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_base: 
     if let Some(v) = dps_verdict {
         verdict = v;
     }
-    deltas.splice(0..0, dps_rows);
+    deltas.splice(0..0, dps_rows.into_iter().map(|d| Delta { dps: true, ..d }));
     // Une base qui ne convient pas au build passe avant tout : jamais recommandée.
     if let (Some((name, want)), Some(have)) = (&wanted_base, &item_base) {
         match base_fit(have, want, name) {
             Fit::Off(why) => {
                 verdict = Verdict::Worse;
-                deltas.insert(0, Delta { text: format!("pas pour ce build : {why}"), sign: -1, headline: true });
+                deltas.insert(0, Delta { text: format!("pas pour ce build : {why}"), sign: -1, headline: true, dps: false });
             }
             Fit::Partial(why) => {
                 if verdict == Verdict::Better {
                     verdict = Verdict::Equal;
                 }
-                deltas.insert(0, Delta { text: why, sign: -1, headline: true });
+                deltas.insert(0, Delta { text: why, sign: -1, headline: true, dps: false });
             }
             Fit::Ok => {}
         }
@@ -783,7 +805,7 @@ mod tests {
             passives: vec![],
             targets: vec![(Slot::Gloves, "Rope Cuffs".into(), vec![target("# to maximum Life", 59.0), target("#% to Fire Resistance", 10.0)])],
             uniques: vec![],
-            passive_sets: Default::default(),
+            passive_sets: Default::default(), side_targets: vec![],
         };
         let g = gear_with(&[GLOOM_TOUCH]);
         // Gants avec beaucoup de précision et d'évasion mais sans vie : hors build.
@@ -811,7 +833,7 @@ mod tests {
                 target("#% to Cold Resistance", 10.0, "+10% to Cold Resistance"),
             ])],
             uniques: vec![],
-            passive_sets: Default::default(),
+            passive_sets: Default::default(), side_targets: vec![],
         };
         let gloves = item::parse("Item Class: Gloves\nRarity: Rare\nA\nTorn Gloves\n--------\nItem Level: 20\n--------\n+34 to maximum Life\n+15% to Fire Resistance").unwrap();
         let c = check_targets(&gloves, &step, Slot::Gloves, |_| None);
@@ -832,7 +854,7 @@ mod tests {
                 target("# to maximum Life", 80.0),
             ])],
             uniques: vec![],
-            passive_sets: Default::default(),
+            passive_sets: Default::default(), side_targets: vec![],
         };
         let base = |n: &str| (n == "Ancestral Tiara").then_some([0.0, 0.0, 109.0]);
         // (109 + 40) × 1,5 ≈ 224 visés ; la pièce a 230 sans aucun mod de bouclier d'énergie.
@@ -890,7 +912,7 @@ mod tests {
             passives: vec![],
             targets: vec![(Slot::Gloves, "Silk Gloves".into(), vec![crate::guide::Target { template: "# to maximum Life".into(), value: 40.0, line: "+40 to maximum Life".into() }])],
             uniques: vec![],
-            passive_sets: Default::default(),
+            passive_sets: Default::default(), side_targets: vec![],
         };
         let bases = |n: &str| (n == "Silk Gloves").then(|| meta("Gloves", None, [0.0, 0.0, 30.0]));
         let armour = Some(meta("Gloves", None, [60.0, 0.0, 0.0]));
@@ -922,7 +944,7 @@ mod tests {
                 ],
             )],
             uniques: vec![],
-            passive_sets: Default::default(),
+            passive_sets: Default::default(), side_targets: vec![],
         };
         let p = Profile::new(&step, &[Slot::Weapon], &[], true).unwrap();
         assert!(p.weight("#% increased Spell Damage").unwrap().0 > p.weight("# to maximum Mana").unwrap().0);

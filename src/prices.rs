@@ -291,6 +291,29 @@ pub fn sort_by_family(lines: &mut [MarketLine]) {
     });
 }
 
+/// Historique du cours d'un objet du marché d'échange (page de détail de poe.ninja) : un point
+/// par jour, du plus ancien au plus récent, en exalts. Le cours en divines est ramené aux exalts
+/// au taux du jour ; la divine elle-même a son cours en exalts.
+pub fn history(league: &str, category: &str, details_id: &str, exalted_per_divine: f64) -> Result<Vec<(String, f64)>, Box<dyn std::error::Error>> {
+    let url = format!("{API}/exchange/current/details?league={}&type={category}&id={details_id}", league.replace(' ', "+"));
+    let j: serde_json::Value = ureq::get(&url).set("User-Agent", USER_AGENT).timeout(Duration::from_secs(20)).call()?.into_json()?;
+    let pairs = j["pairs"].as_array().cloned().unwrap_or_default();
+    let pair = |id: &str| pairs.iter().find(|p| p["id"] == id);
+    let (pair, per) = match (pair("divine"), pair("exalted")) {
+        (Some(p), _) => (p, exalted_per_divine),
+        (None, Some(p)) => (p, 1.0),
+        _ => return Ok(Vec::new()),
+    };
+    let mut points: Vec<(String, f64)> = pair["history"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| Some((h["timestamp"].as_str()?.get(..10)?.to_string(), h["rate"].as_f64()? * per)))
+        .collect();
+    points.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(points)
+}
+
 /// Prix partagés avec l'interface, rafraîchis en arrière-plan toutes les 15 minutes, ou sur
 /// demande.
 #[derive(Clone)]
