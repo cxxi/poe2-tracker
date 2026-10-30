@@ -28,6 +28,7 @@ mod leagues;
 mod logwatch;
 mod mapping;
 mod passive_icons;
+mod richtext;
 mod paths;
 mod prices;
 mod route;
@@ -188,6 +189,8 @@ struct App {
     build_rarities: Option<(String, Vec<builds::StepRarities>)>,
     /// Joyaux de l'arbre (Mobalytics), par build.
     build_jewels: Option<(String, Vec<builds::StepJewels>)>,
+    /// Textes de l'auteur (Mobalytics), par build.
+    build_guide: Option<(String, Option<builds::BuildGuide>)>,
     /// Choix de récompenses de quête du build actif.
     build_quests: Option<(String, Vec<builds::QuestChoice>)>,
     /// Fenêtre des nouveautés ouverte : versions à montrer.
@@ -258,8 +261,6 @@ struct App {
     market_history: Arc<Mutex<HashMap<String, Option<Result<Vec<(String, f64)>, String>>>>>,
     /// Période de la courbe du détail : 7 jours, 30 jours, tout.
     market_period: usize,
-    /// Étape affichée dans les onglets du build (`None` = étape actuelle).
-    view_step: Option<usize>,
     tree: views::TreeView,
     passive_icons: passive_icons::PassiveIcons,
     dirs: ProjectDirs,
@@ -580,6 +581,7 @@ impl App {
             build_runes: None,
             build_rarities: None,
             build_jewels: None,
+            build_guide: None,
             build_quests: None,
             step_preview: None,
             market_min_ex: config.market_min_ex,
@@ -638,11 +640,11 @@ impl App {
                 Ok("sorts") => views::Tab::Skills,
                 Ok("talents") => views::Tab::Passives,
                 Ok("atlas") => views::Tab::Atlas,
+                Ok("guide") => views::Tab::Guide,
                 _ => views::Tab::Equipment,
             },
             // Développement : `POE2_TRACKER_FULL=1` ouvre la vue en plein écran.
             full_view: std::env::var_os("POE2_TRACKER_FULL").is_some(),
-            view_step: None,
             tree: views::TreeView::default(),
             passive_icons: passive_icons::PassiveIcons::new(&cc.egui_ctx, dirs.cache_dir().to_path_buf(), config.game_dir.clone()),
             welcome: Welcome {
@@ -806,6 +808,14 @@ impl App {
     fn judging_step(&self) -> Option<&guide::Step> {
         let c = self.coach.as_ref()?;
         self.step_preview.as_ref().and_then(|l| c.steps.iter().find(|s| &s.label == l)).or_else(|| c.judging_step())
+    }
+
+    /// Rang de l'étape choisie dans la barre du haut (celle de la progression, ou l'aperçu) :
+    /// celle que montrent les onglets du build.
+    fn shown_step_index(&self) -> Option<usize> {
+        let c = self.coach.as_ref()?;
+        let label = self.judging_step().map(|s| s.label.clone());
+        label.and_then(|l| c.steps.iter().position(|s| s.label == l)).or_else(|| c.current_step_index()).filter(|i| *i < c.steps.len())
     }
 
     /// Build actif et étape utilisée pour juger l'équipement.
@@ -1710,6 +1720,36 @@ impl App {
         }
     }
 
+    /// Fiche d'un type de base, au format de celle d'une pièce portée : image, défenses, niveau
+    /// requis et implicites de la base.
+    fn base_view(&mut self, name: &str) -> ui::WornView {
+        let catalog = self.augments.get();
+        let mut props = Vec::new();
+        if let Some(d) = catalog.as_ref().and_then(|c| c.defences.get(name).copied()) {
+            let def = defence_parts(d, [false; 3]);
+            if !def.is_empty() {
+                props.push(def);
+            }
+        }
+        if let Some(level) = catalog.as_ref().and_then(|c| c.req_levels.get(name).copied()) {
+            props.push(ui::req_level_parts(level, self.char_level()));
+        }
+        ui::WornView {
+            weapon: vec![],
+            image: self.assets.texture_by_name(name),
+            title: name.to_string(),
+            after: None,
+            color: Color32::from_gray(225),
+            props,
+            implicits: catalog.as_ref().and_then(|c| c.implicits.get(name).cloned()).unwrap_or_default(),
+            mods: vec![],
+            runes: vec![],
+            empty_sockets: 0,
+            score: None,
+            suggestions: vec![],
+        }
+    }
+
     /// Unique que le build recommande sur `slot` à cette étape (une fiole de mana est rangée par
     /// le planificateur avec les fioles de vie : son type de base la remet à sa place).
     fn recommended_unique(&self, step: &guide::Step, slot: Slot) -> Option<String> {
@@ -1893,28 +1933,6 @@ impl App {
             self.switch_character(Some(name));
         }
 
-        let current = self.builds.active().map(|b| b.name.clone());
-        let selected = match &current {
-            Some(n) => RichText::new(n).color(ui::GOLD),
-            None => RichText::new(tr!("aucun build")).color(Color32::GRAY),
-        };
-        let mut chosen: Option<String> = None;
-        // Cadre de la liste des builds : le bouton de lien prend exactement sa hauteur.
-        let mut combo_rect: Option<egui::Rect> = None;
-        in_zone(ui, 1, &mut |ui| {
-            let combo = egui::ComboBox::from_id_salt("build_select").width(width(1)).truncate().selected_text(selected.clone()).show_ui(ui, |ui| {
-            for b in self.builds.list() {
-                let active = self.builds.active().is_some_and(|a| a.id == b.id);
-                if ui.selectable_label(active, &b.name).on_hover_text(tr!("source : {source}", source = b.source)).clicked() {
-                    chosen = Some(b.id.clone());
-                }
-            }
-        })
-        .response
-        .on_hover_text(current.as_deref().unwrap_or(tr!("aucun build")));
-            combo_rect = Some(combo.rect);
-        });
-
         let mut league_pick: Option<String> = None;
         if shown[2] {
             in_zone(ui, 2, &mut |ui| {
@@ -1937,6 +1955,28 @@ impl App {
                 .on_hover_text(tr!("Ligue de ce personnage, pour les prix du marché (le journal du jeu ne la donne pas)"));
             });
         }
+
+        let current = self.builds.active().map(|b| b.name.clone());
+        let selected = match &current {
+            Some(n) => RichText::new(n).color(ui::GOLD),
+            None => RichText::new(tr!("aucun build")).color(Color32::GRAY),
+        };
+        let mut chosen: Option<String> = None;
+        // Cadre de la liste des builds : le bouton de lien prend exactement sa hauteur.
+        let mut combo_rect: Option<egui::Rect> = None;
+        in_zone(ui, 1, &mut |ui| {
+            let combo = egui::ComboBox::from_id_salt("build_select").width(width(1)).truncate().selected_text(selected.clone()).show_ui(ui, |ui| {
+            for b in self.builds.list() {
+                let active = self.builds.active().is_some_and(|a| a.id == b.id);
+                if ui.selectable_label(active, &b.name).on_hover_text(tr!("source : {source}", source = b.source)).clicked() {
+                    chosen = Some(b.id.clone());
+                }
+            }
+        })
+        .response
+        .on_hover_text(current.as_deref().unwrap_or(tr!("aucun build")));
+            combo_rect = Some(combo.rect);
+        });
 
         let mut step_pick: Option<String> = None;
         if let Some(shown_label) = &shown_step {
@@ -2439,6 +2479,7 @@ impl App {
                         self.build_quests = None;
                         self.build_rarities = None;
                         self.build_jewels = None;
+                        self.build_guide = None;
                         // Build en cours d'utilisation : ses nouvelles étapes tout de suite.
                         if self.builds.active().is_some_and(|b| b.id == id) {
                             let files = self.builds.files(&id);
@@ -3383,6 +3424,8 @@ impl App {
             self.stats_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         } else if self.tab == views::Tab::Atlas {
             self.atlas_view(ui, ui::place(area, scale, ui::VIEW_AREA));
+        } else if self.tab == views::Tab::Guide {
+            self.guide_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         } else {
             self.build_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         }
@@ -3438,7 +3481,7 @@ impl App {
     fn stats_view(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let catalog = self.augments.get();
         let no_steps: Vec<guide::Step> = Vec::new();
-        let (steps, current, penalty, level) = match &self.coach {
+        let (steps, penalty, level) = match &self.coach {
             Some(c) => {
                 let penalty = c
                     .character()
@@ -3446,24 +3489,18 @@ impl App {
                     .unwrap_or((0.0, tr!("acte 1").into()));
                 (
                     &c.steps,
-                    c.current_step_index(),
                     penalty,
                     c.character().map(|(_, ch)| ch.level),
                 )
             }
-            None => (&no_steps, None, (0.0, tr!("acte 1").into()), None),
+            None => (&no_steps, (0.0, tr!("acte 1").into()), None),
         };
         let quests = self.quest_bonuses();
-        let (view_step, gear) = (&mut self.view_step, &mut self.gear);
+        let shown = self.shown_step_index().filter(|i| *i < steps.len());
+        let gear = &mut self.gear;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
-            let mut shown = None;
             ui.horizontal(|ui| {
                 ui::gold_widgets(ui);
-                if !steps.is_empty() {
-                    ui.label(RichText::new(tr!("Étape")).color(ui::GOLD_DIM));
-                    shown = Some(views::step_selector(ui, steps, view_step, current));
-                    ui.add_space(12.0);
-                }
                 let h = ui.min_rect().height().max(ui.spacing().interact_size.y);
                 ui.label(RichText::new(tr!("Set d'armes")).color(ui::GOLD_DIM));
                 let size = ui::set_tabs_size(ui, h, [false; 2]);
@@ -3551,10 +3588,73 @@ impl App {
         }
     }
 
+    /// Onglet Guide : les textes de l'auteur du build, sa présentation puis la description de la
+    /// variante de l'étape choisie.
+    fn guide_view(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        // La zone de l'onglet déborde un peu de la partie visible du cadre : le texte s'arrête au
+        // bord visible.
+        let rect = rect.intersect(ui.clip_rect());
+        let dim = Color32::GRAY;
+        let Some(coach) = self.coach.as_ref() else {
+            ui.put(rect, egui::Label::new(RichText::new(tr!("Chargement du guide…")).color(dim)));
+            return;
+        };
+        let Some(id) = self.builds.active().map(|b| b.id.clone()) else {
+            ui.put(rect, egui::Label::new(RichText::new(tr!("Aucun build")).color(dim)));
+            return;
+        };
+        if self.build_guide.as_ref().is_none_or(|(b, _)| *b != id) {
+            self.build_guide = Some((id.clone(), builds::load_guide(&self.builds.dir_of(&id))));
+        }
+        let guide = self.build_guide.as_ref().and_then(|(_, g)| g.clone());
+        let steps = coach.steps.clone();
+        let shown = self.shown_step_index();
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            let Some(guide) = guide else {
+                ui.label(RichText::new(tr!("Pas de texte de l'auteur pour ce build. Pour un build Mobalytics, mets-le à jour depuis le gestionnaire de builds pour le récupérer.")).color(dim));
+                return;
+            };
+            if !i18n::english() {
+                ui.label(RichText::new(tr!("Textes de l'auteur du build, en anglais.")).color(dim).small().italics());
+                ui.add_space(4.0);
+            }
+            // Variante de l'étape affichée : son titre sur le site donne la même étiquette que
+            // le fichier .build de l'étape.
+            let label = shown.and_then(|i| steps.get(i)).map(|s| s.label.clone());
+            let same = |title: &str| {
+                let plain = title.split(" {").next().unwrap_or(title).trim();
+                let from_title = guide::split_name(&format!("{title} - x")).0;
+                label.as_deref().is_some_and(|l| from_title.as_deref() == Some(l) || plain == l)
+            };
+            let variant = guide.variants.iter().find(|(t, _)| same(t));
+            // Un peu plus grand que le reste de l'app : c'est un texte à lire.
+            const BODY: f32 = 15.5;
+            let out = egui::ScrollArea::vertical().id_salt("build_guide").auto_shrink([false, false]).show(ui, |ui| {
+                ui.set_width(ui.available_width() - 12.0);
+                if let Some(o) = &guide.overview {
+                    ui::section_header(ui, tr!("PRÉSENTATION DU BUILD"), None, |_| {});
+                    richtext::show(ui, "overview", &richtext::parse(o), BODY, self);
+                    ui.add_space(14.0);
+                }
+                if let Some(l) = &label {
+                    ui::section_header(ui, &tr!("VARIANTE · {step}", step = guide::step_text(l)), None, |_| {});
+                    match variant {
+                        Some((_, doc)) => richtext::show(ui, "variant", &richtext::parse(doc), BODY, self),
+                        None => {
+                            ui.label(RichText::new(tr!("L'auteur n'a rien écrit pour cette étape.")).color(dim));
+                        }
+                    }
+                }
+            });
+            ui::fade_scroll(ui, &out, true);
+        });
+    }
+
     /// Onglets Sorts, Talents (ascendance au centre) et Uniques, pour l'étape choisie.
     fn build_view(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         // Joyaux de l'étape affichée, posés dans les châsses de l'arbre.
-        let shown_label = self.coach.as_ref().and_then(|c| c.steps.get(self.view_step.or(c.current_step_index()).unwrap_or(0)).map(|s| s.label.clone()));
+        let shown = self.shown_step_index().unwrap_or(0);
+        let shown_label = self.coach.as_ref().and_then(|c| c.steps.get(shown).map(|s| s.label.clone()));
         let tree_jewels = self.tree_jewels(shown_label.as_deref().unwrap_or_default());
         let Some(coach) = self.coach.as_ref() else {
             ui.put(rect, egui::Label::new(RichText::new(tr!("Chargement du guide…")).color(Color32::GRAY)));
@@ -3581,28 +3681,21 @@ impl App {
             }
             return;
         }
-        let current = coach.current_step_index();
         let level = coach.level();
-        let key = format!("{}:{}", self.builds.active().map(|b| b.id.as_str()).unwrap_or(""), self.view_step.or(current).unwrap_or(0));
+        let key = format!("{}:{}", self.builds.active().map(|b| b.id.as_str()).unwrap_or(""), shown);
         if let Some(b) = self.builds.active() {
             self.tree.use_overrides_file(self.builds.dir_of(&b.id).join("attributes.json"));
         }
         let gem_infos = self.gem_infos.get();
-        let (tab, view_step, assets, tree, icons, weapon_set) =
-            (self.tab, &mut self.view_step, &mut self.assets, &mut self.tree, &mut self.passive_icons, &mut self.gear.set);
+        let (tab, assets, tree, icons, weapon_set) = (self.tab, &mut self.assets, &mut self.tree, &mut self.passive_icons, &mut self.gear.set);
+        let shown = shown.min(coach.steps.len() - 1);
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
-            let mut shown = 0;
-            // Style doré pour les sélecteurs seulement : les barres de défilement du contenu
-            // gardent le style de l'application.
-            ui.horizontal(|ui| {
-                ui::gold_widgets(ui);
-                ui.label(RichText::new(tr!("Étape")).color(ui::GOLD_DIM));
-                shown = views::step_selector(ui, &coach.steps, view_step, current);
-                // Set d'armes, partagé avec l'écran d'équipement.
-                if tab == views::Tab::Passives && coach.steps.iter().any(|s| !s.passive_sets.is_empty()) {
-                    ui.add_space(12.0);
-                    // Même hauteur que la liste d'étape à sa gauche, centré sur la même ligne.
-                    let h = ui.min_rect().height();
+            // Set d'armes de l'arbre, partagé avec l'écran d'équipement (l'étape se choisit dans la
+            // barre du haut). Style doré pour le sélecteur seulement.
+            if tab == views::Tab::Passives && coach.steps.iter().any(|s| !s.passive_sets.is_empty()) {
+                ui.horizontal(|ui| {
+                    ui::gold_widgets(ui);
+                    let h = ui.spacing().interact_size.y + 4.0;
                     ui.label(RichText::new(tr!("Set d'armes")).color(ui::GOLD_DIM));
                     let size = ui::set_tabs_size(ui, h, [false; 2]);
                     let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -3610,9 +3703,9 @@ impl App {
                     if ui::set_tabs(ui, r.center(), h, "talent_set", &mut set, [false; 2], true) {
                         *weapon_set = set;
                     }
-                }
-            });
-            ui.add_space(6.0);
+                });
+                ui.add_space(6.0);
+            }
             let step = &coach.steps[shown];
             let prev = shown.checked_sub(1).map(|i| &coach.steps[i]);
             match tab {
@@ -3623,7 +3716,7 @@ impl App {
                     let r = ui.available_rect_before_wrap();
                     tree.show(ui, r, step, prev, coach.catalog(), icons, key, (*weapon_set).max(1), &tree_jewels);
                 }
-                views::Tab::Equipment | views::Tab::Stats | views::Tab::Atlas => {}
+                views::Tab::Equipment | views::Tab::Stats | views::Tab::Atlas | views::Tab::Guide => {}
             }
         });
     }
@@ -5741,7 +5834,8 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Alt maintenu : tout dans l'autre langue (interface et textes du jeu), le temps de l'appui.
-        if i18n::set_flip(ctx.input(|i| i.modifiers.alt)) {
+        // Développement : `POE2_TRACKER_ALT=1` fait comme si Alt était maintenu.
+        if i18n::set_flip(ctx.input(|i| i.modifiers.alt) || std::env::var_os("POE2_TRACKER_ALT").is_some()) {
             self.socket_tips.clear();
         }
         while let Ok(ev) = self.copies.try_recv() {
@@ -6132,6 +6226,40 @@ impl eframe::App for App {
                 self.slot_detail(ui, screen, 1.4, 1.4);
             });
         }
+    }
+}
+
+/// Fiches au survol des pastilles du texte d'un build (gemme, pièce, passif).
+impl richtext::Resolver for App {
+    fn icon(&mut self, url: &str) -> Option<egui::TextureHandle> {
+        self.assets.texture_url(url.to_string())
+    }
+
+    fn tip(&mut self, ui: &mut egui::Ui, span: &richtext::Span) {
+        let group = span.group.as_deref().unwrap_or_default();
+        let name = span.text.as_str();
+        let icon = span.icon.as_deref().and_then(|u| self.assets.texture_url(u.to_string()));
+        if group.to_lowercase().contains("gems") {
+            let infos = self.gem_infos.get();
+            egui::Frame::new().inner_margin(8).show(ui, |ui| views::gem_tooltip(ui, name, "", infos.as_ref().and_then(|m| m.get(name))));
+            return;
+        }
+        if group == "passiveSkills" {
+            let passive = self.coach.as_ref().and_then(|c| c.catalog().passives.values().find(|p| p.name == name).cloned());
+            let stats = passive.map(|p| p.stats).unwrap_or_default();
+            ui::node_tip(ui, icon.as_ref(), name, ui::GOLD, None, &stats, None);
+            return;
+        }
+        // Pièce : l'unique avec ses mods, sinon le type de base (défenses, implicites, niveau).
+        let unique = self.coach.as_ref().is_some_and(|c| c.catalog().uniques.contains_key(name));
+        let mut view = if unique { self.unique_view(name) } else { self.base_view(name) };
+        if view.image.is_none() {
+            view.image = icon;
+        }
+        egui::Frame::new().inner_margin(8).show(ui, |ui| {
+            ui.set_width(ui::worn_width(ui, &view).clamp(260.0, 520.0));
+            ui::worn_column(ui, &view);
+        });
     }
 }
 

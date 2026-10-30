@@ -1,5 +1,12 @@
 # What's new
 
+## 0.5.0
+
+- Guide tab: the Mobalytics build author's texts (overview and the description of the step's variant), with headings, lists, links (YouTube in red, Twitch in purple) and game pills. Hovering a gem, an item or a passive shows its card. The texts are in English; update your build from the manager to get them.
+- The step is only chosen in the top bar: the Stats, Skills, Passives and Guide tabs follow it. The league list moves between the character and the build.
+- Market threshold in ex, chaos or div, in a single field (amount and currency); the settings lists take the full width.
+- More complete French game texts: effects specific to each skill and gem descriptions, also on hover with Alt held.
+
 ## 0.4.0
 
 - Interface language in the settings: French or English (the system language by default). Everything the app shows follows this choice; the game is still read in English (Ctrl+C, trade, poe.ninja).

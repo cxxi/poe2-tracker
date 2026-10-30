@@ -18,6 +18,8 @@ pub enum Tab {
     Skills,
     Passives,
     Atlas,
+    /// Textes de l'auteur du build (présentation, variante de l'étape).
+    Guide,
 }
 
 /// Onglets du panneau de droite.
@@ -43,7 +45,7 @@ impl SideTab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Equipment, Tab::Stats, Tab::Skills, Tab::Passives, Tab::Atlas];
+    pub const ALL: [Tab; 6] = [Tab::Equipment, Tab::Stats, Tab::Skills, Tab::Passives, Tab::Atlas, Tab::Guide];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -52,25 +54,9 @@ impl Tab {
             Tab::Skills => tr!("Aptitudes"),
             Tab::Passives => tr!("Talents"),
             Tab::Atlas => tr!("Atlas"),
+            Tab::Guide => tr!("Guide"),
         }
     }
-}
-
-/// Choix de l'étape affichée ; `None` = étape actuelle du personnage.
-pub fn step_selector(ui: &mut egui::Ui, steps: &[Step], selected: &mut Option<usize>, current: Option<usize>) -> usize {
-    let shown = selected.or(current).unwrap_or(0).min(steps.len().saturating_sub(1));
-    let label = |i: usize| {
-        let s = &steps[i].label;
-        if Some(i) == current { tr!("{step} (actuelle)", step = crate::guide::step_text(s)) } else { crate::guide::step_text(s) }
-    };
-    egui::ComboBox::from_id_salt("view_step").selected_text(RichText::new(label(shown)).color(GOLD)).show_ui(ui, |ui| {
-        for i in 0..steps.len() {
-            if ui.selectable_label(i == shown, label(i)).clicked() {
-                *selected = if Some(i) == current { None } else { Some(i) };
-            }
-        }
-    });
-    shown
 }
 
 // --- Sorts ----------------------------------------------------------------------------
@@ -88,7 +74,7 @@ fn uncut_text(info: &GemInfo) -> String {
     }
 }
 
-fn gem_tooltip(ui: &mut egui::Ui, name: &str, note: &str, info: Option<&GemInfo>) {
+pub fn gem_tooltip(ui: &mut egui::Ui, name: &str, note: &str, info: Option<&GemInfo>) {
     ui.set_max_width(380.0);
     ui.label(RichText::new(crate::gametext::name(name)).color(GOLD).strong());
     if !note.is_empty() {
@@ -103,7 +89,7 @@ fn gem_tooltip(ui: &mut egui::Ui, name: &str, note: &str, info: Option<&GemInfo>
         ui.label(RichText::new(origin).color(if i.special() { SPECIAL_GEM } else { Color32::GRAY }).small());
         if !i.description.is_empty() {
             ui.add_space(4.0);
-            ui.label(RichText::new(crate::gametext::name(&i.description)).color(Color32::LIGHT_GRAY));
+            ui.label(RichText::new(crate::gametext::skill_description(name, &i.description)).color(Color32::LIGHT_GRAY));
         }
         if !i.effects.is_empty() {
             ui.add_space(4.0);

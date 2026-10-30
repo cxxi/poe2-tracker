@@ -256,7 +256,35 @@ pub const KAMI_RUNES: &str = "kami-runes.json";
 /// Choix de récompenses de quête recommandés (Mobalytics), à côté des fichiers .build.
 pub const QUEST_CHOICES: &str = "quest-choices.json";
 /// Données enregistrées avec les .build, remplacées à chaque mise à jour.
-const EXTRAS: [&str; 6] = [KAMI_RUNES, QUEST_CHOICES, SKILL_SETS, STEP_LINKS, ITEM_RARITIES, JEWELS];
+const EXTRAS: [&str; 7] = [KAMI_RUNES, QUEST_CHOICES, SKILL_SETS, STEP_LINKS, ITEM_RARITIES, JEWELS, GUIDE];
+/// Textes de l'auteur (Mobalytics) : présentation du build et description de chaque variante.
+pub const GUIDE: &str = "guide.json";
+
+/// Textes de l'auteur d'un build, en texte enrichi (format Lexical du site).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BuildGuide {
+    /// Bloc « Build Overview ».
+    pub overview: Option<serde_json::Value>,
+    /// Description de chaque variante (titre de la variante sur le site).
+    pub variants: Vec<(String, serde_json::Value)>,
+}
+
+pub fn load_guide(dir: &Path) -> Option<BuildGuide> {
+    std::fs::read(dir.join(GUIDE)).ok().and_then(|d| serde_json::from_slice(&d).ok())
+}
+
+/// Textes de l'auteur dans le document Mobalytics.
+fn mobalytics_guide(doc: &serde_json::Value) -> Option<BuildGuide> {
+    let widgets = doc["content"].as_array()?;
+    let filled = |v: &serde_json::Value| Some(v.clone()).filter(|v| v["root"]["children"].as_array().is_some_and(|c| !c.is_empty()));
+    let overview = widgets.iter().find(|w| w["data"]["title"].as_str() == Some("Build Overview")).and_then(|w| filled(&w["data"]["content"]["value"]));
+    let variants: Vec<(String, serde_json::Value)> = widgets
+        .iter()
+        .flat_map(|w| w["data"]["childrenVariants"].as_array().into_iter().flatten())
+        .filter_map(|v| Some((v["title"].as_str()?.to_string(), filled(&v["description"]["value"])?)))
+        .collect();
+    (overview.is_some() || !variants.is_empty()).then_some(BuildGuide { overview, variants })
+}
 /// Joyaux de l'arbre de talents par étape (Mobalytics), à côté des fichiers .build.
 pub const JEWELS: &str = "jewels.json";
 /// Rareté de chaque pièce recommandée (Mobalytics), à côté des fichiers .build.
@@ -292,7 +320,9 @@ static MOBA_PROFILE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"mobalytics\
 const MOBA_DOC: &str = "error data {
     id
     data { name }
-    content: contentV2 { id ... on NgfDocumentCmWidgetContentVariantsV1 { data { childrenVariants { id title } } } }
+    content: contentV2 { id
+        ... on NgfDocumentCmWidgetContentVariantsV1 { data { childrenVariants { id title description { value } } } }
+        ... on NgfDocumentCmWidgetRichTextSimplifiedV2 { data { title content { value } } } }
     ... on Poe2UserGeneratedDocument { data {
     questRewards { quests { quest { name act area } reward { bakedDescription } } }
     buildVariants { values { id passiveTree { jewels { iconURL isUnique jewelSlug nodeSlug prefixSlugs suffixSlugs } }
@@ -375,6 +405,9 @@ fn fetch_mobalytics(page_url: &str) -> Res<Vec<BuildFile>> {
     if let Some(steps) = mobalytics_skill_sets(&resp, field) {
         files.push(BuildFile { name: SKILL_SETS.into(), data: serde_json::to_vec(&steps).map_err(|e| e.to_string())?,
         });
+    }
+    if let Some(guide) = mobalytics_guide(doc) {
+        files.push(BuildFile { name: GUIDE.into(), data: serde_json::to_vec(&guide).map_err(|e| e.to_string())? });
     }
     let links = mobalytics_step_links(doc, page_url);
     if !links.is_empty() {

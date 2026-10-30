@@ -18,9 +18,10 @@ use crate::bundles;
 use crate::dat::Dat;
 use crate::statdesc;
 
-const CACHE: &str = "gametext_fr_v5.json";
+const CACHE: &str = "gametext_fr_v7.json";
 
-/// Descriptions de stats lues : objets, maps, passifs, effets des charmes.
+/// Descriptions de stats lues d'abord (objets, maps, passifs, effets des charmes) : à forme
+/// égale, leur gabarit l'emporte. Toutes les autres suivent (effets propres à chaque aptitude…).
 const DESCRIPTIONS: &[&str] = &[
     "data/statdescriptions/stat_descriptions.csd",
     "data/statdescriptions/map_stat_descriptions.csd",
@@ -155,6 +156,14 @@ pub fn lines(en: &[String]) -> Vec<(usize, String)> {
         i += 1;
     }
     out
+}
+
+/// Description d'une aptitude (par son nom anglais), à défaut son texte traduit tel quel.
+pub fn skill_description<'a>(name: &str, en: &'a str) -> Cow<'a, str> {
+    match get().and_then(|t| t.names.get(&format!("description|{name}")).cloned()) {
+        Some(fr) => Cow::Owned(fr),
+        None => self::name(en),
+    }
 }
 
 /// Compétence donnée par un objet : « Level 15 Freezing Shards (Max Level 18) ».
@@ -299,11 +308,22 @@ fn compile(data: Data) -> GameText {
     GameText { names: data.names, by_skeleton }
 }
 
+/// Tous les fichiers de descriptions de stats, ceux de `DESCRIPTIONS` en premier.
+fn description_files(index: &bundles::Index) -> Vec<String> {
+    let mut rest: Vec<String> = index
+        .paths
+        .iter()
+        .filter(|p| p.starts_with("data/statdescriptions/") && p.ends_with(".csd") && !DESCRIPTIONS.contains(&p.as_str()))
+        .cloned()
+        .collect();
+    rest.sort();
+    DESCRIPTIONS.iter().map(|s| s.to_string()).chain(rest).collect()
+}
+
 fn key_of(index: &bundles::Index) -> String {
     let tables = NAMES.iter().flat_map(|(t, ..)| [format!("data/balance/{t}.datc64"), format!("data/balance/french/{t}.datc64")]);
-    DESCRIPTIONS
-        .iter()
-        .map(|s| s.to_string())
+    description_files(index)
+        .into_iter()
         .chain(tables)
         .map(|f| index.entry(&f).map(|e| format!("{}:{}:{}", e.bundle, e.offset, e.size)).unwrap_or_default())
         .collect::<Vec<_>>()
@@ -349,8 +369,21 @@ fn build(index: &bundles::Index, key: String) -> Data {
             }
         }
     }
-    for file in DESCRIPTIONS {
-        let Ok(raw) = index.read(file) else { continue };
+    // Description de chaque aptitude par son nom : le texte anglais d'ailleurs (RePoE) n'est
+    // pas toujours mot pour mot celui du jeu.
+    let read = |p: &str| index.read(p).ok().and_then(Dat::new);
+    if let (Some(en), Some(fr)) = (read("data/balance/activeskills.datc64"), read("data/balance/french/activeskills.datc64")) {
+        if en.rows == fr.rows {
+            for r in 0..en.rows {
+                let (name, desc) = (en.string(r, 8), fr.string(r, 16));
+                if !name.is_empty() && !desc.is_empty() && !desc.contains("<if:") {
+                    data.names.entry(format!("description|{name}")).or_insert_with(|| statdesc::strip_markup(&desc));
+                }
+            }
+        }
+    }
+    for file in description_files(index) {
+        let Ok(raw) = index.read(&file) else { continue };
         let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         let text = String::from_utf16_lossy(&units);
         data.lines.extend(pairs(&text));

@@ -1,5 +1,12 @@
 # Nouveautés
 
+## 0.5.0
+
+- Onglet Guide : les textes de l'auteur du build Mobalytics (présentation et description de la variante de l'étape), avec titres, listes, liens (YouTube en rouge, Twitch en violet) et pastilles du jeu. Au survol d'une gemme, d'une pièce ou d'un passif, sa fiche. Les textes sont en anglais ; mets ton build à jour depuis le gestionnaire pour les récupérer.
+- L'étape se choisit seulement dans la barre du haut : les onglets Caractéristiques, Aptitudes, Talents et Guide la suivent. La liste des ligues passe entre le personnage et le build.
+- Seuil du marché en ex, chaos ou div, dans un champ unique (montant et devise) ; les listes des réglages prennent toute la largeur.
+- Textes du jeu en français plus complets : effets propres à chaque aptitude et descriptions des gemmes, aussi au survol avec Alt maintenu.
+
 ## 0.4.0
 
 - Langue de l'interface au choix dans les réglages : français ou anglais (par défaut celle du système). Tout ce que l'app affiche suit ce choix ; le jeu reste lu en anglais (Ctrl+C, trade, poe.ninja).
