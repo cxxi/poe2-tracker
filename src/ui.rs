@@ -1599,6 +1599,48 @@ pub fn view_button(ui: &mut egui::Ui, rect: egui::Rect, icon: ViewIcon) -> egui:
 }
 
 /// Combinaison de touches dessinée comme sur un clavier : « [Ctrl] + [C] ».
+/// Montant et sa devise dans un seul champ : une bordure commune, un trait entre les deux ; la
+/// devise est une petite liste (`units`). Vrai si l'un des deux a changé.
+pub fn amount_with_unit(ui: &mut egui::Ui, id: &str, value: &mut f64, unit: &mut String, units: &[&str], range: std::ops::RangeInclusive<f64>) -> bool {
+    let mut changed = false;
+    let mut split = 0.0;
+    let shown = ui.scope(|ui| {
+        // Les deux morceaux sans cadre propre : le cadre est dessiné autour de l'ensemble.
+        let v = &mut ui.visuals_mut().widgets;
+        for w in [&mut v.inactive, &mut v.hovered, &mut v.active, &mut v.open] {
+            w.bg_stroke = Stroke::NONE;
+            w.bg_fill = Color32::TRANSPARENT;
+            w.weak_bg_fill = Color32::TRANSPARENT;
+            w.expansion = 0.0;
+        }
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.horizontal(|ui| {
+            let speed = if unit == "ex" { 1.0 } else { 0.1 };
+            // À la hauteur de la liste voisine : les deux textes sur la même ligne.
+            let h = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+            let w = ui.fonts(|f| f.layout_no_wrap("10000.0".into(), egui::TextStyle::Button.resolve(ui.style()), Color32::WHITE).size().x) * 0.6 + 16.0;
+            changed |= ui.add_sized([w, h], egui::DragValue::new(value).range(range).speed(speed).max_decimals(1)).changed();
+            // La liste prend la même hauteur, son texte centré dedans.
+            ui.spacing_mut().interact_size.y = h;
+            split = ui.cursor().left();
+            ui.add_space(1.0);
+            let before = unit.clone();
+            egui::ComboBox::from_id_salt(id).width(0.0).selected_text(RichText::new(unit.to_uppercase()).color(GOLD)).show_ui(ui, |ui| {
+                // En majuscules : à la hauteur des chiffres du montant.
+                for u in units {
+                    ui.selectable_value(unit, u.to_string(), u.to_uppercase());
+                }
+            });
+            changed |= *unit != before;
+        });
+    });
+    let rect = shown.response.rect;
+    let stroke = Stroke::new(1.0_f32, GOLD_DIM);
+    ui.painter().rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
+    ui.painter().vline(split + 0.5, rect.y_range(), stroke);
+    changed
+}
+
 pub fn keys(ui: &mut egui::Ui, keys: &[&str]) {
     for (i, k) in keys.iter().enumerate() {
         if i > 0 {

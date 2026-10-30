@@ -21,10 +21,23 @@ Proton, Flatpak, version autonome Windows) ou te laisse indiquer son dossier.
 
 ### Mises à jour
 
-Au lancement puis toutes les 6 heures, poe2-tracker regarde s'il existe une version plus
+Au lancement puis toutes les 5 minutes, poe2-tracker regarde s'il existe une version plus
 récente sur GitHub. Si oui, un bouton apparaît dans la barre du bas : un clic télécharge la
 nouvelle version, vérifie son empreinte SHA-256, remplace l'exécutable, puis propose de
-redémarrer. Rien ne s'installe sans clic. `POE2_TRACKER_NO_UPDATE=1` désactive la vérification.
+redémarrer. Rien ne s'installe sans clic. La recherche se coupe dans les réglages, ou avec
+`POE2_TRACKER_NO_UPDATE=1`. Après une mise à jour, la fenêtre « Nouveautés » montre ce qui a
+changé, versions sautées comprises.
+
+## Langue
+
+⚙ Menu → Réglages → Langue : **français** ou **anglais** (par défaut, la langue du système).
+Tout ce que l'app affiche suit ce choix. En français, les textes du jeu (noms des objets, des
+uniques, des gemmes, des zones, lignes de mods) prennent la traduction officielle, lue dans
+les fichiers du jeu ; une ligne non reconnue reste en anglais.
+
+**Alt maintenu** dans l'app : tout passe dans l'autre langue le temps de l'appui. (Sous Linux,
+certains bureaux réservent Alt + clic au déplacement des fenêtres : on ne peut alors pas
+cliquer pendant ce temps.)
 
 ## En jeu
 
@@ -39,8 +52,10 @@ redémarrer. Rien ne s'installe sans clic. `POE2_TRACKER_NO_UPDATE=1` désactive
     officielle (même catégorie, tous les mods de l'objet entre 85 % et 150 % de leur valeur,
     au moins autant de mods, entre 85 % et 150 % des DPS ou de la défense de base). Deux
     recherches au plus : s'il y a trop peu d'annonces, les mods les plus faibles sont
-    lâchés, leur place restant exigée. La valeur estimée est le prix médian des 5 annonces
-    les moins chères, prix aberrants écartés ; les estimations sont gardées 24 h.
+    lâchés, leur place restant exigée. Le prix suit la tendance des annonces lues, chacune
+    pesant d'autant plus que sa note est proche de celle de l'objet et qu'elle est récente ;
+    la confiance dépend du nombre d'annonces proches et de l'éparpillement des prix. Les
+    estimations sont gardées 24 h.
 - **Regex marchands** (barre du bas) : copie une recherche faite d'après les mods que vise le
   build ; collée dans la recherche d'un marchand en jeu, elle allume les objets utiles.
 - **Ctrl+Alt+C** sur une pièce portée : elle rejoint l'équipement suivi, disposé comme l'écran
@@ -52,7 +67,9 @@ redémarrer. Rien ne s'installe sans clic. `POE2_TRACKER_NO_UPDATE=1` désactive
 - **Fil d'événements** : niveaux, étapes du guide, morts, messages privés. Les coéquipiers
   (vus « rejoindre la zone ») ne sont jamais pris pour ton personnage.
 
-Le diagnostic lit le texte copié par le jeu **en anglais**.
+Le jeu doit tourner **en anglais** : le texte copié et le journal du jeu sont lus en anglais
+(l'affichage, lui, peut être en français, voir [Langue](#langue)). Jouer avec le jeu en
+français est à l'étude : [docs/jeu-en-francais.md](docs/jeu-en-francais.md).
 
 ## Personnages et ligue
 
@@ -70,15 +87,15 @@ les étapes restent. « Mettre à jour » relit la page (les guides évoluent).
 Étapes reconnues : par acte (`Act 1`… `Endgame Step N`), par tranche de niveaux
 (`1 - 21 - …`, `22 - End of Campaign - …`) et variantes d'endgame nommées (`BUDGET - …`),
 au choix une fois la campagne finie. Avec un build, les verdicts suivent les objectifs de
-l'étape en cours, et les onglets Sorts, Talents et Ascendances s'ouvrent. Sans build, le
+l'étape en cours, et les onglets Aptitudes et Talents (ascendance comprise) s'ouvrent. Sans build, le
 diagnostic compare simplement à tes pièces.
 
-## Images du jeu
+## Images et textes du jeu
 
-Le fond de l'écran d'équipement et les icônes de l'arbre de talents sont **extraits de ton
-installation du jeu** (`Bundles2` chez Steam, `Content.ggpk` en version autonome), en lecture
-seule, puis gardés en cache. Ces images appartiennent à Grinding Gear Games : elles ne sont ni
-dans ce dépôt ni dans les versions publiées.
+Le fond de l'écran d'équipement, les icônes de l'arbre de talents, l'arbre de l'Atlas et les
+textes du jeu en français sont **extraits de ton installation du jeu** (`Bundles2` chez Steam,
+`Content.ggpk` en version autonome), en lecture seule, puis gardés en cache. Ils appartiennent à
+Grinding Gear Games : ils ne sont ni dans ce dépôt ni dans les versions publiées.
 
 ## Confidentialité
 
@@ -96,8 +113,10 @@ dans ce dépôt ni dans les versions publiées.
 | Équipement, historique, builds | `~/.local/share/poe2-tracker/` | `%APPDATA%\poe2-tracker\data` |
 | Cache (images, prix) | `~/.cache/poe2-tracker/` | `%LOCALAPPDATA%\poe2-tracker\cache` |
 
-`config.json` : `{"league": "", "game_dir": "", "log_path": "", "market_min_ex": 10}`
-(chemins vides = recherche automatique).
+`config.json` : `{"league": "", "game_dir": "", "log_path": "", "lang": "", "market_min_ex": 10,
+"market_min_unit": "ex", …}` (chemins vides = recherche automatique, `lang` vide = langue du
+système ; `market_min_ex` est le seuil du marché dans la devise `market_min_unit`). Le reste se
+règle dans ⚙ Menu → Réglages.
 
 ## Développement
 
@@ -114,7 +133,13 @@ l'API), `--compare <fichier>`, `--vendor-regex` (regex marchands de chaque étap
 
 Publier une version : mettre à jour `version` dans `Cargo.toml`, puis pousser un tag
 `vX.Y.Z`. Le workflow `release.yml` compile et teste sous Linux et Windows, puis publie les
-binaires, leurs empreintes et l'archive Windows.
+binaires, leurs empreintes et l'archive Windows. Les nouveautés s'écrivent dans
+`CHANGELOG.md` et `CHANGELOG.en.md` (un test vérifie qu'ils ont les mêmes versions et le même
+nombre de points).
+
+Textes de l'interface : écrits en français dans le code (`tr!("…")`), traduits en anglais dans
+`src/i18n/en.rs` ; un test refuse un texte sans traduction. Ce qui est prévu :
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Licence
 

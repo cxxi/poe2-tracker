@@ -65,8 +65,11 @@ struct Config {
     league: String,
     /// Dossier d'installation du jeu (vide = recherche automatique).
     game_dir: PathBuf,
-    /// Valeur (en exalts) à partir de laquelle un objet mérite d'aller au marché.
+    /// Valeur à partir de laquelle un objet mérite d'aller au marché, dans la devise
+    /// `market_min_unit` (le nom date du temps où c'était toujours des exalts).
     market_min_ex: f64,
+    /// Devise du seuil : « ex », « chaos » ou « div ».
+    market_min_unit: String,
     /// Log du client (vide = logs/Client.txt dans le dossier du jeu).
     log_path: PathBuf,
     /// L'écran d'accueil a été validé une fois.
@@ -96,6 +99,7 @@ impl Default for Config {
             open_on_copy: true,
             boss_tab: false,
             lang: String::new(),
+            market_min_unit: "ex".into(),
         }
     }
 }
@@ -190,7 +194,9 @@ struct App {
     changelog: Option<Vec<changelog::Release>>,
     /// Étape regardée en aperçu (autre que celle de la progression), non enregistrée.
     step_preview: Option<String>,
+    /// Seuil du marché et sa devise (voir `Config`).
     market_min_ex: f64,
+    market_min_unit: String,
     copies: Receiver<CopyEvent>,
     /// Dernier objet diagnostiqué (Ctrl+C).
     diagnosed: Option<Item>,
@@ -279,6 +285,7 @@ struct SettingsDraft {
     open_on_copy: bool,
     auto_update: bool,
     market_min_ex: f64,
+    market_min_unit: String,
     boss_tab: bool,
     lang: i18n::Lang,
     /// Choix du dossier du jeu en cours (fenêtre du système).
@@ -294,6 +301,7 @@ impl SettingsDraft {
             open_on_copy: stored.open_on_copy,
             auto_update: stored.auto_update,
             market_min_ex: stored.market_min_ex,
+            market_min_unit: stored.market_min_unit.clone(),
             boss_tab: stored.boss_tab,
             lang: i18n::base(),
             picking: None,
@@ -575,6 +583,7 @@ impl App {
             build_quests: None,
             step_preview: None,
             market_min_ex: config.market_min_ex,
+            market_min_unit: config.market_min_unit.clone(),
             copies: rx,
             diagnosed: None,
             history: load_history(&dirs.data_dir().join("history.json")),
@@ -2102,7 +2111,7 @@ impl App {
                     section(ui, tr!("Interface"));
                     label(ui, tr!("Langue"), tr!("textes de l'app et du jeu ; Alt maintenu : l'autre langue"));
                     egui::ComboBox::from_id_salt("lang")
-                        .width(320.0)
+                        .width(ui.available_width())
                         .selected_text(RichText::new(draft.lang.name()).color(ui::GOLD))
                         .show_ui(ui, |ui| {
                             for l in i18n::Lang::ALL {
@@ -2156,7 +2165,7 @@ impl App {
                     section(ui, tr!("Diagnostic (Ctrl+C)"));
                     label(ui, tr!("Affichage"), tr!("ce que fait Ctrl+C sur un objet en jeu"));
                     egui::ComboBox::from_id_salt("open_on_copy")
-                        .width(320.0)
+                        .width(ui.available_width())
                         .selected_text(
                             RichText::new(if draft.open_on_copy {
                                 tr!("ouvrir le détail du diagnostic")
@@ -2194,7 +2203,7 @@ impl App {
                     );
                     ui.add_enabled_ui(draft.trade_prices, |ui| {
                         egui::ComboBox::from_id_salt("auto_estimate")
-                            .width(320.0)
+                            .width(ui.available_width())
                             .selected_text(
                                 RichText::new(if draft.auto_estimate {
                                     tr!("automatique, dès le Ctrl+C")
@@ -2222,12 +2231,10 @@ impl App {
                         tr!("Seuil du marché"),
                         tr!("en dessous, un objet est conseillé au PNJ"),
                     );
-                    ui.add(
-                        egui::DragValue::new(&mut draft.market_min_ex)
-                            .range(1.0..=10_000.0)
-                            .speed(1.0)
-                            .suffix(" ex"),
-                    );
+                    // Le nombre, puis sa devise dans une petite liste à la taille de son contenu.
+                    ui.horizontal(|ui| {
+                        ui::amount_with_unit(ui, "market_min_unit", &mut draft.market_min_ex, &mut draft.market_min_unit, &["ex", "chaos", "div"], 0.1..=10_000.0);
+                    });
                     ui.end_row();
 
                     section(ui, tr!("Mises à jour"));
@@ -2266,6 +2273,9 @@ impl App {
             self.stored.auto_update = draft.auto_update;
             self.stored.market_min_ex = draft.market_min_ex;
             self.market_min_ex = draft.market_min_ex;
+            self.stored.market_min_unit = draft.market_min_unit.clone();
+            self.config.market_min_unit = draft.market_min_unit.clone();
+            self.market_min_unit = draft.market_min_unit.clone();
             self.stored.boss_tab = draft.boss_tab;
             self.config.trade_prices = draft.trade_prices;
             self.config.auto_update = draft.auto_update;
@@ -2723,13 +2733,14 @@ impl App {
 
     /// Valeur marchande : prix réel du marché pour un rare estimé, sinon règles et poe.ninja.
     fn value_of(&self, it: &Item) -> rules::Value {
+        let threshold = self.threshold_ex();
         let mut value = {
             let data = self.prices.data.lock().unwrap();
-            rules::evaluate(it, data.as_ref(), self.market_min_ex)
+            rules::evaluate(it, data.as_ref(), threshold)
         };
         if let Some(est @ trade::Estimate::Done { total, .. }) = self.trade.get(it) {
             if let Some(estimate) = est.value_ex().filter(|_| total >= 3) {
-                if estimate >= self.market_min_ex {
+                if estimate >= threshold {
                     value.label = rules::Label::Market;
                     value.summary = tr!("{total} annonces comparables, estimé ≈ {price}", total, price = self.fmt_price(estimate));
                 } else {
@@ -2750,12 +2761,23 @@ impl App {
         value
     }
 
+    /// Seuil du marché en exalts, aux taux du moment (tel quel tant que les cours manquent).
+    fn threshold_ex(&self) -> f64 {
+        let data = self.prices.data.lock().unwrap();
+        let rate = match (self.market_min_unit.as_str(), data.as_ref()) {
+            ("div", Some(p)) if p.exalted_per_divine > 0.0 => p.exalted_per_divine,
+            ("chaos", Some(p)) => p.currency("Chaos Orb").map(|c| p.to_ex(c)).unwrap_or(1.0),
+            _ => 1.0,
+        };
+        self.market_min_ex * rate
+    }
+
     /// Un objet classé « PNJ » malgré un prix : il vaut trop peu pour la peine de le vendre.
     fn below_threshold(&self, ex: f64) -> String {
         tr!(
             "vaut ≈ {price} au marché, sous le seuil de {threshold} : pas la peine de le mettre en vente, à vendre au PNJ",
             price = self.fmt_price(ex),
-            threshold = self.fmt_price(self.market_min_ex)
+            threshold = Self::fmt_in(self.market_min_ex, (1.0, &self.market_min_unit))
         )
     }
 
