@@ -1,5 +1,9 @@
 # What's new
 
+## 0.6.2
+
+- Passives: a jewel recommended by the build stays greyed out until something is socketed there. Hovering an allocated socket shows the jewel in it and the right click order to cycle.
+
 ## 0.6.1
 
 - Passives: your tracked jewel shows in its socket with its real image, and its card on hover (mods included), whether or not the build recommends a jewel there.

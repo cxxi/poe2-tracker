@@ -705,13 +705,15 @@ impl TreeView {
             // Ton joyau d'abord, s'il est serti ici ; sinon celui que conseille le build.
             let worn = if n.kind == 3 { worn_jewels.iter().find(|w| w.socket.as_deref() == Some(n.id.as_str())) } else { None };
             let icon = worn.and_then(|w| w.icon.as_deref()).or(jewel.map(|j| j.icon.as_str())).unwrap_or(icon);
-            let jewel_color = worn.map(|w| w.color).or(jewel.map(|j| j.color));
+            // Joyau seulement conseillé (rien de serti ici) : grisé, comme un objectif.
+            let advised_only = worn.is_none() && jewel.is_some();
+            let jewel_color = worn.map(|w| w.color).or(jewel.filter(|_| !advised_only).map(|j| j.color));
             // Icône du jeu dès que le nœud est assez grand à l'écran.
             let tex = if r >= 7.0 { icons.get(icon).cloned() } else { None };
             match tex {
                 Some(tex) => {
                     painter.circle_filled(p, r, Color32::BLACK);
-                    let tint = if on { Color32::WHITE } else { Color32::from_gray(95) };
+                    let tint = if on && !advised_only { Color32::WHITE } else { Color32::from_gray(95) };
                     // Dans le cercle du nœud, sous son contour.
                     crate::ui::circle_image(&painter, tex.id(), p, r * 0.92, tint);
                     if st == NodeState::ToTake {
@@ -767,10 +769,13 @@ impl TreeView {
                 if resp.secondary_clicked() {
                     socket_pick = Some((n.id.clone(), here));
                 }
-                match here {
-                    Some(k) => tr!("Ton joyau : {name} — clic droit pour changer", name = worn_jewels[k].title),
-                    None => tr!("Aucun joyau suivi ici — clic droit pour en choisir un").to_string(),
-                }
+                // L'ordre du clic droit : chaque joyau suivi, puis aucun.
+                let order: Vec<&str> = worn_jewels.iter().map(|w| w.title.as_str()).chain([tr!("aucun")]).collect();
+                let now = match here {
+                    Some(k) => tr!("Ton joyau ici : {name}", name = worn_jewels[k].title),
+                    None => tr!("Aucun joyau suivi ici").to_string(),
+                };
+                format!("{now}\n{}", tr!("Clic droit pour alterner : {order}", order = order.join(" → ")))
             });
             let status: Option<String> = match (status, socket_note) {
                 (Some(s), Some(n)) => Some(format!("{s} · {n}")),

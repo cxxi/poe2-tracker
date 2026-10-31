@@ -1,5 +1,9 @@
 # Nouveautés
 
+## 0.6.2
+
+- Talents : un joyau conseillé par le build reste grisé tant que rien n'est serti dans sa châsse. Au survol d'une châsse prise, le joyau qui y est et l'ordre du clic droit pour alterner.
+
 ## 0.6.1
 
 - Talents : ton joyau suivi s'affiche dans sa châsse avec sa vraie image, et sa fiche au survol (mods compris), que le build y conseille un joyau ou non.
