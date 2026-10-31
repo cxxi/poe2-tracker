@@ -1,5 +1,9 @@
 # What's new
 
+## 0.5.1
+
+- Diagnosis: the image of some items no longer grows and shrinks in a loop (flickering display).
+
 ## 0.5.0
 
 - Guide tab: the Mobalytics build author's texts (overview and the description of the step's variant), with headings, lists, links (YouTube in red, Twitch in purple) and game pills. Hovering a gem, an item or a passive shows its card. The texts are in English; update your build from the manager to get them.

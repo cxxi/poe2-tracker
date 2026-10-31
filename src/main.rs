@@ -4222,9 +4222,23 @@ impl App {
             let natural_id = ui.id().with("diag_natural");
             let natural: Vec2 = ui.data(|d| d.get_temp(natural_id)).unwrap_or(Vec2::new(400.0, 300.0));
             let room = Vec2::new(ui.available_width(), ui.clip_rect().bottom() - ui.cursor().top() - 24.0);
-            let scale = (room.x / natural.x).min(room.y / natural.y).clamp(1.0, 1.8);
+            let target = (room.x / natural.x).min(room.y / natural.y).clamp(1.0, 1.8);
             // Le texte grossit moins que la place ne le permettrait ; l'image, elle, suit la hauteur.
-            let scale = 1.0 + (scale - 1.0) * 0.6;
+            let target = 1.0 + (target - 1.0) * 0.6;
+            // Plus gros, le texte passe davantage à la ligne : la fiche grandit, l'agrandissement
+            // baisse, le texte repasse sur moins de lignes… et l'image clignoterait entre deux
+            // tailles. Pour une même pièce et une même place, l'agrandissement ne fait donc que
+            // baisser, une fois les premières mesures faites.
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (it.raw.as_str(), (room.x / 8.0) as i32, (room.y / 8.0) as i32, i18n::english()).hash(&mut h);
+                h.finish()
+            };
+            let lock_id = ui.id().with("diag_scale");
+            let (last_key, frames, last): (u64, u32, f32) = ui.data(|d| d.get_temp(lock_id)).unwrap_or((0, 0, target));
+            let (frames, scale) = if last_key == key && frames >= 3 { (frames, target.min(last)) } else { (if last_key == key { frames + 1 } else { 0 }, target) };
+            ui.data_mut(|d| d.insert_temp(lock_id, (key, frames, scale)));
             let start = ui.cursor().min;
             ui.scope(|ui| {
                 // Corps de texte (mods, runes) à la même échelle que l'en-tête.

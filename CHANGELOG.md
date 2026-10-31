@@ -1,5 +1,9 @@
 # Nouveautés
 
+## 0.5.1
+
+- Diagnostic : l'image de certaines pièces ne grossit et ne rétrécit plus en boucle (affichage qui clignotait).
+
 ## 0.5.0
 
 - Onglet Guide : les textes de l'auteur du build Mobalytics (présentation et description de la variante de l'étape), avec titres, listes, liens (YouTube en rouge, Twitch en violet) et pastilles du jeu. Au survol d'une gemme, d'une pièce ou d'un passif, sa fiche. Les textes sont en anglais ; mets ton build à jour depuis le gestionnaire pour les récupérer.
