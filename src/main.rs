@@ -3962,12 +3962,19 @@ impl App {
         let shown_label = self.coach.as_ref().and_then(|c| c.steps.get(shown).map(|s| s.label.clone()));
         let tree_jewels = self.tree_jewels(shown_label.as_deref().unwrap_or_default());
         // Joyaux suivis et leur châsse (pastille et choix au clic droit dans l'arbre).
-        let worn_jewels: Vec<(String, Color32, Option<String>)> = self
+        let worn_jewels: Vec<views::WornJewel> = self
             .gear
             .jewel_items()
-            .iter()
+            .into_iter()
             .zip(self.jewel_places(&tree_jewels))
-            .map(|(j, s)| (j.title(), ui::rarity_color(j.rarity), s))
+            .map(|(j, socket)| views::WornJewel {
+                title: j.title(),
+                icon: self.assets.base_art(&j.base),
+                color: ui::rarity_color(j.rarity),
+                base: j.base,
+                lines: j.mods,
+                socket,
+            })
             .collect();
         let mut socket_pick: Option<(String, Option<usize>)> = None;
         let Some(coach) = self.coach.as_ref() else {

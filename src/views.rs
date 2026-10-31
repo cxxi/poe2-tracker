@@ -270,6 +270,17 @@ pub struct TreeJewel {
     pub copied: Option<usize>,
 }
 
+/// Joyau suivi (copié en jeu) et la châsse où il est serti.
+pub struct WornJewel {
+    pub title: String,
+    pub base: String,
+    pub color: Color32,
+    /// Image dans les archives du jeu.
+    pub icon: Option<String>,
+    pub lines: Vec<String>,
+    pub socket: Option<String>,
+}
+
 /// Les trois attributs : nom, couleur, icône « + » du jeu.
 const ATTRIBUTES: [(&str, Color32, &str); 3] = [
     (tkey!("Force"), Color32::from_rgb(205, 75, 60), "Art/2DArt/SkillIcons/passives/plusstrength.dds"),
@@ -479,7 +490,7 @@ impl TreeView {
         set: u8,
         jewels: &[TreeJewel],
         mine: Option<&std::collections::BTreeSet<String>>,
-        worn_jewels: &[(String, Color32, Option<String>)],
+        worn_jewels: &[WornJewel],
     ) -> Option<(String, Option<usize>)> {
         self.build(catalog);
         if self.nodes.is_empty() {
@@ -691,7 +702,10 @@ impl TreeView {
             }
             // Châsse garnie par le build : l'image du joyau à la place de celle de la châsse.
             let jewel = if n.kind == 3 { jewels.iter().find(|j| j.node == n.skill) } else { None };
-            let icon = jewel.map_or(icon, |j| j.icon.as_str());
+            // Ton joyau d'abord, s'il est serti ici ; sinon celui que conseille le build.
+            let worn = if n.kind == 3 { worn_jewels.iter().find(|w| w.socket.as_deref() == Some(n.id.as_str())) } else { None };
+            let icon = worn.and_then(|w| w.icon.as_deref()).or(jewel.map(|j| j.icon.as_str())).unwrap_or(icon);
+            let jewel_color = worn.map(|w| w.color).or(jewel.map(|j| j.color));
             // Icône du jeu dès que le nœud est assez grand à l'écran.
             let tex = if r >= 7.0 { icons.get(icon).cloned() } else { None };
             match tex {
@@ -713,7 +727,7 @@ impl TreeView {
                 }
                 None => {
                     // De loin, une châsse garnie prend la couleur de son joyau.
-                    painter.circle_filled(p, r, jewel.filter(|_| on).map_or(color, |j| j.color));
+                    painter.circle_filled(p, r, jewel_color.filter(|_| on).unwrap_or(color));
                 }
             }
             // Joyau conseillé : copié en jeu (✓ vert) ou oublié (! rouge), en haut à droite.
@@ -748,13 +762,13 @@ impl TreeView {
                 NodeState::None => None,
             };
             // Châsse prise de ton arbre : le joyau suivi qu'elle contient, à changer au clic droit.
-            let here = worn_jewels.iter().position(|(_, _, s)| s.as_deref() == Some(n.id.as_str()));
+            let here = worn_jewels.iter().position(|w| w.socket.as_deref() == Some(n.id.as_str()));
             let socket_note = (n.kind == 3 && real.as_ref().is_some_and(|r| r.contains(&i))).then(|| {
                 if resp.secondary_clicked() {
                     socket_pick = Some((n.id.clone(), here));
                 }
                 match here {
-                    Some(k) => tr!("Ton joyau : {name} — clic droit pour changer", name = worn_jewels[k].0),
+                    Some(k) => tr!("Ton joyau : {name} — clic droit pour changer", name = worn_jewels[k].title),
                     None => tr!("Aucun joyau suivi ici — clic droit pour en choisir un").to_string(),
                 }
             });
@@ -778,6 +792,12 @@ impl TreeView {
                 let why = if chosen { tr!("ton choix") } else { tr!("choix supposé d'après les gemmes du build") };
                 let note = with_status(Some(tr!("{why} — clic droit pour changer", why)));
                 resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &format!("+5 {}", crate::i18n::tr(name)), c, None, &[], note.as_deref()));
+            } else if let Some(w) = here.map(|k| &worn_jewels[k]) {
+                // Ton joyau : sa fiche ; le conseil du build pour cette châsse en note.
+                let tex = w.icon.as_ref().and_then(|ic| icons.get(ic).cloned());
+                let advice = jewels.iter().find(|j| n.kind == 3 && j.node == n.skill).map(|j| tr!("Conseillé par le build ici : {name}", name = j.name));
+                let note = with_status(advice);
+                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, tex.as_ref(), &w.title, w.color, Some(w.base.as_str()), &w.lines, note.as_deref()));
             } else if let Some(j) = jewels.iter().find(|j| n.kind == 3 && j.node == n.skill) {
                 let tex = icons.get(&j.icon).cloned();
                 let note = with_status(Some(if j.copied.is_some() {
@@ -795,16 +815,6 @@ impl TreeView {
             let next = (self.overrides.get(&id).copied().unwrap_or(main_attr) + 1) % 3;
             self.overrides.insert(id, next);
             self.save_overrides();
-        }
-        // Joyau suivi serti ici : la pastille de sa rareté, au centre de la châsse.
-        for (_, color, socket) in worn_jewels {
-            if let Some(&i) = socket.as_ref().and_then(|s| self.index.get(s)) {
-                let p = to_screen(self.nodes[i].pos);
-                let r = (world_radius(3) * self.zoom).clamp(1.5, 40.0);
-                if rect.contains(p) {
-                    painter.circle_stroke(p, r * 0.55, Stroke::new((r * 0.25).clamp(1.0, 3.0), *color));
-                }
-            }
         }
         // Légende sur fond, pour rester lisible au-dessus des nœuds.
         let nodes = if per_set == [0, 0] {

@@ -554,6 +554,7 @@ pub const EN: &[(&str, &str)] = &[
     ("{item} suivi dans l'arbre de talents ({n} joyaux)", "{item} tracked in the passive tree ({n} jewels)"),
     ("{item} est déjà suivi dans l'arbre de talents", "{item} is already tracked in the passive tree"),
     ("Joyaux", "Jewels"),
+    ("Conseillé par le build ici : {name}", "Recommended by the build here: {name}"),
     ("{name} (Path of Exile 2)", "{name} (Path of Exile 2)"),
     ("Classe : {class}, niveau {level}, {progress}", "Class: {class}, level {level}, {progress}"),
     ("Page du build : {url}", "Build page: {url}"),

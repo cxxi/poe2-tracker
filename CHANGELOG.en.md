@@ -1,5 +1,9 @@
 # What's new
 
+## 0.6.1
+
+- Passives: your tracked jewel shows in its socket with its real image, and its card on hover (mods included), whether or not the build recommends a jewel there.
+
 ## 0.6.0
 
 - Passives: your actual tree, read from the game log, against the build's. Allocated in gold, to allocate in dashed gold, allocated outside the build in dark red; at the top, where you stand ("117 / 139 of the build") and a click to go to the passives to allocate or outside the build. A passive the build puts on a weapon set counts for that set.

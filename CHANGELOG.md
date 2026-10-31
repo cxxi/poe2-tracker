@@ -1,5 +1,9 @@
 # Nouveautés
 
+## 0.6.1
+
+- Talents : ton joyau suivi s'affiche dans sa châsse avec sa vraie image, et sa fiche au survol (mods compris), que le build y conseille un joyau ou non.
+
 ## 0.6.0
 
 - Talents : ton arbre réel, lu dans le journal du jeu, face à celui du build. Pris en doré, à prendre en pointillé doré, pris hors build en rouge foncé ; en haut, où tu en es (« 117 / 139 du build ») et un clic pour aller aux talents à prendre ou hors build. Un talent que le build met sur un set d'armes compte pour ce set.

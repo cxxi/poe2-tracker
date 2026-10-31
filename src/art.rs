@@ -390,6 +390,11 @@ impl Assets {
         self.texture_url(url)
     }
 
+    /// Image d'un type de base dans les archives du jeu (« Art/2DItems/Jewels/….dds »).
+    pub fn base_art(&self, base: &str) -> Option<String> {
+        Some(self.index.lock().unwrap().as_ref()?.bases.get(base)?.art.clone())
+    }
+
     pub fn texture_url(&mut self, url: String) -> Option<TextureHandle> {
         if let Some(t) = self.textures.get(&url) {
             return Some(t.clone());
