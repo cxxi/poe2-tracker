@@ -1,5 +1,14 @@
 # What's new
 
+## 0.6.0
+
+- Passives: your actual tree, read from the game log, against the build's. Allocated in gold, to allocate in dashed gold, allocated outside the build in dark red; at the top, where you stand ("117 / 139 of the build") and a click to go to the passives to allocate or outside the build. A passive the build puts on a weapon set counts for that set.
+- Stats computed as in game: base from level and class, life from Strength and mana from Intelligence, passive tree, quest rewards (resistances, spirit, life, Kaom's Lesson…) and increased percentages (life, mana, spirit, defences, attributes). Hovering a total shows each source and the calculation.
+- Resistances shown as in game: effective, then the total before the cap in brackets.
+- Jewels: Ctrl+Alt+C on a socketed jewel adds it to the tracked jewels, counted in the stats; Time-Lost jewels act on the passives allocated in their radius. In the tree, right click a socket to say which jewel is in it, and a badge on each jewel the build recommends: copied or forgotten.
+- Export character (menu): gear, stats and their sources, passives and the gap with the build, jewels, Atlas, maps and quests, as you choose, in Markdown to paste into a conversation with an AI.
+- Diagnosis: the image of a magic item whose suffix carries the name of another base ("of Convalescence") is the right one.
+
 ## 0.5.1
 
 - Diagnosis: the image of some items no longer grows and shrinks in a loop (flickering display).

@@ -25,6 +25,8 @@ pub enum Event {
     Afk { on: bool, time: i64 },
     /// Passif de l'Atlas posé ou retiré : identifiant (« AtlasRitualNotable3 ») et nom affiché.
     Atlas { id: String, name: String, allocated: bool },
+    /// Talent du personnage pris ou retiré (« spells18 ») ; la ligne ne nomme pas le personnage.
+    Passive { id: String, allocated: bool },
     /// Récompense de quête : « X has received +30 to Spirit » (nommée) ou
     /// « You have received 2 Passive Skill Points » (sans nom).
     Received { character: Option<String>, text: String },
@@ -42,7 +44,7 @@ static AREA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^Generating level 
 static SCENE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[SCENE\] Set Source \[(.+)\]$").unwrap());
 static LEVEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (.+) \((\w+)\) is now level (\d+)$").unwrap());
 static SLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (.+) (?:has been slain|vient de mourir)\.$").unwrap());
-static ATLAS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Successfully (un)?allocated passive skill id: (Atlas\w*), name: (.*)$").unwrap());
+static PASSIVE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Successfully (un)?allocated passive skill id: (\w+), name: (.*)$").unwrap());
 static AFK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (?:AFK mode is now (ON|OFF)|Le mode Absent \(AFK\) est (désormais activé|désactivé))").unwrap());
 static RECEIVED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (?:(\S+) has|You have) received (.+)$").unwrap());
 static PARTY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^: (\S+) (?:has (?:joined|left) the area|a (?:rejoint|quitté) la zone)\.$").unwrap());
@@ -89,8 +91,12 @@ pub fn parse_line(raw: &str) -> Option<Event> {
     if let Some(c) = SLAIN.captures(msg) {
         return Some(Event::Death { character: c[1].to_string(), time });
     }
-    if let Some(c) = ATLAS.captures(msg) {
-        return Some(Event::Atlas { id: c[2].to_string(), name: c[3].trim().to_string(), allocated: c.get(1).is_none() });
+    if let Some(c) = PASSIVE.captures(msg) {
+        let (id, allocated) = (c[2].to_string(), c.get(1).is_none());
+        if id.starts_with("Atlas") {
+            return Some(Event::Atlas { id, name: c[3].trim().to_string(), allocated });
+        }
+        return Some(Event::Passive { id, allocated });
     }
     if let Some(c) = AFK.captures(msg) {
         return Some(Event::Afk { on: c.get(1).map_or(c.get(2).is_some_and(|m| m.as_str().starts_with("désormais")), |m| m.as_str() == "ON"), time });
@@ -232,8 +238,15 @@ mod tests {
             parse_line(&format!("{P}Successfully unallocated passive skill id: AtlasAbyssSmall14_, name: Depths Chance")),
             Some(Event::Atlas { id: "AtlasAbyssSmall14_".into(), name: "Depths Chance".into(), allocated: false })
         );
-        // Talents du personnage : pas l'Atlas.
-        assert_eq!(parse_line(&format!("{P}Successfully allocated passive skill id: energy_shield35, name: Fusion")), None);
+        // Talents du personnage, à part de l'Atlas.
+        assert_eq!(
+            parse_line(&format!("{P}Successfully allocated passive skill id: energy_shield35, name: Fusion")),
+            Some(Event::Passive { id: "energy_shield35".into(), allocated: true })
+        );
+        assert_eq!(
+            parse_line(&format!("{P}Successfully unallocated passive skill id: criticals17, name: Critical Chance")),
+            Some(Event::Passive { id: "criticals17".into(), allocated: false })
+        );
         assert_eq!(parse_line(&format!("{P}#DarthPillars: shes great")), None);
         assert_eq!(
             parse_line(&format!("{P}: Juliana_novachrono has received +30 to [Spirit|Spirit].")),

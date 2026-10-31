@@ -97,7 +97,10 @@ impl ArtIndex {
         if self.bases.contains_key(&it.base) {
             return Some(it.base.clone());
         }
-        self.by_length.iter().find(|b| it.name.contains(b.as_str())).cloned()
+        // Le suffixe ("of Convalescence") peut porter le nom d'une autre base (une gemme) : la base
+        // se cherche d'abord avant lui.
+        let head = it.name.split(" of ").next().unwrap_or(&it.name);
+        [head, it.name.as_str()].iter().find_map(|name| self.by_length.iter().find(|b| name.contains(b.as_str())).cloned())
     }
 
     pub fn url_for(&self, it: &Item) -> Option<String> {
@@ -421,5 +424,17 @@ mod tests {
         let it = item::parse(MANA_FLASK).unwrap();
         assert_eq!(idx.base_of(&it).as_deref(), Some("Greater Mana Flask"));
         assert_eq!(idx.url_for(&it).unwrap(), format!("{REPOE_ART}Art/Greater Mana Flask.png"));
+    }
+
+    #[test]
+    fn suffix_naming_another_base_is_ignored() {
+        let mut idx = ArtIndex::default();
+        for n in ["Gold Ring", "Convalescence"] {
+            idx.bases.insert(n.into(), BaseArt { art: format!("Art/{n}.dds"), w: 1, h: 1 });
+        }
+        let idx = idx.finish();
+        let mut it = item::parse(MANA_FLASK).unwrap();
+        (it.name, it.base) = ("Collector's Gold Ring of Convalescence".into(), String::new());
+        assert_eq!(idx.base_of(&it).as_deref(), Some("Gold Ring"));
     }
 }

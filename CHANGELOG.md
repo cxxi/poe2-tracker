@@ -1,5 +1,14 @@
 # Nouveautés
 
+## 0.6.0
+
+- Talents : ton arbre réel, lu dans le journal du jeu, face à celui du build. Pris en doré, à prendre en pointillé doré, pris hors build en rouge foncé ; en haut, où tu en es (« 117 / 139 du build ») et un clic pour aller aux talents à prendre ou hors build. Un talent que le build met sur un set d'armes compte pour ce set.
+- Caractéristiques calculées comme en jeu : base du niveau et de la classe, vie par Force et mana par Intelligence, arbre de talents, récompenses de quête (résistances, esprit, vie, Kaom's Lesson…) et pourcentages augmentés (vie, mana, esprit, défenses, attributs). Au survol d'un total, chaque source et le calcul.
+- Résistances affichées comme en jeu : effective, puis entre parenthèses le total avant plafond.
+- Joyaux : Ctrl+Alt+C sur un joyau serti l'ajoute aux joyaux suivis, comptés dans les caractéristiques ; les Time-Lost agissent sur les talents pris dans leur rayon. Dans l'arbre, clic droit sur une châsse pour dire quel joyau y est, et une pastille sur chaque joyau conseillé par le build : copié ou oublié.
+- Exporter le personnage (menu) : équipement, caractéristiques et leurs sources, talents et écart avec le build, joyaux, Atlas, maps et quêtes, au choix, en Markdown à coller dans une conversation avec une IA.
+- Diagnostic : l'image d'un objet magique dont le suffixe porte le nom d'une autre base (« of Convalescence ») est la bonne.
+
 ## 0.5.1
 
 - Diagnostic : l'image de certaines pièces ne grossit et ne rétrécit plus en boucle (affichage qui clignotait).

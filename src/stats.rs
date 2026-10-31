@@ -34,11 +34,16 @@ fn implicit_line(line: &str) -> Option<String> {
     )
 }
 
-/// Total d'une caractéristique et d'où il vient : (emplacement, valeur).
+/// Total d'une caractéristique et d'où il vient : (emplacement, valeur). `inc` : pourcentage
+/// augmenté global (« 5% increased maximum Life »), appliqué au total par `finish`.
 #[derive(Default, Debug, Clone)]
 pub struct Total {
     pub value: f64,
     pub from: Vec<(String, f64)>,
+    pub inc: f64,
+    pub inc_from: Vec<(String, f64)>,
+    /// Somme des apports avant le pourcentage augmenté.
+    pub flat: f64,
 }
 
 impl Total {
@@ -48,6 +53,67 @@ impl Total {
             Some((_, total)) => *total += v,
             None => self.from.push((slot.to_string(), v)),
         }
+    }
+
+    fn add_inc(&mut self, slot: &str, v: f64) {
+        self.inc += v;
+        match self.inc_from.iter_mut().find(|(s, _)| s == slot) {
+            Some((_, total)) => *total += v,
+            None => self.inc_from.push((slot.to_string(), v)),
+        }
+    }
+
+    /// Applique le pourcentage augmenté, arrondi au plus proche (comme PoB).
+    fn apply_inc(&mut self) {
+        self.flat = self.value;
+        if self.inc != 0.0 {
+            self.value = (self.value * (1.0 + self.inc / 100.0)).round();
+        }
+    }
+}
+
+/// Force, Dextérité, Intelligence de départ de chaque classe (arbre de PoB, 0.5), par classe et
+/// par ascendance.
+fn class_attributes(class: &str) -> Option<[f64; 3]> {
+    const CLASSES: [(&str, [f64; 3], &[&str]); 8] = [
+        ("Ranger", [7.0, 15.0, 7.0], &["Deadeye", "Pathfinder"]),
+        ("Huntress", [7.0, 15.0, 7.0], &["Amazon", "Spirit Walker", "Ritualist"]),
+        ("Warrior", [15.0, 7.0, 7.0], &["Titan", "Warbringer", "Smith of Kitava"]),
+        ("Mercenary", [11.0, 11.0, 7.0], &["Tactician", "Witchhunter", "Gemling Legionnaire"]),
+        ("Druid", [11.0, 7.0, 11.0], &["Oracle", "Shaman"]),
+        ("Witch", [7.0, 7.0, 15.0], &["Infernalist", "Blood Mage", "Lich", "Abyssal Lich"]),
+        ("Sorceress", [7.0, 7.0, 15.0], &["Stormweaver", "Chronomancer", "Disciple of Varashta"]),
+        ("Monk", [7.0, 11.0, 11.0], &["Martial Artist", "Invoker", "Acolyte of Chayula"]),
+    ];
+    CLASSES.iter().find(|(c, _, asc)| *c == class || asc.contains(&class)).map(|(_, a, _)| *a)
+}
+
+/// Le personnage autour de l'équipement : ses attributs de départ, sa vie et son mana de base
+/// (niveau, Force, Intelligence) et son évasion de base, puis les pourcentages augmentés
+/// appliqués (formules de PoB PoE2). À appeler une fois toutes les sources ajoutées.
+pub fn finish(sheet: &mut Sheet, level: u32, class: &str) {
+    if let Some(base) = class_attributes(class) {
+        for (t, v) in sheet.attributes.iter_mut().zip(base) {
+            t.add(tr!("Classe"), v);
+        }
+    }
+    // Attributs augmentés d'abord : la vie et le mana en dépendent.
+    for a in sheet.attributes.iter_mut() {
+        a.apply_inc();
+    }
+    let level = level.max(1) as f64;
+    let (str_, int) = (sheet.attributes[0].value, sheet.attributes[2].value);
+    sheet.life.add(tr!("Base (niveau)"), 16.0 + 12.0 * level);
+    if str_ > 0.0 {
+        sheet.life.add(tr!("Force"), (2.0 * str_).floor());
+    }
+    sheet.mana.add(tr!("Base (niveau)"), 30.0 + 4.0 * level);
+    if int > 0.0 {
+        sheet.mana.add(tr!("Intelligence"), (2.0 * int).floor());
+    }
+    sheet.defences[1].add(tr!("Base (niveau)"), 7.0);
+    for t in [&mut sheet.life, &mut sheet.mana, &mut sheet.spirit].into_iter().chain(sheet.defences.iter_mut()) {
+        t.apply_inc();
     }
 }
 
@@ -312,6 +378,43 @@ pub const RES_CAP: f64 = 75.0;
 fn add_known(sheet: &mut Sheet, slot: &str, template: &str, v: f64) -> bool {
     const ATTRS: [&str; 3] = ["Strength", "Dexterity", "Intelligence"];
     const RES: [&str; 3] = ["Fire", "Cold", "Lightning"];
+    // Pourcentages augmentés globaux : « 5% increased maximum Life », « 30% increased Global
+    // Armour, Evasion and Energy Shield », « 20% increased Armour and Evasion ».
+    if let Some(rest) = template.strip_prefix("#% increased ") {
+        let rest = rest.strip_prefix("Global ").unwrap_or(rest);
+        let parts: Vec<&str> = rest.split(", ").flat_map(|p| p.split(" and ")).collect();
+        let target = |p: &str| -> Option<usize> {
+            Some(match p {
+                "maximum Life" => 10,
+                "maximum Mana" => 11,
+                "Spirit" => 12,
+                "Armour" => 0,
+                "Evasion" | "Evasion Rating" => 1,
+                "Energy Shield" | "maximum Energy Shield" => 2,
+                "Defences" => 13,
+                "Strength" => 20,
+                "Dexterity" => 21,
+                "Intelligence" => 22,
+                "Attributes" => 23,
+                _ => return None,
+            })
+        };
+        let idx: Vec<usize> = parts.iter().filter_map(|p| target(p)).collect();
+        if !idx.is_empty() && idx.len() == parts.len() {
+            for i in idx {
+                match i {
+                    10 => sheet.life.add_inc(slot, v),
+                    11 => sheet.mana.add_inc(slot, v),
+                    12 => sheet.spirit.add_inc(slot, v),
+                    13 => sheet.defences.iter_mut().for_each(|d| d.add_inc(slot, v)),
+                    20..=22 => sheet.attributes[i - 20].add_inc(slot, v),
+                    23 => sheet.attributes.iter_mut().for_each(|a| a.add_inc(slot, v)),
+                    d => sheet.defences[d].add_inc(slot, v),
+                }
+            }
+            return true;
+        }
+    }
     if let Some(rest) = template.strip_prefix("+# to ") {
         // Attributs : un, deux (« Strength and Dexterity ») ou tous.
         let attrs: Vec<usize> = if rest == "all Attributes" {
@@ -498,6 +601,114 @@ pub fn sheet_of(pieces: &[Piece]) -> Sheet {
     sheet
 }
 
+/// Lignes des talents `ids` : leurs effets, et « +5 » dans l'attribut choisi pour un talent
+/// d'attribut (`attr_of` : 0 Force, 1 Dextérité, 2 Intelligence).
+pub fn tree_lines<'a>(ids: impl IntoIterator<Item = &'a String>, catalog: &crate::guide::Catalog, attr_of: impl Fn(&str) -> usize) -> Vec<String> {
+    const NAMES: [&str; 3] = ["Strength", "Dexterity", "Intelligence"];
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(p) = catalog.passives.get(id) else { continue };
+        if p.attribute {
+            out.push(format!("+5 to {}", NAMES[attr_of(id).min(2)]));
+        } else {
+            out.extend(p.stats.iter().cloned());
+        }
+    }
+    out
+}
+
+/// Mod d'un joyau à rayon (Time-Lost) : il agit sur les talents autour de sa châsse.
+pub fn is_radius_line(line: &str) -> bool {
+    line.contains("in Radius") || line.starts_with("Upgrades Radius")
+}
+
+/// Rayon d'un joyau en unités de l'arbre : sa ligne « Radius: Medium » ou son mod « Upgrades
+/// Radius to Large », Small sinon (rayons de PoB, × 1,2 du jeu).
+pub fn jewel_radius(raw: &str, mods: &[String]) -> f32 {
+    let size = raw
+        .lines()
+        .find_map(|l| l.strip_prefix("Radius: "))
+        .or_else(|| mods.iter().find_map(|m| m.strip_prefix("Upgrades Radius to ")))
+        .unwrap_or("Small");
+    let outer = match size.trim() {
+        "Medium" => 1150.0,
+        "Large" => 1300.0,
+        "Very Large" => 1500.0,
+        _ => 1000.0,
+    };
+    outer * 1.2
+}
+
+/// Talent mineur au sens des joyaux à rayon : ni notable, ni clé de voûte, ni châsse, ni départ.
+fn is_small(p: &crate::guide::Passive) -> bool {
+    !p.notable && !p.keystone && !p.jewel && !p.class_start && !p.ascendancy
+}
+
+/// Ligne aux nombres multipliés par `k` (« +2% to X » × 3 → « +6% to X »).
+fn scaled(line: &str, k: f64) -> String {
+    NUMBER.replace_all(line, |c: &regex::Captures| fmt(c[0].parse::<f64>().unwrap_or(0.0) * k)).into_owned()
+}
+
+/// Ce qu'un joyau à rayon serti en `socket` (identifiant du talent de châsse) ajoute, d'après les
+/// talents pris `taken` dans son rayon : « Small/Notable Passive Skills in Radius also grant X »
+/// une fois par talent concerné, « #% increased Effect of … in Radius » en part de leurs effets.
+pub fn radius_lines(mods: &[String], radius: f32, socket: &str, taken: &std::collections::HashSet<&str>, catalog: &crate::guide::Catalog) -> Vec<String> {
+    let Some(at) = catalog.passives.get(socket) else { return vec![] };
+    let near: Vec<&crate::guide::Passive> = taken
+        .iter()
+        .filter_map(|id| catalog.passives.get(*id))
+        .filter(|p| !p.ascendancy && ((p.x - at.x).powi(2) + (p.y - at.y).powi(2)).sqrt() <= radius)
+        .collect();
+    let small: Vec<&&crate::guide::Passive> = near.iter().filter(|p| is_small(p)).collect();
+    let notable: Vec<&&crate::guide::Passive> = near.iter().filter(|p| p.notable && !p.keystone).collect();
+    let mut out = Vec::new();
+    for m in mods {
+        if let Some(x) = m.strip_prefix("Small Passive Skills in Radius also grant ") {
+            if !small.is_empty() {
+                out.push(scaled(x, small.len() as f64));
+            }
+        } else if let Some(x) = m.strip_prefix("Notable Passive Skills in Radius also grant ") {
+            if !notable.is_empty() {
+                out.push(scaled(x, notable.len() as f64));
+            }
+        } else if m.contains("increased Effect of") && m.ends_with("Passive Skills in Radius") {
+            let pct = split(m).1.first().copied().unwrap_or(0.0) / 100.0;
+            let nodes = if m.contains("Notable") { &notable } else { &small };
+            for p in nodes {
+                // « +5 to any Attribute » : l'attribut n'est pas connu ici.
+                out.extend(p.stats.iter().filter(|s| !s.contains("any Attribute")).map(|s| scaled(s, pct)));
+            }
+        }
+    }
+    out
+}
+
+/// Ajoute à la fiche des lignes venues d'ailleurs que l'équipement (l'arbre de talents), sous le
+/// nom `name`.
+pub fn add_source(sheet: &mut Sheet, name: &str, lines: &[String]) {
+    for line in lines {
+        let (template, values) = split(line);
+        if values.len() == 1 && add_known(sheet, name, &template, values[0]) {
+            continue;
+        }
+        let group = sheet.lines.entry(group_of(&template)).or_default();
+        match group.iter_mut().find(|l| l.template == template && l.values.len() == values.len()) {
+            Some(l) => {
+                for (t, v) in l.values.iter_mut().zip(&values) {
+                    *t += v;
+                }
+                if !l.from.iter().any(|f| f == name) {
+                    l.from.push(name.to_string());
+                }
+            }
+            None => group.push(Line { template, values, from: vec![name.to_string()] }),
+        }
+    }
+    for group in sheet.lines.values_mut() {
+        group.sort_by(|a, b| a.template.cmp(&b.template));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +722,64 @@ mod tests {
             mods: it.mods,
             base_defences: None,
         }
+    }
+
+    #[test]
+    fn tree_lines_add_to_the_sheet() {
+        let staff = piece(
+            Slot::Weapon,
+            "Item Class: Staves\nRarity: Rare\nHavoc Bane\nGelid Staff\n--------\nItem Level: 64\n--------\n119% increased Spell Damage\n+11 to Intelligence\n+20% to Cold Resistance\n",
+        );
+        let mut s = sheet_of(&[staff]);
+        let tree: Vec<String> = ["+3% to all Elemental Resistances", "+5 to Intelligence", "10% increased Spell Damage", "Enemies in your Presence are Slowed by 20%"].map(String::from).into();
+        add_source(&mut s, "Arbre", &tree);
+        assert_eq!(s.resistances.iter().map(|r| r.value).collect::<Vec<_>>(), vec![3.0, 23.0, 3.0, 0.0]);
+        assert_eq!(s.attributes[2].value, 16.0);
+        let spell = s.lines[&Group::Damage].iter().find(|l| l.template == "#% increased Spell Damage").unwrap();
+        assert_eq!((spell.sum(), spell.from.len()), (129.0, 2));
+        assert!(s.lines.values().flatten().any(|l| l.template.starts_with("Enemies in your Presence")));
+    }
+
+    #[test]
+    fn radius_jewel_counts_nodes_around_its_socket() {
+        use crate::guide::{Catalog, Passive};
+        let mut catalog = Catalog::default();
+        let node = |x: f32, notable, jewel, stats: &[&str]| Passive { x, notable, jewel, stats: stats.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        catalog.passives.insert("socket".into(), node(0.0, false, true, &[]));
+        catalog.passives.insert("a".into(), node(500.0, false, false, &["10% increased Spell Damage"]));
+        catalog.passives.insert("b".into(), node(900.0, false, false, &["10% increased Spell Damage"]));
+        catalog.passives.insert("n".into(), node(1100.0, true, false, &["20% increased Cold Damage"]));
+        catalog.passives.insert("far".into(), node(5000.0, true, false, &[]));
+        let taken: std::collections::HashSet<&str> = ["a", "b", "n", "far"].into();
+        let mods: Vec<String> = ["Small Passive Skills in Radius also grant 2% increased Cast Speed", "Notable Passive Skills in Radius also grant 5% increased Critical Damage Bonus", "20% increased Effect of Small Passive Skills in Radius"].map(String::from).into();
+        // Small : 1000 × 1,2 = 1200, la notable à 1100 y est, celle à 5000 non.
+        let r = jewel_radius("Item Class: Jewels\nRadius: Small", &mods);
+        let lines = radius_lines(&mods, r, "socket", &taken, &catalog);
+        assert_eq!(lines, ["4% increased Cast Speed", "5% increased Critical Damage Bonus", "2% increased Spell Damage", "2% increased Spell Damage"]);
+        assert!((jewel_radius("", &["Upgrades Radius to Large".to_string()]) - 1560.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn character_base_and_increases() {
+        // Proche de Juliana, Chronomancienne niveau 76 (Force 32, Intelligence 130, vie 1610 en
+        // jeu) ; l'équipement est approché.
+        let mut s = Sheet::default();
+        let lines: Vec<String> = ["+25 to Strength", "+115 to Intelligence", "+521 to maximum Life", "+20 to maximum Life", "5% increased maximum Life", "+30 to Spirit", "+82 to Spirit", "+290 to maximum Energy Shield", "30% increased Global Armour, Evasion and Energy Shield"].map(String::from).into();
+        add_source(&mut s, "x", &lines);
+        finish(&mut s, 76, "Chronomancer");
+        assert_eq!([s.attributes[0].value, s.attributes[2].value], [32.0, 130.0]);
+        // (16 + 12 × 76 + 2 × 32 + 541) × 1,05.
+        assert_eq!(s.life.value, 1610.0);
+        assert_eq!(s.spirit.value, 112.0);
+        assert_eq!(s.defences[2].value, 377.0);
+        // Évasion de base, augmentée elle aussi : 7 × 1,3.
+        assert_eq!(s.defences[1].value, 9.0);
+        // Attributs augmentés, avant la vie qu'apporte la Force : (15 + 33) × 1,1 ≈ 53 → +106 de vie.
+        let mut s = Sheet::default();
+        add_source(&mut s, "x", &["+33 to Strength".to_string(), "10% increased Attributes".to_string()]);
+        finish(&mut s, 1, "Warrior");
+        assert_eq!(s.attributes[0].value, 53.0);
+        assert_eq!(s.life.value, 28.0 + 106.0);
     }
 
     #[test]

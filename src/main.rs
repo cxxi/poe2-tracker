@@ -17,6 +17,7 @@ mod capture;
 mod changelog;
 mod coach;
 mod dat;
+mod export;
 mod compare;
 mod desktop;
 mod gametext;
@@ -89,6 +90,8 @@ struct Config {
     boss_tab: bool,
     /// Langue de l'interface (« fr », « en » ; vide = celle du système).
     lang: String,
+    /// Sections cochées dans la fenêtre d'export du personnage.
+    export: export::Sections,
 }
 
 impl Default for Config {
@@ -101,6 +104,7 @@ impl Default for Config {
             boss_tab: false,
             lang: String::new(),
             market_min_unit: "ex".into(),
+            export: export::Sections::default(),
         }
     }
 }
@@ -274,6 +278,8 @@ struct App {
     welcome: Welcome,
     /// Fenêtre des réglages ouverte : ses valeurs en cours de modification.
     settings: Option<SettingsDraft>,
+    /// Fenêtre d'export du personnage ouverte.
+    export_open: bool,
     updater: updater::Updater,
 }
 
@@ -540,6 +546,20 @@ fn start_coach(ctx: egui::Context, config: &Config, files: Vec<PathBuf>, cache: 
     (coach_rx, log_rx)
 }
 
+/// Fiches de caractéristiques calculées (onglet Caractéristiques et export).
+struct Sheets {
+    worn: stats::Sheet,
+    build: Option<stats::Sheet>,
+    build_title: String,
+    /// Pénalité de résistances de la progression et ce qui l'explique.
+    penalty: (f64, String),
+    /// L'arbre réel est connu (journal complet) et compté.
+    tree_known: bool,
+    level: Option<u32>,
+    /// Joyaux suivis et leur châsse.
+    jewels: Vec<(item::Item, Option<String>)>,
+}
+
 impl App {
     fn new(cc: &eframe::CreationContext, dirs: ProjectDirs, mut stored: Config, config: Config) -> App {
         // Langue de l'interface avant tout texte (nouveautés, fil d'événements rejoué).
@@ -655,6 +675,7 @@ impl App {
             },
             updater: updater::Updater::start(&cc.egui_ctx, config.auto_update),
             // Développement : réglages ouverts d'office (POE2_TRACKER_SETTINGS=1).
+            export_open: std::env::var_os("POE2_TRACKER_EXPORT").is_some(),
             settings: std::env::var_os("POE2_TRACKER_SETTINGS")
                 .is_some()
                 .then(|| SettingsDraft::new(&stored, &config)),
@@ -895,9 +916,20 @@ impl App {
         let catalog = self.augments.get();
         let steps = &self.build_jewels.as_ref().unwrap().1;
         let Some(step) = steps.iter().find(|s| s.name == label) else { return vec![] };
+        // Joyaux copiés en jeu, attribués un à un aux conseils du build : un unique par son nom,
+        // un autre par son type (« Sapphire », « Time-Lost Sapphire »).
+        let tracked = self.gear.jewel_items();
+        let mut free: Vec<usize> = (0..tracked.len()).collect();
+        let mut take = |name: &str, unique: bool| {
+            let k = free.iter().position(|i| if unique { tracked[*i].name == name } else { tracked[*i].base == name })?;
+            Some(free.remove(k))
+        };
+        let found: Vec<Option<usize>> = step.jewels.iter().map(|j| take(&j.name, j.rarity == item::Rarity::Unique)).collect();
         step.jewels
             .iter()
-            .map(|j| views::TreeJewel {
+            .zip(found)
+            .map(|(j, copied)| views::TreeJewel {
+                copied,
                 node: j.node,
                 icon: j.icon.clone(),
                 name: j.name.clone(),
@@ -911,6 +943,21 @@ impl App {
                 },
             })
             .collect()
+    }
+
+    /// Châsse de chaque joyau suivi (voir `Gear::jewel_places`), d'après les joyaux conseillés à
+    /// l'étape affichée et les châsses prises de l'arbre réel.
+    fn jewel_places(&self, advised: &[views::TreeJewel]) -> Vec<Option<String>> {
+        let Some(c) = &self.coach else { return vec![None; self.gear.jewels.len()] };
+        let catalog = c.catalog();
+        let socket_id = |skill: u32| catalog.passives.iter().find(|(_, p)| p.skill == skill && p.jewel).map(|(id, _)| id.clone());
+        let advised: Vec<(usize, String)> = advised.iter().filter_map(|j| Some((j.copied?, socket_id(j.node)?))).collect();
+        let free: Vec<String> = c
+            .character()
+            .filter(|(_, ch)| ch.passives_known)
+            .map(|(_, ch)| ch.passives.iter().filter(|id| catalog.passives.get(id.as_str()).is_some_and(|p| p.jewel)).cloned().collect())
+            .unwrap_or_default();
+        self.gear.jewel_places(&advised, &free)
     }
 
     /// Ce que la campagne a déjà donné au personnage (récompenses cochées sur la route).
@@ -2090,29 +2137,236 @@ impl App {
         }
     }
 
-    /// Copie dans le presse-papier tout l'équipement suivi, avec son contexte (personnage,
-    /// ligue, build), en Markdown.
-    fn export_gear(&mut self, ctx: &egui::Context) {
-        let count = self.gear.slots.len();
-        let character = self.coach.as_ref().and_then(|c| c.character().map(|(n, s)| (n.to_string(), s.class.clone(), s.level)));
-        let title = match &character {
-            Some((name, ..)) => tr!("Équipement de {name} (Path of Exile 2)", name),
-            None => tr!("Équipement (Path of Exile 2)").to_string(),
+    /// Le personnage en Markdown, à coller dans une conversation avec une IA : son contexte, puis
+    /// les sections cochées dans la fenêtre d'export.
+    fn export_character(&mut self) -> String {
+        let sections = self.stored.export;
+        let set = self.gear.set.max(1);
+        let character = self.coach.as_ref().and_then(|c| c.character().map(|(n, s)| (n.to_string(), s.clone())));
+        let mut out = match &character {
+            Some((name, _)) => format!("# {}\n\n", tr!("{name} (Path of Exile 2)", name)),
+            None => "# Path of Exile 2\n\n".to_string(),
         };
-        let mut context = Vec::new();
-        if let Some((_, class, level)) = &character {
-            context.push(tr!("Classe : {class}, niveau {level}", class, level));
+        if let Some((_, ch)) = &character {
+            let progress = match ch.max_act {
+                6.. => tr!("endgame").to_string(),
+                5 => tr!("interludes").to_string(),
+                act => tr!("acte {act}", act),
+            };
+            out.push_str(&format!("- {}\n", tr!("Classe : {class}, niveau {level}, {progress}", class = ch.class, level = ch.level, progress)));
         }
         if !self.league.is_empty() {
-            context.push(tr!("Ligue : {league}", league = self.league));
+            out.push_str(&format!("- {}\n", tr!("Ligue : {league}", league = self.league)));
         }
         if let Some(b) = self.builds.active() {
             let step = self.judging_step().map(|s| tr!(" (étape : {step})", step = guide::step_text(&s.label)));
-            context.push(tr!("Build suivi : {name}{step}", name = b.name, step = step.unwrap_or_default()));
+            out.push_str(&format!("- {}\n", tr!("Build suivi : {name}{step}", name = b.name, step = step.unwrap_or_default())));
+            if let Some(url) = Some(b.source.clone()).filter(|u| !u.is_empty()) {
+                out.push_str(&format!("- {}\n", tr!("Page du build : {url}", url)));
+            }
         }
-        context.push(tr!("Texte des pièces tel que copié en jeu (Ctrl+Alt+C), en anglais").into());
-        ctx.copy_text(self.gear.export(&title, &context));
-        self.say(trn!(count, "Équipement copié dans le presse-papier ({n} pièce)", "Équipement copié dans le presse-papier ({n} pièces)"));
+        out.push_str(&format!("- {}\n", tr!("Textes du jeu en anglais, tels que copiés en jeu")));
+        if sections.gear {
+            out.push_str(&format!("\n## {}\n\n", tr!("Équipement")));
+            out.push_str(&self.gear.export());
+        }
+        if sections.stats {
+            let sheets = self.character_sheets(set);
+            out.push_str(&format!("\n## {}\n\n", tr!("Caractéristiques")));
+            out.push_str(&export::stats(&sheets.worn, sheets.build.as_ref(), &sheets.build_title, set, &sheets.penalty, sheets.tree_known));
+        }
+        if sections.passives {
+            out.push_str(&format!("\n## {}\n\n", tr!("Talents")));
+            out.push_str(&self.export_passives());
+        }
+        if sections.jewels {
+            out.push_str(&format!("\n## {}\n\n", tr!("Joyaux")));
+            out.push_str(&self.export_jewels());
+        }
+        if sections.atlas {
+            out.push_str(&format!("\n## {}\n\n", tr!("Atlas")));
+            let atlas: Vec<String> = self.coach.as_mut().and_then(|c| c.maps()).map(|b| b.atlas.values().cloned().collect()).unwrap_or_default();
+            out.push_str(&format!("{} : {}\n", tr!("Passifs de l'Atlas pris"), export::names(&atlas)));
+        }
+        if sections.maps {
+            out.push_str(&format!("\n## {}\n\n", tr!("Maps")));
+            out.push_str(&self.export_maps());
+        }
+        if sections.quests {
+            out.push_str(&format!("\n## {}\n\n", tr!("Quêtes")));
+            out.push_str(&self.export_quests());
+        }
+        out
+    }
+
+    /// Talents : ton arbre réel par genre, puis l'écart avec le build à l'étape affichée.
+    fn export_passives(&self) -> String {
+        let Some(c) = &self.coach else { return String::new() };
+        let Some((_, ch)) = c.character() else { return String::new() };
+        if !ch.passives_known {
+            return format!("{}\n", tr!("Arbre réel inconnu : le journal du jeu ne couvre pas ce personnage depuis le niveau 2."));
+        }
+        let catalog = c.catalog();
+        let step = self.shown_step_index().and_then(|i| c.steps.get(i));
+        let main_attr = step.map_or(2, |s| catalog.main_attribute(s));
+        // Noms regroupés : « Spell Damage ×3 ».
+        let grouped = |ids: &mut dyn Iterator<Item = &String>| -> Vec<String> {
+            let mut counts: Vec<(String, usize)> = Vec::new();
+            for id in ids {
+                let Some(p) = catalog.passives.get(id) else { continue };
+                match counts.iter_mut().find(|(n, _)| *n == p.name) {
+                    Some((_, k)) => *k += 1,
+                    None => counts.push((p.name.clone(), 1)),
+                }
+            }
+            counts.sort();
+            counts.into_iter().map(|(n, k)| if k > 1 { format!("{n} ×{k}") } else { n }).collect()
+        };
+        let mine: Vec<&String> = ch.passives.iter().filter(|id| catalog.passives.contains_key(*id)).collect();
+        let of = |f: &dyn Fn(&guide::Passive) -> bool| -> Vec<&String> { mine.iter().copied().filter(|id| f(&catalog.passives[*id])).collect() };
+        let asc = of(&|p| p.ascendancy);
+        let keystones = of(&|p| p.keystone && !p.ascendancy);
+        let notables = of(&|p| p.notable && !p.keystone && !p.ascendancy);
+        let attributes = of(&|p| p.attribute);
+        let small = of(&|p| !p.ascendancy && !p.keystone && !p.notable && !p.attribute && !p.jewel);
+        let sockets = of(&|p| p.jewel);
+        let mut attr = [0; 3];
+        for id in &attributes {
+            attr[self.tree.attribute_choice(id).unwrap_or(main_attr).min(2)] += 1;
+        }
+        let mut out = format!("{}\n\n", tr!("Arbre réel lu dans le journal du jeu : {n} talents.", n = mine.len()));
+        out.push_str(&format!("- {} : {}\n", tr!("Ascendance"), export::names(&grouped(&mut asc.into_iter()))));
+        out.push_str(&format!("- {} : {}\n", tr!("Clés de voûte"), export::names(&grouped(&mut keystones.into_iter()))));
+        out.push_str(&format!("- {} : {}\n", tr!("Notables"), export::names(&grouped(&mut notables.into_iter()))));
+        out.push_str(&format!("- {} : {}\n", tr!("Talents mineurs"), export::names(&grouped(&mut small.into_iter()))));
+        out.push_str(&format!("- {}\n", tr!("Talents d'attribut : {n} (Force {s}, Dextérité {d}, Intelligence {i})", n = attributes.len(), s = attr[0], d = attr[1], i = attr[2])));
+        out.push_str(&format!("- {}\n", tr!("Châsses de joyau prises : {n}", n = sockets.len())));
+        if let Some(step) = step {
+            let want: HashSet<&String> = step.passives.iter().collect();
+            let have: HashSet<&String> = mine.iter().copied().collect();
+            // Sans les départs (classe, racine de l'ascendance) : pris d'office.
+            let root = |p: &guide::Passive| p.class_start || p.ascendancy_name.as_deref() == Some(p.name.as_str());
+            let to_take: Vec<&String> = step.passives.iter().filter(|id| !have.contains(id) && catalog.passives.get(*id).is_some_and(|p| !root(p))).collect();
+            let off: Vec<&String> = mine.iter().copied().filter(|id| !want.contains(id)).collect();
+            out.push_str(&format!("\n{}\n\n", tr!("Face au build ({step}, {n} talents) :", step = guide::step_text(&step.label), n = step.passives.len())));
+            out.push_str(&format!("- {} : {}\n", tr!("À prendre ({n})", n = to_take.len()), export::names(&grouped(&mut to_take.into_iter()))));
+            out.push_str(&format!("- {} : {}\n", tr!("Pris hors build ({n})", n = off.len()), export::names(&grouped(&mut off.into_iter()))));
+        }
+        out
+    }
+
+    /// Joyaux suivis : leur châsse (repérée par la notable la plus proche) et leur texte.
+    fn export_jewels(&mut self) -> String {
+        let sheets_jewels = self.character_sheets(self.gear.set.max(1)).jewels;
+        if sheets_jewels.is_empty() {
+            return format!("{}\n", tr!("Aucun joyau suivi (Ctrl+Alt+C sur un joyau serti)."));
+        }
+        let Some(c) = &self.coach else { return String::new() };
+        let catalog = c.catalog();
+        let mut out = String::new();
+        for (j, socket) in sheets_jewels {
+            let place = socket.as_ref().and_then(|s| catalog.passives.get(s)).map(|at| {
+                let near = catalog
+                    .passives
+                    .values()
+                    .filter(|p| p.notable && !p.ascendancy)
+                    .min_by(|a, b| ((a.x - at.x).hypot(a.y - at.y)).total_cmp(&(b.x - at.x).hypot(b.y - at.y)))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                tr!("châsse près de « {near} »", near)
+            });
+            out.push_str(&format!("### {}\n\n", j.title()));
+            out.push_str(&format!("{}\n\n```\n{}\n```\n\n", place.unwrap_or_else(|| tr!("châsse inconnue").to_string()), j.raw.trim()));
+        }
+        out
+    }
+
+    /// Maps : résumé, puis les 20 dernières.
+    fn export_maps(&mut self) -> String {
+        let Some(book) = self.coach.as_mut().and_then(|c| c.maps()) else { return String::new() };
+        let runs = &book.runs;
+        if runs.is_empty() {
+            return format!("{}\n", tr!("Aucune map."));
+        }
+        let time: i64 = runs.iter().map(|r| r.active_secs()).sum();
+        let deaths: u32 = runs.iter().map(|r| r.deaths).sum();
+        let group = runs.iter().filter(|r| r.group).count();
+        let mut out = format!(
+            "- {}\n",
+            tr!("{n} maps, {time} au total, {avg} en moyenne, {deaths} morts, {group} en groupe", n = runs.len(), time = duration_text(time), avg = duration_text(time / runs.len() as i64), deaths, group)
+        );
+        let mut tiers: Vec<(String, usize)> = Vec::new();
+        for r in runs {
+            let t = run_tier(r);
+            match tiers.iter_mut().find(|(n, _)| *n == t) {
+                Some((_, k)) => *k += 1,
+                None => tiers.push((t, 1)),
+            }
+        }
+        out.push_str(&format!("- {} : {}\n\n", tr!("Par palier"), tiers.iter().map(|(t, k)| format!("{t} ×{k}")).collect::<Vec<_>>().join(", ")));
+        out.push_str(&format!("| {} | {} | {} | {} | {} | {} |\n|---|---|---|---|---|---|\n", tr!("Date"), tr!("Map"), tr!("Palier"), tr!("Durée"), tr!("Morts"), tr!("Groupe")));
+        for r in runs.iter().rev().take(20) {
+            let group = if r.group { tr!("oui") } else { tr!("non") };
+            out.push_str(&format!("| {} | {} | {} | {} | {} | {group} |\n", date_text(r.start), run_name(r), run_tier(r), duration_text(r.active_secs()), r.deaths));
+        }
+        out
+    }
+
+    /// Quêtes : récompenses de la route obtenues, avec ce qui a été choisi.
+    fn export_quests(&self) -> String {
+        let Some(c) = &self.coach else { return String::new() };
+        let Some((_, ch)) = c.character() else { return String::new() };
+        let mut out = String::new();
+        for r in c.route.iter().filter(|r| ch.done.contains(&r.id)) {
+            let picks = ch.picks.get(&r.id).map(|p| format!(" → {}", p.join(", "))).unwrap_or_default();
+            out.push_str(&format!("- {} · {} : {}{picks}\n", tr!("acte {act}", act = r.act), r.what_text(), r.reward_text()));
+        }
+        if out.is_empty() {
+            out = format!("{}\n", tr!("Aucune récompense obtenue."));
+        }
+        out
+    }
+
+    /// Fenêtre d'export : sections à cocher, puis copie dans le presse-papier.
+    fn export_window(&mut self, ctx: &egui::Context) {
+        if !self.export_open {
+            return;
+        }
+        let mut open = true;
+        let mut copy = false;
+        let mut sections = self.stored.export;
+        egui::Window::new(RichText::new(tr!("Exporter le personnage")).color(ui::GOLD))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui::gold_widgets(ui);
+                ui.label(RichText::new(tr!("Copie le personnage en Markdown, à coller dans une conversation avec une IA.")).color(Color32::GRAY));
+                ui.add_space(6.0);
+                for (on, name, hint) in sections.items() {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(on, RichText::new(name).size(15.0));
+                        ui.label(RichText::new(hint).color(Color32::GRAY));
+                    });
+                }
+                ui.add_space(8.0);
+                copy = ui.button(RichText::new(tr!("Copier dans le presse-papier")).color(ui::GOLD)).clicked();
+            });
+        let changed = serde_json::to_string(&sections).ok() != serde_json::to_string(&self.stored.export).ok();
+        if changed {
+            self.stored.export = sections;
+            self.stored.save(&self.dirs);
+        }
+        if copy {
+            let text = self.export_character();
+            ctx.copy_text(text.clone());
+            self.say(trn!(text.lines().count(), "Personnage copié dans le presse-papier ({n} ligne)", "Personnage copié dans le presse-papier ({n} lignes)"));
+            self.export_open = false;
+        }
+        if !open {
+            self.export_open = false;
+        }
     }
 
     /// Nouveautés : après une mise à jour (versions arrivées depuis la dernière vue), ou depuis
@@ -2426,10 +2680,8 @@ impl App {
             ui.add_space(4.0);
             ui.separator();
             ui::menu_section(ui, tr!("DONNÉES"));
-            let tracked = !self.gear.slots.is_empty();
-            let export_hint = if tracked { tr!("copie le texte de chaque pièce suivie") } else { tr!("aucune pièce suivie : Ctrl+Alt+C sur une pièce") };
-            if ui::menu_item(ui, "📤", tr!("Exporter l'équipement"), export_hint, tracked, false).clicked() {
-                self.export_gear(ui.ctx());
+            if ui::menu_item(ui, "📤", tr!("Exporter le personnage…"), tr!("équipement, caractéristiques, talents, maps…"), true, false).clicked() {
+                self.export_open = true;
             }
             if ui::menu_item(ui, "⟳", tr!("Mettre à jour les catalogues"), tr!("augments, types de base, gemmes, images"), true, false).clicked() {
                 self.augments.refresh();
@@ -2745,6 +2997,8 @@ impl App {
                     Equipped::AlreadyThere(slot) => {
                         tr!("{item} est déjà suivi ({slot})", item = it.title(), slot = slot.label().to_lowercase())
                     }
+                    Equipped::Jewel(n) => tr!("{item} suivi dans l'arbre de talents ({n} joyaux)", item = it.title(), n),
+                    Equipped::JewelAlreadyThere => tr!("{item} est déjà suivi dans l'arbre de talents", item = it.title()),
                     Equipped::CharmsFull => {
                         tr!("3 charmes déjà suivis et aucun {base} : retire-en un (clic droit)", base = it.base)
                     }
@@ -3476,27 +3730,94 @@ impl App {
         }
     }
 
+    /// Fiches de caractéristiques du personnage (pièces portées, arbre réel, joyaux suivis) et
+    /// du build à l'étape affichée, pour le set d'armes `set` : celles de l'onglet et de l'export.
+    fn character_sheets(&mut self, set: u8) -> Sheets {
+        // Joyaux que le build sertit à l'étape affichée (colonne Build).
+        let label = self.shown_step_index().and_then(|i| self.coach.as_ref()?.steps.get(i).map(|s| s.label.clone()));
+        let build_jewels: Vec<views::TreeJewel> = label.map(|l| self.tree_jewels(&l)).unwrap_or_default();
+        let catalog = self.augments.get();
+        let character = self.coach.as_ref().and_then(|c| c.character()).map(|(_, ch)| ch.clone());
+        let penalty = character.as_ref().map(|ch| stats::res_penalty(ch.max_act, ch.level)).unwrap_or((0.0, tr!("acte 1").into()));
+        let level = character.as_ref().map(|ch| ch.level);
+        let class = character.as_ref().map(|ch| ch.class.clone()).unwrap_or_default();
+        let quests = self.quest_bonuses();
+        let shown = self.shown_step_index().filter(|i| self.coach.as_ref().is_some_and(|c| *i < c.steps.len()));
+        // Talents : l'arbre réel pour ce qui est porté (s'il est connu), celui de l'étape pour le
+        // build ; attributs choisis au clic droit dans l'onglet Talents.
+        if let Some(b) = self.builds.active() {
+            self.tree.use_overrides_file(self.builds.dir_of(&b.id).join("attributes.json"));
+        }
+        let tracked_jewels = self.gear.jewel_items();
+        let jewel_places = self.jewel_places(&build_jewels);
+        let (worn_tree, build_tree, worn_jewel_lines, build_jewel_lines) = match &self.coach {
+            Some(c) => {
+                let main_attr = shown.map_or(2, |i| c.catalog().main_attribute(&c.steps[i]));
+                let attr_of = |id: &str| self.tree.attribute_choice(id).unwrap_or(main_attr);
+                // Le journal ne dit pas sur quel set d'armes un talent est pris : celui que lui donne
+                // le build à l'étape affichée, sinon les deux.
+                let sets = shown.map(|i| &c.steps[i].passive_sets);
+                let in_set = |id: &String| sets.and_then(|s| s.get(id)).is_none_or(|n| *n == set);
+                let worn = c.character().filter(|(_, ch)| ch.passives_known).map(|(_, ch)| stats::tree_lines(ch.passives.iter().filter(|id| in_set(id)), c.catalog(), attr_of));
+                let build = shown.map(|i| stats::tree_lines(c.steps[i].passives.iter().filter(|id| in_set(id)), c.catalog(), attr_of));
+                // Joyaux : leurs mods, et pour un joyau à rayon ce qu'il ajoute aux talents pris
+                // autour de sa châsse.
+                let catalog = c.catalog();
+                let socket_id = |skill: u32| catalog.passives.iter().find(|(_, p)| p.skill == skill && p.jewel).map(|(id, _)| id.clone());
+                let jewel_lines = |mods: &[String], raw: &str, socket: Option<String>, taken: &HashSet<&str>| -> Vec<String> {
+                    let mut out: Vec<String> = mods.iter().filter(|m| !stats::is_radius_line(m)).cloned().collect();
+                    if let Some(s) = socket {
+                        out.extend(stats::radius_lines(mods, stats::jewel_radius(raw, mods), &s, taken, catalog));
+                    }
+                    out
+                };
+                let real: Vec<&String> = c.character().filter(|(_, ch)| ch.passives_known).map(|(_, ch)| ch.passives.iter().filter(|id| in_set(id)).collect()).unwrap_or_default();
+                let real_taken: HashSet<&str> = real.iter().map(|s| s.as_str()).collect();
+                let worn_jewels: Vec<String> = tracked_jewels
+                    .iter()
+                    .zip(&jewel_places)
+                    .flat_map(|(it, socket)| jewel_lines(&it.mods, &it.raw, socket.clone(), &real_taken))
+                    .collect();
+                let build_taken: HashSet<&str> = shown.map(|i| c.steps[i].passives.iter().filter(|id| in_set(id)).map(|s| s.as_str()).collect()).unwrap_or_default();
+                let build_jewel_lines: Vec<String> = build_jewels.iter().flat_map(|j| jewel_lines(&j.lines, "", socket_id(j.node), &build_taken)).collect();
+                (worn, build, worn_jewels, build_jewel_lines)
+            }
+            None => (None, None, vec![], vec![]),
+        };
+        // Le personnage autour des pièces : talents, récompenses de quête, base et attributs,
+        // pourcentages augmentés.
+        let complete = |sheet: &mut stats::Sheet, tree: Option<&Vec<String>>, jewels: &[String]| {
+            if let Some(lines) = tree {
+                stats::add_source(sheet, tr!("Arbre de talents"), lines);
+            }
+            stats::add_source(sheet, tr!("Joyaux"), jewels);
+            stats::add_source(sheet, tr!("Récompenses de quête"), &quests.lines);
+            stats::finish(sheet, level.unwrap_or(1), &class);
+        };
+        let mut worn = stats::sheet(&self.gear, set);
+        complete(&mut worn, worn_tree.as_ref(), &worn_jewel_lines);
+        let step = shown.and_then(|i| self.coach.as_ref()?.steps.get(i));
+        let build = step.map(|s| {
+            let mut b = stats::build_sheet(
+                s,
+                set,
+                |b| catalog.as_ref()?.defences.get(b).copied(),
+                |b| catalog.as_ref()?.classes.get(b).map(|(c, _)| c.clone()),
+                |b| catalog.as_ref().and_then(|c| c.implicits.get(b).cloned()).unwrap_or_default(),
+            );
+            complete(&mut b, build_tree.as_ref(), &build_jewel_lines);
+            b
+        });
+        let build_title = step.map(|s| tr!("Build · {step}", step = guide::step_text(&s.label))).unwrap_or_else(|| tr!("Build (aucun)").into());
+        let jewels = tracked_jewels.iter().zip(jewel_places).map(|(j, s)| (j.clone(), s)).collect();
+        Sheets { worn, build, build_title, penalty, tree_known: worn_tree.is_some(), level, jewels }
+    }
+
     /// Onglet Caractéristiques : l'équipement porté face à ce que vise le build, pour le set
     /// d'armes et l'étape choisis, résistances avec la pénalité de la progression.
     fn stats_view(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        let catalog = self.augments.get();
-        let no_steps: Vec<guide::Step> = Vec::new();
-        let (steps, penalty, level) = match &self.coach {
-            Some(c) => {
-                let penalty = c
-                    .character()
-                    .map(|(_, ch)| stats::res_penalty(ch.max_act, ch.level))
-                    .unwrap_or((0.0, tr!("acte 1").into()));
-                (
-                    &c.steps,
-                    penalty,
-                    c.character().map(|(_, ch)| ch.level),
-                )
-            }
-            None => (&no_steps, (0.0, tr!("acte 1").into()), None),
-        };
-        let quests = self.quest_bonuses();
-        let shown = self.shown_step_index().filter(|i| *i < steps.len());
+        let sheets = self.character_sheets(self.gear.set.max(1));
+        let level = sheets.level;
         let gear = &mut self.gear;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.horizontal(|ui| {
@@ -3532,27 +3853,11 @@ impl App {
                 egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.6)),
             );
             ui.add_space(8.0);
-            let set = gear.set.max(1);
-            let worn = stats::sheet(gear, set);
-            let step = shown.map(|i| &steps[i]);
-            let build = step.map(|s| {
-                stats::build_sheet(
-                    s,
-                    set,
-                    |b| catalog.as_ref()?.defences.get(b).copied(),
-                    |b| catalog.as_ref()?.classes.get(b).map(|(c, _)| c.clone()),
-                    |b| {
-                        catalog
-                            .as_ref()
-                            .and_then(|c| c.implicits.get(b).cloned())
-                            .unwrap_or_default()
-                    },
-                )
-            });
-            let title = step
-                .map(|s| tr!("Build · {step}", step = guide::step_text(&s.label)))
-                .unwrap_or_else(|| tr!("Build (aucun)").into());
-            views::stats(ui, &worn, build.as_ref(), &title, &penalty, quests.resistances);
+            let jewel_titles: Vec<(String, Color32)> = sheets.jewels.iter().map(|(j, _)| (j.title(), ui::rarity_color(j.rarity))).collect();
+            if let Some(i) = views::stats(ui, &sheets.worn, sheets.build.as_ref(), &sheets.build_title, &sheets.penalty, sheets.tree_known, &jewel_titles) {
+                gear.remove_jewel(i);
+                let _ = gear.save();
+            }
         });
     }
 
@@ -3656,6 +3961,15 @@ impl App {
         let shown = self.shown_step_index().unwrap_or(0);
         let shown_label = self.coach.as_ref().and_then(|c| c.steps.get(shown).map(|s| s.label.clone()));
         let tree_jewels = self.tree_jewels(shown_label.as_deref().unwrap_or_default());
+        // Joyaux suivis et leur châsse (pastille et choix au clic droit dans l'arbre).
+        let worn_jewels: Vec<(String, Color32, Option<String>)> = self
+            .gear
+            .jewel_items()
+            .iter()
+            .zip(self.jewel_places(&tree_jewels))
+            .map(|(j, s)| (j.title(), ui::rarity_color(j.rarity), s))
+            .collect();
+        let mut socket_pick: Option<(String, Option<usize>)> = None;
         let Some(coach) = self.coach.as_ref() else {
             ui.put(rect, egui::Label::new(RichText::new(tr!("Chargement du guide…")).color(Color32::GRAY)));
             return;
@@ -3714,11 +4028,17 @@ impl App {
                 }
                 views::Tab::Passives => {
                     let r = ui.available_rect_before_wrap();
-                    tree.show(ui, r, step, prev, coach.catalog(), icons, key, (*weapon_set).max(1), &tree_jewels);
+                    // Arbre réel, s'il est connu depuis le début du personnage.
+                    let mine = coach.character().filter(|(_, c)| c.passives_known).map(|(_, c)| &c.passives);
+                    socket_pick = tree.show(ui, r, step, prev, coach.catalog(), icons, key, (*weapon_set).max(1), &tree_jewels, mine, &worn_jewels);
                 }
                 views::Tab::Equipment | views::Tab::Stats | views::Tab::Atlas | views::Tab::Guide => {}
             }
         });
+        if let Some((socket, shown)) = socket_pick {
+            self.gear.cycle_jewel(&socket, shown);
+            let _ = self.gear.save();
+        }
     }
 
     fn header_bar(&mut self, ui: &mut egui::Ui, whole: egui::Rect, area: egui::Rect, scale: f32) {
@@ -5873,7 +6193,7 @@ impl eframe::App for App {
                     self.feed.push_front(line);
                     changed = true;
                 }
-                changed |= matches!(ev, logwatch::Event::Area { .. } | logwatch::Event::Death { .. });
+                changed |= matches!(ev, logwatch::Event::Area { .. } | logwatch::Event::Death { .. } | logwatch::Event::Passive { .. });
             }
             // Entrée dans une nouvelle map : le bloc du bas passe sur les maps.
             if runs(c) > before {
@@ -5973,6 +6293,15 @@ impl eframe::App for App {
         self.welcome_window(ctx);
         self.changelog_window(ctx);
         self.settings_window(ctx);
+        self.export_window(ctx);
+        // Développement : l'export écrit dans un fichier une fois le journal lu
+        // (POE2_TRACKER_EXPORT_TO=chemin).
+        if let Some(path) = std::env::var_os("POE2_TRACKER_EXPORT_TO").filter(|_| self.coach.is_some()) {
+            if !std::path::Path::new(&path).exists() {
+                let text = self.export_character();
+                let _ = std::fs::write(&path, text);
+            }
+        }
         self.add_build_window(ctx);
         self.route_pick_window(ctx);
         // La grille garde ses proportions et prend toute la place possible ; le diagnostic

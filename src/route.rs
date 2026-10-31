@@ -56,11 +56,27 @@ pub fn load() -> Vec<Reward> {
 /// Ce que les récompenses obtenues sur la route ajoutent au personnage, quand elles sont sûres :
 /// résistances des boss (feu, froid, foudre) et emplacement de charme. Les récompenses au choix
 /// (tatouages, bénédiction de Qimah) ne disent pas ce qui a été pris : non comptées.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Bonuses {
     pub resistances: [f64; 3],
     pub charm_slots: usize,
+    /// Effets des récompenses obtenues, au format des lignes du jeu (« +30 to Spirit »), pour la
+    /// fiche de caractéristiques.
+    pub lines: Vec<String>,
 }
+
+/// Récompenses fixes et leur effet, au format des lignes du jeu.
+const FIXED: [(&str, &str); 9] = [
+    ("a1_res_beira", "+10% to Cold Resistance"),
+    ("a2_res_garukhan", "+10% to Lightning Resistance"),
+    ("a3_res_blackjaw", "+10% to Fire Resistance"),
+    ("a1_spirit_king_mists", "+30 to Spirit"),
+    ("a3_spirit_ignagduk", "+30 to Spirit"),
+    ("p3_spirit_lythara", "+40 to Spirit"),
+    ("a1_life_candlemass", "+20 to maximum Life"),
+    ("a4_mana_silent_hall", "5% increased maximum Mana"),
+    ("p2_life_molten_gift", "5% increased maximum Life"),
+];
 
 static RES_PICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+(\d+)% to (Fire|Cold|Lightning|all Elemental) Resistances?").unwrap());
 
@@ -87,6 +103,7 @@ pub fn bonuses(done: &BTreeSet<String>, picks: &BTreeMap<String, Vec<String>>) -
     if done.contains("a2_charm_relics") {
         b.charm_slots += 1;
     }
+    b.lines = FIXED.iter().filter(|(id, _)| done.contains(*id)).map(|(_, l)| l.to_string()).chain(picks.values().flatten().cloned()).collect();
     b
 }
 
@@ -192,16 +209,19 @@ mod tests {
     #[test]
     fn bonuses_from_done_rewards() {
         let done: BTreeSet<String> = ["a1_res_beira", "a2_charm_relics", "a4_tattoos_halls"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(bonuses(&done, &BTreeMap::new()), Bonuses { resistances: [0.0, 10.0, 0.0], charm_slots: 1 });
+        let b = bonuses(&done, &BTreeMap::new());
+        assert_eq!((b.resistances, b.charm_slots, b.lines), ([0.0, 10.0, 0.0], 1, vec!["+10% to Cold Resistance".to_string()]));
         let picks = BTreeMap::from([("a4_tattoos_halls".to_string(), vec!["+5% to Fire Resistance".to_string(), "+5 to Intelligence".to_string()])]);
-        assert_eq!(bonuses(&done, &picks).resistances, [5.0, 10.0, 0.0]);
+        let b = bonuses(&done, &picks);
+        assert_eq!(b.resistances, [5.0, 10.0, 0.0]);
+        assert_eq!(b.lines.len(), 3);
         let r = load();
         assert_eq!(match_pick(&r, Some("G4_4_2"), "+5% to Lightning Resistance").unwrap().id, "a4_tattoos_halls");
         assert_eq!(match_pick(&r, Some("G4_town"), "30% increased Global Armour, Evasion and Energy Shield").unwrap().id, "a4_shark_fin");
         assert!(match_pick(&r, Some("G4_town"), "2 Passive Skill Points").is_none());
         // Chaque id de la route utilisé ici existe bien dans les données.
         let ids: Vec<String> = load().into_iter().map(|r| r.id).collect();
-        for id in ["a3_res_blackjaw", "a1_res_beira", "a2_res_garukhan", "a2_charm_relics"] {
+        for id in ["a3_res_blackjaw", "a1_res_beira", "a2_res_garukhan", "a2_charm_relics"].into_iter().chain(FIXED.map(|(id, _)| id)) {
             assert!(ids.iter().any(|i| i == id), "{id}");
         }
     }

@@ -59,7 +59,17 @@ cliquer pendant ce temps.)
 - **Regex marchands** (barre du bas) : copie une recherche faite d'après les mods que vise le
   build ; collée dans la recherche d'un marchand en jeu, elle allume les objets utiles.
 - **Ctrl+Alt+C** sur une pièce portée : elle rejoint l'équipement suivi, disposé comme l'écran
-  de personnage du jeu (survol = fiche, clic droit = ne plus suivre).
+  de personnage du jeu (survol = fiche, clic droit = ne plus suivre). Sur un joyau serti
+  (survolé dans l'arbre en jeu) : il rejoint les joyaux suivis.
+- **Talents** : ton arbre réel, lu dans le journal du jeu (chaque talent pris ou retiré y est
+  écrit), face à celui du build : pris, à prendre (pointillé doré), pris hors build (rouge
+  foncé). Le journal ne dit ni l'attribut choisi sur un talent d'attribut ni la châsse d'un
+  joyau : clic droit dans l'arbre pour les préciser.
+- **Caractéristiques** : le personnage calculé comme en jeu (base du niveau et de la classe,
+  attributs, équipement, arbre réel, joyaux suivis dont les Time-Lost et leur rayon,
+  récompenses de quête, pourcentages augmentés, pénalité de résistances), face au build.
+- **Exporter le personnage** (⚙ Menu) : équipement, caractéristiques, talents, joyaux, Atlas,
+  maps et quêtes en Markdown, à coller dans une conversation avec une IA.
 - **Route de leveling** (en bas) : contenus facultatifs de la campagne à ne pas rater
   (points de passif, résistances, esprit…), d'après `data/route.json`. Le journal du jeu
   annonce chaque récompense permanente : elle est cochée toute seule. Le reste se coche à la

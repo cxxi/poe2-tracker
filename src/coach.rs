@@ -31,6 +31,13 @@ pub struct CharState {
     /// Ligue choisie pour ce personnage (le journal du jeu ne la donne pas).
     #[serde(default)]
     pub league: Option<String>,
+    /// Talents pris, d'après le journal. Un talent d'attribut y revient à chaque changement
+    /// d'attribut, sans retrait entre deux : on garde ce qui est pris, pas un compte.
+    #[serde(default)]
+    pub passives: BTreeSet<String>,
+    /// Le journal a suivi ce personnage depuis le niveau 2 : `passives` est son arbre complet.
+    #[serde(default)]
+    pub passives_known: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -55,6 +62,9 @@ struct State {
     /// sans rien recompter grâce au repère `seen` des maps).
     #[serde(default)]
     atlas_scan: bool,
+    /// Tout le log a été relu pour les talents des personnages.
+    #[serde(default)]
+    passives_scan: bool,
     /// Joueurs vus rejoindre ou quitter la zone : des coéquipiers, jamais nos personnages.
     #[serde(default)]
     party: BTreeSet<String>,
@@ -173,12 +183,13 @@ impl Coach {
     }
 
     pub fn maps_scan_done(&self) -> bool {
-        self.state.maps_scan && self.state.atlas_scan
+        self.state.maps_scan && self.state.atlas_scan && self.state.passives_scan
     }
 
     pub fn mark_maps_scan(&mut self) {
         self.state.maps_scan = true;
         self.state.atlas_scan = true;
+        self.state.passives_scan = true;
     }
 
     fn book_path(&self, name: &str) -> PathBuf {
@@ -317,6 +328,8 @@ impl Coach {
             done: BTreeSet::new(),
             picks: BTreeMap::new(),
             league: None,
+            passives: BTreeSet::new(),
+            passives_known: false,
         });
         if let Some(cl) = class {
             entry.class = cl.to_string();
@@ -471,6 +484,12 @@ impl Coach {
                 let c = self.state.characters.get_mut(character).unwrap();
                 let old = c.level;
                 c.level = *level;
+                // Niveau 2 : premier point de talent. Tout l'arbre est dans le journal à partir
+                // d'ici (un personnage recréé sous le même nom repart de zéro).
+                if *level == 2 {
+                    c.passives.clear();
+                    c.passives_known = true;
+                }
                 if *level <= old {
                     return out;
                 }
@@ -531,6 +550,19 @@ impl Coach {
                 out.push(line(FeedKind::Death, tr!("Mort dans {zone}{extra}", zone, extra), vec![]));
                 out
             }
+            Event::Passive { id, allocated } => {
+                if !self.attributing {
+                    return vec![];
+                }
+                let Some(name) = self.state.active.clone() else { return vec![] };
+                let c = self.state.characters.get_mut(&name).unwrap();
+                if *allocated {
+                    c.passives.insert(id.clone());
+                } else {
+                    c.passives.remove(id);
+                }
+                vec![]
+            }
             Event::Afk { .. } | Event::Atlas { .. } | Event::Device => vec![],
             Event::Whisper { from, text } => vec![line(FeedKind::Whisper, format!("{from} : {text}"), vec![])],
             Event::Party { character } => {
@@ -586,6 +618,23 @@ mod tests {
         c.handle(&level(14));
         let out = c.handle(&level(15));
         assert!(out[0].details.iter().any(|d| d.contains("Bonestorm")), "{out:?}");
+    }
+
+    #[test]
+    fn passives_follow_the_log() {
+        let mut c = coach();
+        let p = |id: &str, allocated| Event::Passive { id: id.into(), allocated };
+        c.handle(&level(5));
+        c.handle(&p("spells18", true));
+        assert!(!c.character().unwrap().1.passives_known);
+        // Niveau 2 (personnage recréé) : l'arbre repart de zéro et devient complet.
+        c.handle(&level(2));
+        for ev in [p("spells18", true), p("intelligence58", true), p("intelligence58", true), p("criticals17", true), p("criticals17", false)] {
+            c.handle(&ev);
+        }
+        let (_, ch) = c.character().unwrap();
+        assert!(ch.passives_known);
+        assert_eq!(ch.passives.iter().map(String::as_str).collect::<Vec<_>>(), ["intelligence58", "spells18"]);
     }
 
     #[test]
@@ -648,6 +697,9 @@ mod tests {
         }
         let names: Vec<String> = c.maps.keys().cloned().collect();
         for name in names {
+            if let Some(ch) = c.state.characters.get(&name) {
+                eprintln!("{name} : talents {} (arbre complet : {})", ch.passives.len(), ch.passives_known);
+            }
             let runs = &c.book(&name).runs;
             let deaths: u32 = runs.iter().map(|r| r.deaths).sum();
             eprintln!("{name} : {} maps, {deaths} morts", runs.len());

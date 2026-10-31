@@ -138,6 +138,9 @@ pub fn kind_of(item_class: &str) -> Option<Kind> {
 pub enum Equipped {
     Placed { slot: Slot, replaced: Option<String> },
     AlreadyThere(Slot),
+    /// Joyau ajouté à ceux sertis dans l'arbre : combien sont suivis.
+    Jewel(usize),
+    JewelAlreadyThere,
     CharmsFull,
     UnknownClass(String),
 }
@@ -146,6 +149,14 @@ pub enum Equipped {
 pub struct Gear {
     /// Emplacement -> texte brut de l'objet.
     pub slots: BTreeMap<Slot, String>,
+    /// Joyaux sertis dans l'arbre de talents (texte brut). La copie ne dit pas dans quelle
+    /// châsse : une liste, pas des emplacements.
+    #[serde(default)]
+    pub jewels: Vec<String>,
+    /// Châsse choisie à la main (identifiant du talent) -> joyau qui y est serti (texte brut),
+    /// vide pour une châsse déclarée sans joyau suivi.
+    #[serde(default)]
+    pub jewel_sockets: BTreeMap<String, String>,
     #[serde(skip)]
     path: PathBuf,
     /// Set d'armes affiché (1 ou 2) : Ctrl+Alt+C y range les armes, Ctrl+C les y compare.
@@ -215,7 +226,54 @@ impl Gear {
         self.slots.remove(&slot);
     }
 
+    pub fn jewel_items(&self) -> Vec<Item> {
+        self.jewels.iter().filter_map(|t| item::parse(t)).collect()
+    }
+
+    pub fn remove_jewel(&mut self, i: usize) {
+        if i < self.jewels.len() {
+            let raw = self.jewels.remove(i);
+            self.jewel_sockets.retain(|_, r| *r != raw);
+        }
+    }
+
+    /// Joyau suivant pour la châsse `socket` (clic droit dans l'arbre), après `shown` qui y est
+    /// affiché ; après le dernier, la châsse est déclarée sans joyau suivi.
+    pub fn cycle_jewel(&mut self, socket: &str, shown: Option<usize>) {
+        let next = shown.map_or(0, |i| i + 1);
+        let raw = self.jewels.get(next).cloned().unwrap_or_default();
+        // Un joyau n'est que dans une châsse.
+        self.jewel_sockets.retain(|s, r| s == socket || raw.is_empty() || *r != raw);
+        self.jewel_sockets.insert(socket.to_string(), raw);
+    }
+
+    /// Châsse de chaque joyau suivi : celle choisie à la main, sinon celle que conseille le
+    /// build pour ce joyau (`advised` : joyau, châsse), sinon une des châsses prises `free` encore
+    /// vide, dans l'ordre.
+    pub fn jewel_places(&self, advised: &[(usize, String)], free: &[String]) -> Vec<Option<String>> {
+        let mut places: Vec<Option<String>> = self.jewels.iter().map(|raw| self.jewel_sockets.iter().find(|(_, r)| *r == raw).map(|(s, _)| s.clone())).collect();
+        let used = |places: &Vec<Option<String>>, s: &str| self.jewel_sockets.contains_key(s) || places.iter().flatten().any(|p| p == s);
+        for (i, s) in advised {
+            if places.get(*i).is_some_and(|p| p.is_none()) && !used(&places, s) {
+                places[*i] = Some(s.clone());
+            }
+        }
+        for i in 0..places.len() {
+            if places[i].is_none() {
+                places[i] = free.iter().find(|s| !used(&places, s)).cloned();
+            }
+        }
+        places
+    }
+
     pub fn equip(&mut self, it: &Item) -> Equipped {
+        if it.item_class == "Jewels" {
+            if self.jewels.contains(&it.raw) {
+                return Equipped::JewelAlreadyThere;
+            }
+            self.jewels.push(it.raw.clone());
+            return Equipped::Jewel(self.jewels.len());
+        }
         let Some(kind) = kind_of(&it.item_class) else {
             return Equipped::UnknownClass(it.item_class.clone());
         };
@@ -256,20 +314,17 @@ impl Gear {
         Equipped::Placed { slot, replaced }
     }
 
-    /// Équipement suivi en Markdown, à coller dans une conversation avec une IA : le contexte
-    /// (une ligne par élément), puis chaque pièce telle que le jeu l'a copiée.
-    pub fn export(&self, title: &str, context: &[String]) -> String {
-        let mut out = format!("# {title}\n\n");
-        for line in context {
-            out.push_str(&format!("- {line}\n"));
-        }
+    /// Équipement suivi en Markdown (section de l'export du personnage) : les emplacements non
+    /// renseignés, puis chaque pièce telle que le jeu l'a copiée.
+    pub fn export(&self) -> String {
+        let mut out = String::new();
         let untracked: Vec<&str> = self.untracked().into_iter().map(export_label).collect();
         if !untracked.is_empty() {
             out.push_str(&format!("- {}\n", tr!("Emplacements non renseignés : {slots}", slots = untracked.join(", "))));
         }
         for slot in Slot::ALL.into_iter().chain(Slot::SET2) {
             if let Some(raw) = self.slots.get(&slot) {
-                out.push_str(&format!("\n## {}\n\n```\n{}\n```\n", export_label(slot), raw.trim()));
+                out.push_str(&format!("\n### {}\n\n```\n{}\n```\n", export_label(slot), raw.trim()));
             }
         }
         out
@@ -304,7 +359,7 @@ mod tests {
     }
 
     fn gear() -> Gear {
-        Gear { slots: BTreeMap::new(), path: PathBuf::new(), set: 1, quest_charm_slots: 0 }
+        Gear { slots: BTreeMap::new(), jewels: vec![], jewel_sockets: BTreeMap::new(), path: PathBuf::new(), set: 1, quest_charm_slots: 0 }
     }
 
     #[test]
@@ -313,6 +368,28 @@ mod tests {
         let gloves = item::parse(GLOOM_TOUCH).unwrap();
         assert_eq!(g.equip(&gloves), Equipped::Placed { slot: Slot::Gloves, replaced: None });
         assert_eq!(g.equip(&gloves), Equipped::AlreadyThere(Slot::Gloves));
+    }
+
+    #[test]
+    fn jewels_are_listed_not_slotted() {
+        let mut g = gear();
+        let jewel = item::parse("Item Class: Jewels\nRarity: Rare\nGrim Spark\nSapphire\n--------\nItem Level: 80\n--------\n+8% to Cold Resistance\n12% increased Critical Hit Chance for Spells\n").unwrap();
+        assert_eq!(g.equip(&jewel), Equipped::Jewel(1));
+        assert_eq!(g.equip(&jewel), Equipped::JewelAlreadyThere);
+        assert!(g.slots.is_empty());
+        assert_eq!(g.jewel_items()[0].base, "Sapphire");
+        // Places : conseillée par le build, sinon une châsse libre ; le choix à la main d'abord.
+        let other = item::parse("Item Class: Jewels\nRarity: Rare\nDusk Joy\nTime-Lost Sapphire\n--------\nRadius: Small\n--------\nItem Level: 43\n--------\nSmall Passive Skills in Radius also grant 1(1-2)% increased Cold Damage\n").unwrap();
+        assert_eq!(other.mods, ["Small Passive Skills in Radius also grant 1% increased Cold Damage"]);
+        g.equip(&other);
+        let free = ["s1".to_string(), "s2".to_string()];
+        assert_eq!(g.jewel_places(&[(1, "s2".into())], &free), [Some("s1".into()), Some("s2".into())]);
+        g.cycle_jewel("s1", Some(0));
+        assert_eq!(g.jewel_places(&[], &free), [Some("s2".into()), Some("s1".into())]);
+        g.cycle_jewel("s1", Some(1));
+        assert_eq!(g.jewel_places(&[], &free), [Some("s2".into()), None]);
+        g.remove_jewel(0);
+        assert_eq!(g.jewels.len(), 1);
     }
 
     #[test]
@@ -348,14 +425,13 @@ mod tests {
     }
 
     #[test]
-    fn export_lists_context_pieces_and_gaps() {
+    fn export_lists_pieces_and_gaps() {
         let mut g = gear();
         g.equip(&ring("Ring A", 30));
         g.equip(&ring("Ring B", 40));
-        let text = g.export("Équipement de Bob", &["Classe : Warrior".into()]);
-        assert!(text.starts_with("# Équipement de Bob\n\n- Classe : Warrior\n"));
-        assert!(text.contains("## Bague gauche\n\n```\nItem Class: Rings"));
-        assert!(text.contains("## Bague droite"));
+        let text = g.export();
+        assert!(text.contains("### Bague gauche\n\n```\nItem Class: Rings"));
+        assert!(text.contains("### Bague droite"));
         assert!(text.contains("Emplacements non renseignés : Arme, Main secondaire, Casque"));
         assert!(!item::is_item_text(&text)); // jamais pris pour une copie d'objet
     }
@@ -370,7 +446,7 @@ mod tests {
         assert!(g.slots.contains_key(&Slot::Offhand));
         assert!(g.two_handed() && !g.two_handed_in(1));
         assert!(!g.untracked().contains(&Slot::Offhand2));
-        assert!(g.export("x", &[]).contains("## Arme (set II)"));
+        assert!(g.export().contains("### Arme (set II)"));
     }
 
     #[test]

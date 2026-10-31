@@ -10,6 +10,30 @@ use crate::guide::{Catalog, Step};
 use crate::ui::{GOLD, GOLD_DIM};
 
 const GREEN: Color32 = Color32::from_rgb(110, 210, 110);
+/// Talent pris hors du build (onglet Talents).
+const OFF_BUILD: Color32 = Color32::from_rgb(170, 35, 30);
+
+/// État d'un talent quand l'arbre réel est connu, face au build.
+#[derive(Clone, Copy, PartialEq)]
+enum NodeState {
+    Taken,
+    ToTake,
+    OffBuild,
+    None,
+}
+
+/// Cercle en pointillé (talent à prendre).
+fn dashed_circle(painter: &egui::Painter, c: Pos2, r: f32, stroke: Stroke) {
+    let n = ((r * 0.9) as usize).clamp(8, 24) & !1;
+    let step = std::f32::consts::TAU / n as f32;
+    for k in (0..n).step_by(2) {
+        let pts: Vec<Pos2> = (0..=4).map(|t| {
+            let a = (k as f32 + t as f32 / 4.0) * step;
+            c + Vec2::new(a.cos(), a.sin()) * r
+        }).collect();
+        painter.add(egui::Shape::line(pts, stroke));
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -241,6 +265,9 @@ pub struct TreeJewel {
     pub base: String,
     pub color: Color32,
     pub lines: Vec<String>,
+    /// Joyau copié en jeu (Ctrl+Alt+C) qui y correspond, par sa place parmi les joyaux suivis :
+    /// même unique, ou même type pour un rare.
+    pub copied: Option<usize>,
 }
 
 /// Les trois attributs : nom, couleur, icône « + » du jeu.
@@ -329,6 +356,8 @@ pub struct TreeView {
     fitted_size: Vec2,
     /// Cadrage demandé sur le médaillon central (l'ascendance).
     focus_ascendancy: bool,
+    /// Dernier talent centré par un clic sur « à prendre » ou « hors build » (on passe au suivant).
+    cycle_focus: Option<(NodeState, usize)>,
     /// Attribut choisi à la main pour un nœud d'attribut (0 Force, 1 Dextérité, 2 Intelligence),
     /// mémorisé par build dans `overrides_file`.
     overrides: HashMap<String, usize>,
@@ -414,6 +443,11 @@ impl TreeView {
         self.overrides_file = Some(path);
     }
 
+    /// Attribut choisi à la main pour un talent d'attribut du build affiché.
+    pub fn attribute_choice(&self, id: &str) -> Option<usize> {
+        self.overrides.get(id).copied()
+    }
+
     fn save_overrides(&self) {
         if let Some(path) = &self.overrides_file {
             let _ = std::fs::write(path, serde_json::to_string_pretty(&self.overrides).unwrap_or_default());
@@ -444,11 +478,13 @@ impl TreeView {
         key: String,
         set: u8,
         jewels: &[TreeJewel],
-    ) {
+        mine: Option<&std::collections::BTreeSet<String>>,
+        worn_jewels: &[(String, Color32, Option<String>)],
+    ) -> Option<(String, Option<usize>)> {
         self.build(catalog);
         if self.nodes.is_empty() {
             ui.put(rect, egui::Label::new(RichText::new(tr!("Arbre en cours de chargement…")).color(Color32::GRAY)));
-            return;
+            return None;
         }
         // Passifs d'un set d'armes : ceux du set affiché comptent comme pris, ceux de l'autre
         // set restent éteints, juste entourés de leur couleur.
@@ -474,8 +510,41 @@ impl TreeView {
             .filter(|i| self.nodes[*i].kind == 4 && self.nodes[*i].links.iter().any(|(j, _)| taken.contains(j)))
             .collect();
         taken.extend(starts);
+        // Arbre réel (journal du jeu) : ses talents, départs compris, face à ceux du build.
+        let in_build: HashSet<usize> = step.passives.iter().filter_map(|id| self.index.get(id).copied()).chain(taken.iter().copied()).collect();
+        let real: Option<HashSet<usize>> = mine.map(|m| {
+            // Talent que le build met sur l'autre set : pris pour ce set-là (le journal ne le dit pas).
+            let mut r: HashSet<usize> = m
+                .iter()
+                .filter(|id| step.passive_sets.get(*id).is_none_or(|n| *n == set))
+                .filter_map(|id| self.index.get(id).copied())
+                .filter(|i| !hidden(&self.nodes[*i]))
+                .collect();
+            let starts: Vec<usize> = (0..self.nodes.len())
+                .filter(|i| matches!(self.nodes[*i].kind, 4 | 5) && !hidden(&self.nodes[*i]) && (self.nodes[*i].kind == 5 || self.nodes[*i].links.iter().any(|(j, _)| r.contains(j))))
+                .collect();
+            r.extend(starts);
+            r
+        });
+        let state = |i: usize| match &real {
+            None => NodeState::None,
+            Some(r) => match (r.contains(&i), taken.contains(&i), in_build.contains(&i)) {
+                (true, _, true) => NodeState::Taken,
+                (true, _, false) => NodeState::OffBuild,
+                (false, true, _) => NodeState::ToTake,
+                _ => NodeState::None,
+            },
+        };
+        let listed = |want: NodeState| -> Vec<usize> {
+            let mut v: Vec<usize> = (0..self.nodes.len()).filter(|i| self.nodes[*i].kind < 4 && state(*i) == want).collect();
+            v.sort_by(|a, b| self.nodes[*a].id.cmp(&self.nodes[*b].id));
+            v
+        };
+        let (to_take, off_build) = (listed(NodeState::ToTake), listed(NodeState::OffBuild));
         if self.fitted_for.as_ref() != Some(&key) || (self.fitted_size - rect.size()).length() > 1.0 {
-            self.fit(rect, &taken);
+            let mut all = taken.clone();
+            all.extend(real.iter().flatten().copied());
+            self.fit(rect, &all);
             self.fitted_for = Some(key);
             self.fitted_size = rect.size();
         }
@@ -504,7 +573,12 @@ impl TreeView {
         let main_attr = catalog.main_attribute(step);
         let overrides = &self.overrides;
         let attr_of = |n: &Node| overrides.get(&n.id).copied().unwrap_or(main_attr);
-        let is_fresh = |i: usize| prev.is_some() && taken.contains(&i) && !before.contains(&i) && self.nodes[i].kind < 4;
+        // Avec l'arbre réel, les trois états remplacent le vert des nouveautés de l'étape.
+        let is_fresh = |i: usize| real.is_none() && prev.is_some() && taken.contains(&i) && !before.contains(&i) && self.nodes[i].kind < 4;
+        let lit = |i: usize| match &real {
+            Some(r) => r.contains(&i),
+            None => taken.contains(&i),
+        };
 
         // Médaillon central du jeu : son anneau passe par les six départs de classe.
         let start_ring = self
@@ -547,9 +621,29 @@ impl TreeView {
                 if !rect.expand(radius.abs() * self.zoom).intersects(Rect::from_two_pos(a, b)) {
                     continue;
                 }
+                let points: Vec<Pos2> = link_path(n, &self.nodes[j], radius).into_iter().map(to_screen).collect();
+                if real.is_some() {
+                    // Chemin pris : doré plein, rouge foncé plein s'il mène hors du build ;
+                    // chemin du build restant : doré en pointillé.
+                    let (si, sj) = (state(i), state(j));
+                    let held = |s| matches!(s, NodeState::Taken | NodeState::OffBuild);
+                    if si == NodeState::OffBuild || sj == NodeState::OffBuild {
+                        if held(si) && held(sj) {
+                            painter.add(egui::Shape::line(points, Stroke::new(3.0_f32, OFF_BUILD)));
+                        } else {
+                            painter.add(egui::Shape::line(points, Stroke::new(1.5_f32, dim)));
+                        }
+                    } else if held(si) && held(sj) {
+                        painter.add(egui::Shape::line(points, Stroke::new(3.0_f32, GOLD)));
+                    } else if taken.contains(&i) && taken.contains(&j) {
+                        painter.extend(egui::Shape::dashed_line(&points, Stroke::new(2.0_f32, GOLD.gamma_multiply(0.8)), 6.0, 5.0));
+                    } else {
+                        painter.add(egui::Shape::line(points, Stroke::new(1.5_f32, dim)));
+                    }
+                    continue;
+                }
                 let both = taken.contains(&i) && taken.contains(&j);
                 let color = if both && (is_fresh(i) || is_fresh(j)) { GREEN } else if both { GOLD } else { dim };
-                let points: Vec<Pos2> = link_path(n, &self.nodes[j], radius).into_iter().map(to_screen).collect();
                 painter.add(egui::Shape::line(points, Stroke::new(if both { 3.0_f32 } else { 1.5 }, color)));
             }
         }
@@ -559,7 +653,7 @@ impl TreeView {
             let p = to_screen(n.pos);
             if n.kind == 4 {
                 // Départ de classe : ornement du médaillon ; croix dorée sur celui du build.
-                if taken.contains(&i) {
+                if lit(i) || taken.contains(&i) {
                     if let Some(tex) = icons.get(ACTIVE_START).cloned() {
                         // Même échelle que le médaillon ; croix dans son trèfle, arcs vers l'extérieur.
                         let p = to_screen(n.pos * MEDALLION_SCALE);
@@ -577,14 +671,21 @@ impl TreeView {
             if hidden(n) || !rect.expand(r).contains(p) {
                 continue;
             }
-            let on = taken.contains(&i);
-            let mut color = if is_fresh(i) { GREEN } else if on { GOLD } else { Color32::from_rgb(90, 86, 78) };
+            let on = lit(i);
+            let st = state(i);
+            let mut color = match st {
+                NodeState::OffBuild => OFF_BUILD,
+                NodeState::ToTake => GOLD,
+                _ if is_fresh(i) => GREEN,
+                _ if on => GOLD,
+                _ => Color32::from_rgb(90, 86, 78),
+            };
             // Nœud d'attribut pris : couleur et icône de l'attribut choisi.
             let mut icon = n.icon.as_str();
-            if n.attribute && on {
+            if n.attribute && (on || st == NodeState::ToTake) {
                 let (_, c, ic) = ATTRIBUTES[attr_of(n)];
                 icon = ic;
-                if !is_fresh(i) {
+                if !is_fresh(i) && st != NodeState::OffBuild {
                     color = c;
                 }
             }
@@ -599,12 +700,30 @@ impl TreeView {
                     let tint = if on { Color32::WHITE } else { Color32::from_gray(95) };
                     // Dans le cercle du nœud, sous son contour.
                     crate::ui::circle_image(&painter, tex.id(), p, r * 0.92, tint);
-                    painter.circle_stroke(p, r, Stroke::new(if on { 2.5_f32 } else { 1.5 }, color));
+                    if st == NodeState::ToTake {
+                        dashed_circle(&painter, p, r, Stroke::new(2.5_f32, color));
+                    } else {
+                        painter.circle_stroke(p, r, Stroke::new(if on { 2.5_f32 } else { 1.5 }, color));
+                    }
+                }
+                None if st == NodeState::ToTake => {
+                    // De loin, à prendre : un anneau, pas une pastille pleine.
+                    painter.circle_filled(p, r, Color32::BLACK);
+                    painter.circle_stroke(p, r * 0.8, Stroke::new((r * 0.4).clamp(1.0, 2.5), color));
                 }
                 None => {
                     // De loin, une châsse garnie prend la couleur de son joyau.
                     painter.circle_filled(p, r, jewel.filter(|_| on).map_or(color, |j| j.color));
                 }
+            }
+            // Joyau conseillé : copié en jeu (✓ vert) ou oublié (! rouge), en haut à droite.
+            if let Some(j) = jewel {
+                let b = (r * 0.45).clamp(5.0, 11.0);
+                let c = p + Vec2::new(r * 0.75, -r * 0.75);
+                let (fill, mark) = if j.copied.is_some() { (Color32::from_rgb(40, 140, 60), "✓") } else { (Color32::from_rgb(170, 35, 30), "!") };
+                painter.circle_filled(c, b, fill);
+                painter.circle_stroke(c, b, Stroke::new(1.0_f32, Color32::BLACK));
+                painter.text(c, egui::Align2::CENTER_CENTER, mark, egui::FontId::proportional(b * 1.5), Color32::WHITE);
             }
             if let Some(&n) = set_of.get(&i) {
                 let c = crate::ui::SET_COLORS[n as usize - 1];
@@ -619,29 +738,73 @@ impl TreeView {
             }
         }
         let mut cycle: Option<String> = None;
+        let mut socket_pick: Option<(String, Option<usize>)> = None;
         if let Some(i) = hovered {
             let n = &self.nodes[i];
+            let status = match state(i) {
+                NodeState::Taken => Some(tr!("Pris")),
+                NodeState::ToTake => Some(tr!("À prendre")),
+                NodeState::OffBuild => Some(tr!("Pris, hors build")),
+                NodeState::None => None,
+            };
+            // Châsse prise de ton arbre : le joyau suivi qu'elle contient, à changer au clic droit.
+            let here = worn_jewels.iter().position(|(_, _, s)| s.as_deref() == Some(n.id.as_str()));
+            let socket_note = (n.kind == 3 && real.as_ref().is_some_and(|r| r.contains(&i))).then(|| {
+                if resp.secondary_clicked() {
+                    socket_pick = Some((n.id.clone(), here));
+                }
+                match here {
+                    Some(k) => tr!("Ton joyau : {name} — clic droit pour changer", name = worn_jewels[k].0),
+                    None => tr!("Aucun joyau suivi ici — clic droit pour en choisir un").to_string(),
+                }
+            });
+            let status: Option<String> = match (status, socket_note) {
+                (Some(s), Some(n)) => Some(format!("{s} · {n}")),
+                (s, n) => s.map(str::to_string).or(n),
+            };
+            let status = status.as_deref();
+            let with_status = |note: Option<String>| match (status, note) {
+                (Some(s), Some(n)) => Some(format!("{s} · {n}")),
+                (s, n) => s.map(str::to_string).or(n),
+            };
             let r = (world_radius(n.kind) * self.zoom).clamp(1.5, 40.0);
             painter.circle_stroke(to_screen(n.pos), r + 4.0, Stroke::new(1.5_f32, Color32::WHITE));
-            if n.attribute && taken.contains(&i) {
+            if n.attribute && (taken.contains(&i) || lit(i)) {
                 if resp.secondary_clicked() {
                     cycle = Some(n.id.clone());
                 }
                 let (name, c, _) = ATTRIBUTES[attr_of(n)];
                 let chosen = overrides.contains_key(&n.id);
                 let why = if chosen { tr!("ton choix") } else { tr!("choix supposé d'après les gemmes du build") };
-                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &format!("+5 {}", crate::i18n::tr(name)), c, None, &[], Some(&tr!("{why} — clic droit pour changer", why))));
+                let note = with_status(Some(tr!("{why} — clic droit pour changer", why)));
+                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &format!("+5 {}", crate::i18n::tr(name)), c, None, &[], note.as_deref()));
             } else if let Some(j) = jewels.iter().find(|j| n.kind == 3 && j.node == n.skill) {
                 let tex = icons.get(&j.icon).cloned();
-                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, tex.as_ref(), &j.name, j.color, Some(&j.base).filter(|b| !b.is_empty()).map(|b| b.as_str()), &j.lines, None));
+                let note = with_status(Some(if j.copied.is_some() {
+                    tr!("Conseillé par le build · copié en jeu, compté dans Caractéristiques").to_string()
+                } else {
+                    tr!("Conseillé par le build · pas copié : Ctrl+Alt+C sur ton joyau serti en jeu pour le compter").to_string()
+                }));
+                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, tex.as_ref(), &j.name, j.color, Some(&j.base).filter(|b| !b.is_empty()).map(|b| b.as_str()), &j.lines, note.as_deref()));
             } else if let Some(p) = catalog.passives.get(&n.id) {
-                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &p.name, GOLD, None, &p.stats, None));
+                let note = with_status(None);
+                resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &p.name, GOLD, None, &p.stats, note.as_deref()));
             }
         }
         if let Some(id) = cycle {
             let next = (self.overrides.get(&id).copied().unwrap_or(main_attr) + 1) % 3;
             self.overrides.insert(id, next);
             self.save_overrides();
+        }
+        // Joyau suivi serti ici : la pastille de sa rareté, au centre de la châsse.
+        for (_, color, socket) in worn_jewels {
+            if let Some(&i) = socket.as_ref().and_then(|s| self.index.get(s)) {
+                let p = to_screen(self.nodes[i].pos);
+                let r = (world_radius(3) * self.zoom).clamp(1.5, 40.0);
+                if rect.contains(p) {
+                    painter.circle_stroke(p, r * 0.55, Stroke::new((r * 0.25).clamp(1.0, 3.0), *color));
+                }
+            }
         }
         // Légende sur fond, pour rester lisible au-dessus des nœuds.
         let nodes = if per_set == [0, 0] {
@@ -653,12 +816,50 @@ impl TreeView {
         let legend = tr!(
             "{nodes}{fresh} · glisser : déplacer · molette : zoom · double-clic : recadrer",
             nodes,
-            fresh = if prev.is_some() { tr!(", dont {n} nouveaux en vert", n = fresh_count) } else { String::new() }
+            fresh = if prev.is_some() && real.is_none() { tr!(", dont {n} nouveaux en vert", n = fresh_count) } else { String::new() }
         );
         let galley = painter.layout_no_wrap(legend, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);
         let pos = rect.left_top() + Vec2::new(8.0, 8.0);
         painter.rect_filled(Rect::from_min_size(pos, galley.size()).expand(5.0), 3.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
+        let below = pos.y + galley.size().y + 12.0;
         painter.galley(pos, galley, Color32::LIGHT_GRAY);
+        // Arbre réel : où on en est face au build. Un clic sur « à prendre » ou « hors build »
+        // centre la vue sur un de ces talents, puis sur le suivant.
+        let held = in_build.iter().filter(|i| self.nodes[**i].kind < 4 && state(**i) == NodeState::Taken).count();
+        let wanted = taken.iter().filter(|i| self.nodes[**i].kind < 4).count();
+        let mut x = pos.x;
+        let mut chip = |text: String, color: Color32, list: Option<(NodeState, &Vec<usize>)>| {
+            let g = painter.layout_no_wrap(text, egui::FontId::proportional(13.0), color);
+            let r = Rect::from_min_size(Pos2::new(x, below), g.size()).expand(5.0);
+            let clickable = list.is_some_and(|(_, l)| !l.is_empty());
+            let resp = ui.interact(r, ui.id().with(("tree_chip", x as i32)), if clickable { Sense::click() } else { Sense::hover() });
+            let fill = if clickable && resp.hovered() { 60 } else { 0 };
+            painter.rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(fill, fill, fill, 210));
+            painter.galley(r.min + Vec2::splat(5.0), g, color);
+            x = r.max.x + 6.0;
+            if let (true, Some((kind, l))) = (resp.clicked(), list) {
+                let next = match self.cycle_focus {
+                    Some((k, at)) if k == kind => (at + 1) % l.len(),
+                    _ => 0,
+                };
+                self.cycle_focus = Some((kind, next));
+                self.center = self.nodes[l[next]].pos;
+                self.pan = Vec2::ZERO;
+                self.zoom = self.zoom.max(0.12);
+            }
+            if clickable {
+                resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            }
+        };
+        match &real {
+            Some(_) => {
+                chip(tr!("Ton arbre : {held} / {wanted} du build", held, wanted), GOLD, None);
+                chip(tr!("{n} à prendre", n = to_take.len()), GOLD, Some((NodeState::ToTake, &to_take)));
+                chip(tr!("{n} hors build", n = off_build.len()), OFF_BUILD, Some((NodeState::OffBuild, &off_build)));
+            }
+            None => chip(tr!("Ton arbre réel n'est pas connu (journal du jeu incomplet) : arbre du build").into(), Color32::GRAY, None),
+        }
+        socket_pick
     }
 }
 
@@ -686,8 +887,10 @@ pub fn stats(
     build: Option<&crate::stats::Sheet>,
     build_title: &str,
     penalty: &(f64, String),
-    quests: [f64; 3],
-) {
+    tree_known: bool,
+    jewels: &[(String, Color32)],
+) -> Option<usize> {
+    let mut remove_jewel = None;
     use crate::stats::{Group, Line, RES_CAP, Total};
     let fmt = |v: f64| {
         if (v - v.round()).abs() < 0.05 {
@@ -723,6 +926,14 @@ pub fn stats(
     let breakdown = |ui: &mut egui::Ui, t: &Total, suffix: &str| {
         for (slot, v) in &t.from {
             ui.label(format!("{slot} : {}{suffix}", fmt(*v)));
+        }
+        // Pourcentages augmentés : leurs sources, puis le calcul.
+        if !t.inc_from.is_empty() {
+            ui.separator();
+            for (slot, v) in &t.inc_from {
+                ui.label(tr!("{slot} : {n} % augmenté", slot, n = fmt(*v)));
+            }
+            ui.label(RichText::new(tr!("{flat} × {k} = {total}", flat = fmt(t.flat), k = format!("{:.2}", 1.0 + t.inc / 100.0), total = fmt(t.value))).color(Color32::GRAY));
         }
     };
     // Largeurs : la moitié pour les noms, un quart pour chaque colonne de valeurs.
@@ -762,8 +973,8 @@ pub fn stats(
                 };
             });
         };
-    // Résistance effective, suivie en gris de la valeur de l'équipement quand elle diffère.
-    let res_cell = |ui: &mut egui::Ui, eff: f64, raw: f64, color: Color32| {
+    // Comme en jeu : la résistance effective, puis en gris le total avant plafond.
+    let res_cell = |ui: &mut egui::Ui, eff: f64, total: f64, color: Color32| {
         ui.allocate_ui_with_layout(
             egui::vec2(col_w, 22.0),
             egui::Layout::left_to_right(egui::Align::Center),
@@ -777,13 +988,11 @@ pub fn stats(
                         .size(15.0)
                         .strong(),
                 );
-                if (raw - eff).abs() >= 0.05 {
-                    ui.label(
-                        RichText::new(format!("({})", crate::i18n::percent(fmt(raw))))
-                            .color(Color32::from_gray(120))
-                            .size(14.0),
-                    );
-                }
+                ui.label(
+                    RichText::new(format!("({})", crate::i18n::percent(fmt(total))))
+                        .color(Color32::from_gray(120))
+                        .size(14.0),
+                );
             },
         )
         .response
@@ -791,23 +1000,28 @@ pub fn stats(
     // Résistance effective : équipement + pénalité (élémentaires), plafonnée.
     let res_row = |ui: &mut egui::Ui, name: &str, idx: usize| {
         let pen = if idx < 3 { penalty.0 } else { 0.0 };
-        // Résistances données par la campagne (récompenses cochées sur la route).
-        let quest = quests.get(idx).copied().unwrap_or(0.0);
-        let eff = |t: &Total| (t.value + pen + quest).min(RES_CAP);
+        let total = |t: &Total| t.value + pen;
+        let eff = |t: &Total| total(t).min(RES_CAP);
         let hover = |ui: &mut egui::Ui, t: &Total| {
             breakdown(ui, t, " %");
             ui.separator();
-            ui.label(tr!("Équipement : {n} %", n = fmt(t.value)));
-            if quest > 0.0 {
-                ui.label(tr!("Récompenses de quête : +{n} %", n = fmt(quest)));
-            }
             if idx < 3 {
                 ui.label(tr!("Pénalité ({when}) : {n} %", when = penalty.1, n = fmt(pen)));
             }
             ui.label(tr!("Plafond : {n} %", n = fmt(RES_CAP)));
-            let over = t.value + pen + quest - RES_CAP;
+            let over = t.value + pen - RES_CAP;
             if over > 0.0 {
                 ui.label(tr!("{n} % au-dessus du plafond", n = fmt(over)));
+            }
+            let missing = if !tree_known {
+                Some(tr!("Ton arbre de talents n'est pas compté (journal du jeu incomplet)"))
+            } else if jewels.is_empty() {
+                Some(tr!("Joyaux : aucun suivi (Ctrl+Alt+C sur un joyau serti)"))
+            } else {
+                None
+            };
+            if let Some(m) = missing {
+                ui.label(RichText::new(m).color(Color32::from_gray(140)).italics());
             }
         };
         row(ui, name, &mut |ui| {
@@ -824,9 +1038,9 @@ pub fn stats(
                 }
                 _ => neutral,
             };
-            res_cell(ui, eff(w), w.value, color).on_hover_ui(|ui| hover(ui, w));
+            res_cell(ui, eff(w), total(w), color).on_hover_ui(|ui| hover(ui, w));
             match t {
-                Some(t) => res_cell(ui, eff(t), t.value, neutral).on_hover_ui(|ui| hover(ui, t)),
+                Some(t) => res_cell(ui, eff(t), total(t), neutral).on_hover_ui(|ui| hover(ui, t)),
                 None => cell(ui, "—".into(), dim),
             };
         });
@@ -890,6 +1104,19 @@ pub fn stats(
             res_row(ui, tr!("Froid"), 1);
             res_row(ui, tr!("Foudre"), 2);
             res_row(ui, tr!("Chaos"), 3);
+            // Joyaux de l'arbre : ceux copiés en jeu, à retirer d'un clic.
+            section(ui, tr!("JOYAUX SERTIS"));
+            if jewels.is_empty() {
+                ui.label(RichText::new(tr!("Ctrl+Alt+C sur un joyau serti (survole-le dans l'arbre de talents en jeu) pour compter ses mods.")).color(Color32::GRAY).size(14.0));
+            }
+            for (i, (title, color)) in jewels.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).color(*color).size(15.0));
+                    if ui.small_button("×").on_hover_text(tr!("Ne plus suivre ce joyau")).clicked() {
+                        remove_jewel = Some(i);
+                    }
+                });
+            }
 
             // Autres mods : le texte du mod en nom, ses nombres dans chaque colonne.
             let empty: Vec<Line> = Vec::new();
@@ -951,4 +1178,5 @@ pub fn stats(
                 }
             }
         });
+    remove_jewel
 }

@@ -30,6 +30,20 @@ Un petit serveur à nous, que l'app appelle pour ce qu'elle ne peut pas faire se
 - groupes : comment les apps d'un même groupe se reconnaissent (noms des coéquipiers vus dans
   le journal, code de groupe à partager…).
 
+## Chantier : compte Path of Exile (OAuth)
+
+Relier son compte à l'app (API officielle de GGG) pour lire le personnage tel qu'il est, sans
+copie à la main :
+
+- **Gemmes et supports** : le journal du jeu n'en dit rien, et Ctrl+C sur une gemme active donne
+  son niveau, sa qualité et son nombre de châsses, mais pas les supports sertis (ils ne se copient
+  pas). Avec l'API : chaque gemme, ses supports, face à ce que prévoit le build.
+- **Joyaux et leur châsse**, **attributs des talents d'attribut**, **équipement** : aujourd'hui
+  copiés à la main (Ctrl+Alt+C, clic droit dans l'arbre).
+
+À trancher : l'enregistrement de l'app auprès de GGG (client OAuth), et où garder le jeton (sans
+serveur : sur la machine ; avec le serveur centralisé : à voir).
+
 ## Idées
 
 - **Alt + clic sous Linux** : certains bureaux (Deepin, KDE…) réservent Alt + clic au
