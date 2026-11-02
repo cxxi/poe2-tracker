@@ -1179,6 +1179,23 @@ pub fn fade_scroll<R>(ui: &egui::Ui, out: &egui::scroll_area::ScrollAreaOutput<R
     fade_scroll_on(ui, out, bottom, ui.visuals().panel_fill);
 }
 
+/// Dégradé vers la couleur `bg` sur les `width` pixels qui finissent à `x` : un contenu coupé à
+/// droite s'y efface.
+pub fn fade_right_edge(ui: &egui::Ui, x: f32, y: egui::Rangef, width: f32, bg: Color32) {
+    if width <= 0.0 {
+        return;
+    }
+    let clear = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 0);
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(Pos2::new(x - width, y.min), clear);
+    mesh.colored_vertex(Pos2::new(x, y.min), bg);
+    mesh.colored_vertex(Pos2::new(x, y.max), bg);
+    mesh.colored_vertex(Pos2::new(x - width, y.max), clear);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(mesh);
+}
+
 /// Pareil, sur un fond de couleur `bg` (carte).
 pub fn fade_scroll_on<R>(ui: &egui::Ui, out: &egui::scroll_area::ScrollAreaOutput<R>, bottom: bool, bg: Color32) {
     let rest = out.content_size.y - out.state.offset.y - out.inner_rect.height();
@@ -1424,7 +1441,7 @@ pub fn tab_strip<T: Copy + PartialEq>(
 
 /// Titre de section : petites capitales dorées, compteur, actions discrètes à droite, filet dessous.
 /// Hauteur d'une ligne de titre de section : celle d'un bouton ou d'une liste de taille normale.
-fn header_height(ui: &egui::Ui) -> f32 {
+pub fn header_height(ui: &egui::Ui) -> f32 {
     (ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y).max(ui.spacing().interact_size.y)
 }
 
@@ -1454,6 +1471,11 @@ pub fn plain_widgets(ui: &mut egui::Ui) {
 /// Titre de section suivi d'un sous-titre (résumé) sur la même ligne : son trait reste aligné
 /// avec celui des sections voisines.
 pub fn section_header_sub(ui: &mut egui::Ui, title: &str, subtitle: &str) {
+    section_header_sub_until(ui, title, subtitle, f32::INFINITY);
+}
+
+/// Pareil, le trait sous le titre s'arrêtant à `line_end` (place laissée à un bouton au bout).
+pub fn section_header_sub_until(ui: &mut egui::Ui, title: &str, subtitle: &str, line_end: f32) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.set_min_height(header_height(ui));
@@ -1462,7 +1484,7 @@ pub fn section_header_sub(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     });
     ui.add_space(2.0);
     let rect = ui.available_rect_before_wrap();
-    ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.6)));
+    ui.painter().hline(rect.left()..=rect.right().min(line_end), rect.top(), Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.6)));
     ui.add_space(8.0);
 }
 

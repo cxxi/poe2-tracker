@@ -1,5 +1,11 @@
 # Nouveautés
 
+## 0.6.3
+
+- Détail de l'estimation en plein écran (bouton au bout du titre des annonces lues, ou à droite de la pièce quand tout tient sur une colonne ; Échap pour sortir) : les annonces s'affichent sur autant de colonnes que la largeur en tient.
+- La limite entre le calcul et les annonces lues se glisse : la colonne des annonces s'élargit par-dessus le calcul, qui garde sa largeur et s'efface dessous. Double-clic sur la limite : largeur de départ.
+- Annonces lues : une note trop longue passe à la ligne au lieu d'élargir sa carte.
+
 ## 0.6.2
 
 - Talents : un joyau conseillé par le build reste grisé tant que rien n'est serti dans sa châsse. Au survol d'une châsse prise, le joyau qui y est et l'ordre du clic droit pour alterner.

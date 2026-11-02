@@ -55,7 +55,8 @@ cliquer pendant ce temps.)
     lâchés, leur place restant exigée. Le prix suit la tendance des annonces lues, chacune
     pesant d'autant plus que sa note est proche de celle de l'objet et qu'elle est récente ;
     la confiance dépend du nombre d'annonces proches et de l'éparpillement des prix. Les
-    estimations sont gardées 24 h.
+    estimations sont gardées 24 h. Le détail de l'estimation s'ouvre en plein écran, et la
+    colonne des annonces lues s'élargit en glissant sa limite par-dessus le calcul.
 - **Regex marchands** (barre du bas) : copie une recherche faite d'après les mods que vise le
   build ; collée dans la recherche d'un marchand en jeu, elle allume les objets utiles.
 - **Ctrl+Alt+C** sur une pièce portée : elle rejoint l'équipement suivi, disposé comme l'écran

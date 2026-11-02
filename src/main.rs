@@ -242,6 +242,11 @@ struct App {
     tab: views::Tab,
     /// Talents ou Atlas sur toute la fenêtre, sans les panneaux autour.
     full_view: bool,
+    /// Détail de l'estimation sur toute la fenêtre, pour voir le plus d'annonces lues à la fois.
+    full_estimate: bool,
+    /// De combien la colonne des annonces lues est étirée par-dessus celle du calcul (glissé à la
+    /// main sur la limite entre les deux).
+    estimate_stretch: f32,
     /// Onglet du panneau de droite.
     side_tab: views::SideTab,
     /// Bloc en bas à gauche : maps (vrai) ou route de leveling. `None` : les maps dès que le
@@ -665,6 +670,8 @@ impl App {
             },
             // Développement : `POE2_TRACKER_FULL=1` ouvre la vue en plein écran.
             full_view: std::env::var_os("POE2_TRACKER_FULL").is_some(),
+            full_estimate: false,
+            estimate_stretch: 0.0,
             tree: views::TreeView::default(),
             passive_icons: passive_icons::PassiveIcons::new(&cc.egui_ctx, dirs.cache_dir().to_path_buf(), config.game_dir.clone()),
             welcome: Welcome {
@@ -2961,6 +2968,7 @@ impl App {
     fn on_copy(&mut self, ev: CopyEvent) {
         // Une copie en jeu affiche son résultat dans les panneaux : on quitte le plein écran.
         self.full_view = false;
+        self.full_estimate = false;
         // Waystone : noté pour la prochaine map (onglet Maps), pas diagnostiqué.
         if let Some(w) = mapping::Waystone::parse(&ev.text) {
             let title = tr!("Pierre de téléportation T{tier} « {name} »", tier = w.tier, name = w.name);
@@ -3139,6 +3147,7 @@ impl App {
             egui::Frame::new().fill(ui::CARD_FILL).stroke(egui::Stroke::new(1.0_f32, c(if l.kept { ui::GOLD_DIM } else { Color32::from_gray(60) }))).corner_radius(4).inner_margin(8).show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.set_width(card_w);
+                    ui.set_max_width(card_w);
                     // En-tête comme celui de l'objet : image, nom, base, niveau et défenses ; à droite
                     // le prix et l'âge de l'annonce. Au survol, le détail.
                     let head = ui
@@ -3235,7 +3244,7 @@ impl App {
                         // La note en blanc, sa part dans le prix en gris.
                         let text = if l.kept { tr!("note {score}", score = note(l.score)) } else { tr!("éloignée : note {score} ({ratio}×)", score = note(l.score), ratio = note(l.score / score)) };
                         rule(ui);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             ui.label(RichText::new(text).color(c(Color32::from_gray(225))).size(13.0));
                             if let Some(sh) = share {
@@ -6102,18 +6111,102 @@ impl App {
     }
 
     /// Titre de la colonne des annonces lues (fixe au-dessus de leur défilement).
-    fn listings_title(&self, ui: &mut egui::Ui, it: &Item) {
+    /// Détail de l'estimation en deux colonnes, chacune avec sa barre de défilement : à gauche le
+    /// calcul et la recherche, à droite les annonces lues (dans le panneau ou en plein écran).
+    fn estimate_columns<R>(&mut self, ui: &mut egui::Ui, it: &Item) -> egui::scroll_area::ScrollAreaOutput<Option<R>> {
+        let margin = egui::Margin { left: 0, right: 8, top: 0, bottom: 0 };
+        let area = ui.available_rect_before_wrap();
+        // La colonne de gauche prend juste la largeur de son contenu sans retour à
+        // la ligne (mesurée à chaque image, en passe invisible) ; celle des annonces
+        // prend le reste, au moins 330 px.
+        let natural = {
+            let mut probe = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(area.min, Vec2::new(4000.0, area.height())))
+                    .sizing_pass()
+                    .invisible(),
+            );
+            // Texte jamais coupé : la largeur mesurée est celle de la plus longue ligne.
+            probe.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            egui::Frame::new().inner_margin(margin).show(&mut probe, |ui| self.estimation_detail(ui, it, false, false));
+            probe.min_rect().width() + 16.0
+        };
+        let left_w = natural.min(area.width() - 330.0 - 12.0).max(260.0);
+        let left = egui::Rect::from_min_max(area.min, egui::pos2(area.min.x + left_w, area.max.y));
+        // La limite entre les colonnes se glisse : la colonne des annonces s'élargit vers la gauche
+        // par-dessus le calcul, qui garde sa largeur (coupé là où elle passe, avec un fondu), et
+        // revient au plus à sa largeur de départ. Double-clic : largeur de départ.
+        let handle = egui::Rect::from_min_max(egui::pos2(left.max.x - self.estimate_stretch, area.min.y), egui::pos2(left.max.x + 12.0 - self.estimate_stretch, area.max.y));
+        let drag = ui.interact(handle, ui.id().with("estimate_split"), egui::Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if drag.double_clicked() {
+            self.estimate_stretch = 0.0;
+        } else if drag.dragged() {
+            self.estimate_stretch -= drag.drag_delta().x;
+        }
+        self.estimate_stretch = self.estimate_stretch.clamp(0.0, left_w);
+        let stretch = self.estimate_stretch;
+        let right = egui::Rect::from_min_max(egui::pos2(left.max.x + 12.0 - stretch, area.min.y), area.max);
+        let out = ui
+            .allocate_new_ui(egui::UiBuilder::new().max_rect(left), |ui| {
+                // Coupé sous la colonne des annonces : rien n'y est dessiné ni ne réagit à la souris.
+                ui.set_clip_rect(ui.clip_rect().intersect(egui::Rect::from_min_max(egui::Rect::EVERYTHING.min, egui::pos2(right.min.x - 12.0, f32::INFINITY))));
+                egui::ScrollArea::vertical().id_salt("estimate_left").auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Frame::new().inner_margin(margin).show(ui, |ui| self.estimation_detail(ui, it, false, false));
+                    None
+                })
+            })
+            .inner;
+        let listings = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right), |ui| {
+            // Le titre reste en place, les annonces défilent dessous.
+            egui::Frame::new().inner_margin(margin).show(ui, |ui| self.listings_title(ui, it, true));
+            egui::ScrollArea::vertical().id_salt("estimate_right").auto_shrink([false, false]).show(ui, |ui| {
+                egui::Frame::new().inner_margin(margin).show(ui, |ui| self.estimation_detail(ui, it, true, false));
+            })
+        });
+        ui::fade_scroll(ui, &listings.inner, true);
+        if stretch > 0.0 {
+            ui::fade_right_edge(ui, right.min.x - 12.0, area.y_range(), 32.0_f32.min(left_w - stretch), ui.visuals().panel_fill);
+        }
+        if drag.hovered() || drag.dragged() {
+            let x = handle.center().x;
+            ui.painter().vline(x, area.y_range(), egui::Stroke::new(1.0_f32, ui::GOLD_DIM));
+        }
+        out
+    }
+
+    /// Titre des annonces lues ; avec `button`, le bouton du plein écran au bout, le trait sous le
+    /// titre s'arrêtant avant lui.
+    fn listings_title(&mut self, ui: &mut egui::Ui, it: &Item, button: bool) {
         let detail = match self.trade.get(it).filter(|_| trade::priceable(it)) {
             Some(trade::Estimate::Done { listings, total, .. }) => tr!("{read} sur {total} en vente", read = listings.len(), total),
             _ => String::new(),
         };
         // Même titre que les cartes (« ACTIVITÉ ») : sous-titre gris, trait dessous.
-        ui::section_header_sub(ui, tr!("ANNONCES LUES"), &detail);
+        if !button {
+            ui::section_header_sub(ui, tr!("ANNONCES LUES"), &detail);
+            return;
+        }
+        let size = 30.0;
+        let top = ui.cursor().min.y;
+        let right = ui.max_rect().right();
+        ui::section_header_sub_until(ui, tr!("ANNONCES LUES"), &detail, right - size - 8.0);
+        let center = top + 4.0 + ui::header_height(ui) / 2.0;
+        self.full_estimate_button(ui, egui::Rect::from_center_size(egui::pos2(right - size / 2.0, center), Vec2::splat(size)));
+    }
+
+    /// Plein écran du détail de l'estimation : entrée et sortie.
+    fn full_estimate_button(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let (icon, tip) = if self.full_estimate { (ui::ViewIcon::Exit, tr!("Quitter le plein écran (Échap)")) } else { (ui::ViewIcon::Enter, tr!("Plein écran")) };
+        if ui::view_button(ui, rect, icon).on_hover_text(tip).clicked() {
+            self.full_estimate = !self.full_estimate;
+        }
     }
 
     /// `listings_only` : la colonne de droite, les annonces lues seules (sans leur titre) ; sinon
     /// tout le reste.
-    fn estimation_detail(&mut self, ui: &mut egui::Ui, it: &Item, listings_only: bool) {
+    /// `button` : le bouton du plein écran à droite de l'en-tête de la pièce (détail sur une seule
+    /// colonne ; sur deux, il est au bout du titre des annonces).
+    fn estimation_detail(&mut self, ui: &mut egui::Ui, it: &Item, listings_only: bool, button: bool) {
         let Some(e) = self.trade.get(it).filter(|_| trade::priceable(it)) else {
             if listings_only {
                 ui.label(RichText::new(tr!("Aucune : le prix vient des cours de poe.ninja.")).color(Color32::GRAY));
@@ -6136,12 +6229,16 @@ impl App {
             ui.label(RichText::new(t).color(Color32::GRAY));
         };
         ui.add_space(4.0);
+        let top = ui.cursor().min.y;
         // La pièce entière, comme au diagnostic (lignes d'arme et DPS, implicites, mods).
         let view = self.target_slot(it).map(|s| {
             let card = self.build_card(Some(it), s);
             self.worn_view(s, it, card.as_ref())
         });
         self.item_preview(ui, it, None, view.as_ref());
+        if button {
+            self.full_estimate_button(ui, egui::Rect::from_min_size(egui::pos2(ui.max_rect().right() - 30.0, top), Vec2::splat(30.0)));
+        }
         // Le prix : les mêmes lignes qu'au diagnostic.
         self.price_title(ui, it, false);
         self.value_rows(ui, it, &Some(e.clone()));
@@ -6251,6 +6348,28 @@ impl eframe::App for App {
                         self.build_view(ui, rect);
                     }
                     self.full_view_button(ui, rect);
+                });
+            return;
+        }
+
+        // Détail de l'estimation en plein écran : tant qu'il est ouvert, le calcul et les annonces
+        // lues seuls.
+        let estimated = self.diagnosed.clone().filter(|d| self.estimate_open.as_deref() == Some(d.raw.as_str()));
+        if self.full_estimate && (estimated.is_none() || ctx.input(|i| i.key_pressed(egui::Key::Escape))) {
+            self.full_estimate = false;
+        }
+        if let Some(it) = estimated.filter(|_| self.full_estimate) {
+            self.sync_league(ctx);
+            self.settings_window(ctx);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(Color32::from_rgb(12, 11, 10)).inner_margin(12))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(tr!("ESTIMATION")).color(ui::GOLD).size(13.0).strong());
+                        ui.label(RichText::new(gametext::name(&it.name)).color(ui::GOLD_DIM).size(13.0));
+                    });
+                    ui.add_space(6.0);
+                    let _ = self.estimate_columns::<()>(ui, &it);
                 });
             return;
         }
@@ -6422,51 +6541,14 @@ impl eframe::App for App {
                         // Trop étroit pour deux colonnes : une seule, le calcul au-dessus des annonces.
                         (Some(it), true) if ui.available_width() < 640.0 => egui::ScrollArea::vertical().id_salt("estimate_left").auto_shrink([false, false]).show(ui, |ui| {
                             egui::Frame::new().inner_margin(margin).show(ui, |ui| {
-                                self.estimation_detail(ui, it, false);
+                                self.estimation_detail(ui, it, false, true);
                                 ui.add_space(10.0);
-                                self.listings_title(ui, it);
-                                self.estimation_detail(ui, it, true);
+                                self.listings_title(ui, it, false);
+                                self.estimation_detail(ui, it, true, false);
                             });
                             None
                         }),
-                        (Some(it), true) => {
-                            let area = ui.available_rect_before_wrap();
-                            // La colonne de gauche prend juste la largeur de son contenu sans retour à
-                            // la ligne (mesurée à chaque image, en passe invisible) ; celle des annonces
-                            // prend le reste, au moins 330 px.
-                            let natural = {
-                                let mut probe = ui.new_child(
-                                    egui::UiBuilder::new()
-                                        .max_rect(egui::Rect::from_min_size(area.min, Vec2::new(4000.0, area.height())))
-                                        .sizing_pass()
-                                        .invisible(),
-                                );
-                                // Texte jamais coupé : la largeur mesurée est celle de la plus longue ligne.
-                                probe.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                                egui::Frame::new().inner_margin(margin).show(&mut probe, |ui| self.estimation_detail(ui, it, false));
-                                probe.min_rect().width() + 16.0
-                            };
-                            let left_w = natural.min(area.width() - 330.0 - 12.0).max(260.0);
-                            let left = egui::Rect::from_min_max(area.min, egui::pos2(area.min.x + left_w, area.max.y));
-                            let right = egui::Rect::from_min_max(egui::pos2(left.max.x + 12.0, area.min.y), area.max);
-                            let out = ui
-                                .allocate_new_ui(egui::UiBuilder::new().max_rect(left), |ui| {
-                                    egui::ScrollArea::vertical().id_salt("estimate_left").auto_shrink([false, false]).show(ui, |ui| {
-                                        egui::Frame::new().inner_margin(margin).show(ui, |ui| self.estimation_detail(ui, it, false));
-                                        None
-                                    })
-                                })
-                                .inner;
-                            let listings = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right), |ui| {
-                                // Le titre reste en place, les annonces défilent dessous.
-                                egui::Frame::new().inner_margin(margin).show(ui, |ui| self.listings_title(ui, it));
-                                egui::ScrollArea::vertical().id_salt("estimate_right").auto_shrink([false, false]).show(ui, |ui| {
-                                    egui::Frame::new().inner_margin(margin).show(ui, |ui| self.estimation_detail(ui, it, true));
-                                })
-                            });
-                            ui::fade_scroll(ui, &listings.inner, true);
-                            out
-                        }
+                        (Some(it), true) => self.estimate_columns(ui, it),
                         (Some(it), _) if market_line.is_some() => egui::ScrollArea::vertical().id_salt("diagnostic_scroll").auto_shrink([false, false]).show(ui, |ui| {
                             let (prices, league) = (self.prices.clone(), self.league.clone());
                             egui::Frame::new().inner_margin(margin).show(ui, |ui| self.market_detail(ui, market_line.as_ref().unwrap(), Some(it), &prices, &league, tr!("OBJET DIAGNOSTIQUÉ")));

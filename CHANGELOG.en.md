@@ -1,5 +1,11 @@
 # What's new
 
+## 0.6.3
+
+- Estimate detail in full screen (button at the end of the listings read title, or to the right of the item when everything fits in one column; Esc to leave): the listings take as many columns as the width allows.
+- The boundary between the calculation and the listings read can be dragged: the listings column widens over the calculation, which keeps its width and fades out underneath. Double click on the boundary: starting width.
+- Listings read: a rating line too long wraps instead of widening its card.
+
 ## 0.6.2
 
 - Passives: a jewel recommended by the build stays greyed out until something is socketed there. Hovering an allocated socket shows the jewel in it and the right click order to cycle.
