@@ -1,0 +1,46 @@
+#!/bin/sh
+# Cherche sur le site d'échange officiel de PoE2, en lecture seule (aucun achat, aucun message) :
+#   poe2-trade search '<requête JSON>' [n] [ligue]  les n premières annonces (6 par défaut, 10 au plus)
+#   poe2-trade stats <texte>                        les identifiants de stats dont le texte contient <texte>
+# La requête est celle du site (corps de /api/trade2/search). Faite pour être autorisée telle quelle à
+# un assistant : seules ces deux routes de pathofexile.com sont appelées.
+set -eu
+UA="poe2-tracker-trade/1"
+BASE="https://www.pathofexile.com/api/trade2"
+usage() { echo "usage : poe2-trade search '<requête JSON>' [n] [ligue] | poe2-trade stats <texte>" >&2; exit 2; }
+clean='(if type == "string" then . else .description // "" end) | gsub("\\[(?:[^|\\]]*\\|)?(?<t>[^\\]]*)\\]"; "\(.t)")'
+
+case ${1:-} in
+stats)
+    [ $# -eq 2 ] && [ -n "$2" ] || usage
+    curl -sS --fail-with-body --max-time 30 -A "$UA" "$BASE/data/stats" |
+        jq -r --arg q "$2" '.result[] | .id as $g | .entries[]
+            | select(.text | ascii_downcase | contains($q | ascii_downcase)) | "\(.id)\t\(.text)"'
+    ;;
+search)
+    [ $# -ge 2 ] && [ $# -le 4 ] || usage
+    n=${3:-6}
+    case $n in *[!0-9]* | '') usage ;; esac
+    [ "$n" -ge 1 ] && [ "$n" -le 10 ] || { echo "poe2-trade : n entre 1 et 10" >&2; exit 2; }
+    league=${4:-Forbidden Rites}
+    case $league in *[!A-Za-z0-9\ ]* | '') echo "poe2-trade : ligue invalide" >&2; exit 2 ;; esac
+    printf '%s' "$2" | jq -e 'type == "object"' >/dev/null 2>&1 || { echo "poe2-trade : requête JSON invalide" >&2; exit 2; }
+    path=$(printf '%s' "$league" | sed 's/ /%20/g')
+    s=$(curl -sS --fail-with-body --max-time 30 -A "$UA" -H 'Content-Type: application/json' \
+        --data-raw "$2" "$BASE/search/poe2/$path") || { echo "poe2-trade : recherche refusée ($s)" >&2; exit 1; }
+    id=$(printf '%s' "$s" | jq -r '.id')
+    printf '%s' "$s" | jq -r '"recherche \(.id), \(.total) annonces"'
+    ids=$(printf '%s' "$s" | jq -r --argjson n "$n" '.result[:$n] | join(",")')
+    case $ids in *[!0-9a-f,]*) echo "poe2-trade : réponse inattendue" >&2; exit 1 ;; '') exit 0 ;; esac
+    sleep 1.5
+    curl -sS --fail-with-body --max-time 30 -A "$UA" "$BASE/fetch/$ids?query=$id" | jq -r "
+        def c: $clean;
+        .result[] | .item as \$it | (.listing.price // {}) as \$p
+        | \"== \(\$it.name // \"\") \(\$it.typeLine) | ilvl \(\$it.ilvl) | \(\$p.amount // \"?\") \(\$p.currency // \"\")\",
+          (\$it.properties // [] | .[] | select(.values | length > 0) | \"   \(.name | c): \(.values[0][0])\"),
+          (\$it.implicitMods // [] | .[] | \"   (implicite) \(c)\"),
+          (\$it.explicitMods // [] | .[] | \"   \(c)\"),
+          (\$it.runeMods // [] | .[] | \"   (rune) \(c)\")"
+    ;;
+*) usage ;;
+esac

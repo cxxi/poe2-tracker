@@ -47,6 +47,22 @@ Un lien a la forme `https://poe2-tracker.cxxi.io/v1/profiles/<id>.md`, où `<id>
   `markdown` (l'export entier) et `sections` (`key`, `title`, `markdown`). Utile pour la date de
   mise à jour ou une seule section ; il contient l'export deux fois, il est donc plus long.
 
+## Chercher sur le trade
+
+Pour proposer des objets à acheter, la commande `poe2-trade` (si `command -v poe2-trade` la
+trouve) interroge le site d'échange officiel en lecture seule, sans demander de permission :
+
+- `poe2-trade stats <texte>` : identifiants des stats dont le texte contient `<texte>`
+  (ex. `poe2-trade stats "also applies to elemental"`).
+- `poe2-trade search '<requête JSON>' [n] [ligue]` : les `n` annonces les moins chères (6 par
+  défaut, 10 au plus) de la requête du site (`{"query":{…},"sort":{"price":"asc"}}`), avec prix,
+  propriétés et mods. Ligue par défaut : Forbidden Rites.
+
+Mêmes règles que `poe2-profile` : lance-la **seule** (pas de `cd … &&`, de tube, de `sleep` ni
+d'autre commande dans le même appel) et n'écris pas de script Python pour le faire. Espace les
+recherches de quelques secondes : le site limite le débit. On ne fait que chercher : jamais
+d'achat ni de message à un vendeur.
+
 Lis le profil **à chaque question** sur le personnage : il change pendant que le joueur joue.
 Ne garde pas son contenu en mémoire, seulement le lien.
 
