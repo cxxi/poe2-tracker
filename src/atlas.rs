@@ -238,6 +238,50 @@ fn radius(kind: u8) -> f32 {
     }
 }
 
+/// Voisins de chaque nœud, dans les deux sens (le graphe ne donne chaque liaison qu'une fois).
+fn neighbours(tree: &AtlasTree) -> Vec<Vec<usize>> {
+    let mut out = vec![Vec::new(); tree.nodes.len()];
+    for (i, n) in tree.nodes.iter().enumerate() {
+        for &(j, _) in &n.links {
+            out[i].push(j);
+            out[j].push(i);
+        }
+    }
+    out
+}
+
+/// Nœuds posés reliés à un départ par des nœuds posés.
+fn rooted(tree: &AtlasTree, nb: &[Vec<usize>], taken: &HashSet<usize>) -> HashSet<usize> {
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut todo: Vec<usize> = tree.nodes.iter().enumerate().filter(|(_, n)| n.kind == 5).map(|(i, _)| i).collect();
+    while let Some(i) = todo.pop() {
+        for &j in &nb[i] {
+            if taken.contains(&j) && seen.insert(j) {
+                todo.push(j);
+            }
+        }
+    }
+    seen
+}
+
+/// En mode édition, pourquoi le nœud `i` ne peut pas changer d'état (`None` : il le peut).
+/// Un nœud ne se pose que relié à un nœud posé ou à un départ ; il ne se retire que s'il ne coupe
+/// pas l'arbre : ce qui était relié à un départ le reste.
+fn blocked(tree: &AtlasTree, nb: &[Vec<usize>], taken: &HashSet<usize>, i: usize) -> Option<&'static str> {
+    if tree.nodes[i].kind == 5 {
+        return Some(tr!("Départ : posé dès qu'un passif voisin l'est"));
+    }
+    if !taken.contains(&i) {
+        let linked = nb[i].iter().any(|&j| taken.contains(&j) || tree.nodes[j].kind == 5);
+        return (!linked).then_some(tr!("Pas relié à un passif posé"));
+    }
+    let before = rooted(tree, nb, taken);
+    let mut rest = taken.clone();
+    rest.remove(&i);
+    let after = rooted(tree, nb, &rest);
+    before.iter().any(|j| *j != i && !after.contains(j)).then_some(tr!("Le retirer couperait l'arbre"))
+}
+
 /// Vue de l'arbre : déplacement à la souris, zoom à la molette, comme l'arbre des talents.
 #[derive(Default)]
 pub struct AtlasView {
@@ -269,9 +313,12 @@ impl AtlasView {
         self.fitted = true;
     }
 
-    /// `allocated` : identifiants des passifs posés (journal du jeu).
-    pub fn show(&mut self, ui: &mut egui::Ui, rect: Rect, tree: &AtlasTree, allocated: &HashSet<&str>, icons: &mut crate::passive_icons::PassiveIcons) {
+    /// `allocated` : identifiants des passifs posés (journal du jeu). En mode édition (`edit`), un
+    /// clic sur un nœud le pose ou le retire si l'arbre le permet : le nœud cliqué est rendu, avec
+    /// son nouvel état.
+    pub fn show<'t>(&mut self, ui: &mut egui::Ui, rect: Rect, tree: &'t AtlasTree, allocated: &HashSet<&str>, icons: &mut crate::passive_icons::PassiveIcons, edit: bool) -> Option<(&'t AtlasNode, bool)> {
         let mut taken: HashSet<usize> = tree.nodes.iter().enumerate().filter(|(_, n)| allocated.contains(n.id.as_str())).map(|(i, _)| i).collect();
+        let posed = taken.clone();
         // Le départ d'un arbre compte comme pris dès qu'un de ses voisins l'est.
         let starts: Vec<usize> = tree.nodes.iter().enumerate().filter(|(_, n)| n.kind == 5 && n.links.iter().any(|(j, _)| taken.contains(j))).map(|(i, _)| i).collect();
         taken.extend(starts);
@@ -296,9 +343,7 @@ impl AtlasView {
                 self.zoom = new_zoom;
             }
         }
-        if resp.double_clicked() {
-            self.fit(rect, tree, &HashSet::new());
-        }
+        let mut toggled = None;
         let to_screen = |p: Pos2| rect.center() + self.pan + (p - self.center) * self.zoom;
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(6, 6, 6, 235));
@@ -348,26 +393,94 @@ impl AtlasView {
                 hovered = Some(i);
             }
         }
+        // Double-clic dans le vide : recadrer ; en mode édition, celui sur un nœud est deux clics.
+        let refit = resp.double_clicked() && !(edit && hovered.is_some());
+        let nb = if edit { neighbours(tree) } else { Vec::new() };
         if let Some(i) = hovered {
             let n = &tree.nodes[i];
             let r = (radius(n.kind) * self.zoom).clamp(1.5, 40.0);
-            painter.circle_stroke(to_screen(Pos2::new(n.x, n.y)), r + 4.0, Stroke::new(1.5_f32, Color32::WHITE));
             let on = taken.contains(&i);
+            let block = edit.then(|| blocked(tree, &nb, &posed, i)).flatten();
+            // En édition : vert si le clic change le nœud, rouge sinon.
+            let ring = match (edit, block) {
+                (false, _) => Color32::WHITE,
+                (true, None) => EDIT_OK,
+                (true, Some(_)) => EDIT_BLOCKED,
+            };
+            painter.circle_stroke(to_screen(Pos2::new(n.x, n.y)), r + 4.0, Stroke::new(if edit { 2.5_f32 } else { 1.5 }, ring));
             let name = if n.name_text().is_empty() { tr!("Départ") } else { n.name_text() };
-            let note = (n.kind != 5).then_some(if on { tr!("Posé") } else { tr!("Pas posé") });
-            resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, name, GOLD, None, n.stats_text(), note));
+            let mut note = (n.kind != 5).then_some(if on { tr!("Posé") } else { tr!("Pas posé") }).map(str::to_string);
+            if edit {
+                note = Some(match block {
+                    Some(why) => why.to_string(),
+                    None if on => tr!("Clic : retirer").to_string(),
+                    None => tr!("Clic : poser").to_string(),
+                });
+                ui.ctx().set_cursor_icon(if block.is_none() { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed });
+                if block.is_none() && resp.clicked() {
+                    toggled = Some((n, !on));
+                }
+            }
+            resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, name, GOLD, None, n.stats_text(), note.as_deref()));
         }
-        let legend = tr!("{n} passifs posés · glisser : déplacer · molette : zoom · double-clic : recadrer", n = allocated.len());
+        // Mode édition : la légende le dit (le cadre doré autour du panneau est dessiné par l'app).
+        let legend = if edit {
+            tr!("Mode édition · {n} passifs posés · clic : poser ou retirer un passif · glisser : déplacer · molette : zoom", n = allocated.len())
+        } else {
+            tr!("{n} passifs posés · glisser : déplacer · molette : zoom · double-clic : recadrer", n = allocated.len())
+        };
         let galley = painter.layout_no_wrap(legend, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);
         let pos = rect.left_top() + Vec2::new(8.0, 8.0);
         painter.rect_filled(Rect::from_min_size(pos, galley.size()).expand(5.0), 3.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
         painter.galley(pos, galley, Color32::LIGHT_GRAY);
+        if refit {
+            self.fit(rect, tree, &HashSet::new());
+        }
+        toggled
     }
 }
+
+/// Anneau du nœud survolé en mode édition : le clic le change, ou pas.
+const EDIT_OK: Color32 = Color32::from_rgb(110, 200, 110);
+const EDIT_BLOCKED: Color32 = Color32::from_rgb(220, 90, 80);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node(id: &str, kind: u8, links: &[usize]) -> AtlasNode {
+        AtlasNode {
+            id: id.into(),
+            name: id.into(),
+            icon: String::new(),
+            kind,
+            x: 0.0,
+            y: 0.0,
+            gx: 0.0,
+            gy: 0.0,
+            orbit: 0,
+            links: links.iter().map(|j| (*j, 0.0)).collect(),
+            stats: vec![],
+            name_en: id.into(),
+            stats_en: vec![],
+        }
+    }
+
+    #[test]
+    fn edit_keeps_the_tree_connected() {
+        // Départ 0 — 1 — 2 — 3, et 4 isolé du reste.
+        let tree = AtlasTree { nodes: vec![node("start", 5, &[1]), node("a", 0, &[2]), node("b", 0, &[3]), node("c", 1, &[]), node("far", 0, &[])], key: String::new() };
+        let nb = neighbours(&tree);
+        let taken: HashSet<usize> = [1, 2].into();
+        // Poser : relié à un nœud posé (3), ou au départ ; pas un nœud isolé (4) ; jamais le départ.
+        assert!(blocked(&tree, &nb, &taken, 3).is_none());
+        assert!(blocked(&tree, &nb, &HashSet::new(), 1).is_none());
+        assert!(blocked(&tree, &nb, &taken, 4).is_some());
+        assert!(blocked(&tree, &nb, &taken, 0).is_some());
+        // Retirer : le bout de la chaîne oui, le milieu non (il couperait 2 du départ).
+        assert!(blocked(&tree, &nb, &taken, 2).is_none());
+        assert!(blocked(&tree, &nb, &taken, 1).is_some());
+    }
 
     /// Arbre lu dans le vrai jeu : POE2_GAME=… cargo test real_atlas_tree -- --ignored --nocapture
     #[test]

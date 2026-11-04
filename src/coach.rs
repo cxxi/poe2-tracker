@@ -1,6 +1,6 @@
 //! État de la partie (personnage, niveau, acte) et conseils déclenchés par le log.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,22 @@ pub struct CharState {
     /// Le journal a suivi ce personnage depuis le niveau 2 : `passives` est son arbre complet.
     #[serde(default)]
     pub passives_known: bool,
+    /// Set d'armes d'un talent de l'arbre réel, posé à la main en mode édition : 0 commun, 1 ou
+    /// 2. Le journal ne le dit pas : sans choix, celui du build (voir `passive_set`).
+    #[serde(default)]
+    pub passive_sets: BTreeMap<String, u8>,
+    /// Attribut choisi pour un talent d'attribut de l'arbre réel (0 Force, 1 Dextérité,
+    /// 2 Intelligence). Le journal ne le dit pas non plus.
+    #[serde(default)]
+    pub passive_attributes: BTreeMap<String, usize>,
+}
+
+impl CharState {
+    /// Set d'armes d'un talent pris (0 : commun) : celui posé à la main, sinon celui que lui
+    /// donne le build (`build_sets`), sinon commun.
+    pub fn passive_set(&self, id: &str, build_sets: Option<&HashMap<String, u8>>) -> u8 {
+        self.passive_sets.get(id).copied().or_else(|| build_sets.and_then(|s| s.get(id)).copied()).unwrap_or(0)
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -202,6 +218,49 @@ impl Coach {
         Some(self.book(&name))
     }
 
+    /// Talent de l'arbre réel posé (dans le set `set`, 0 : commun) ou retiré (`None`) à la main
+    /// (mode édition), enregistré tout de suite.
+    pub fn set_passive(&mut self, id: &str, set: Option<u8>) {
+        let Some(c) = self.state.active.clone().and_then(|n| self.state.characters.get_mut(&n)) else { return };
+        match set {
+            Some(s) => {
+                c.passives.insert(id.to_string());
+                c.passive_sets.insert(id.to_string(), s);
+            }
+            None => {
+                c.passives.remove(id);
+                c.passive_sets.remove(id);
+                c.passive_attributes.remove(id);
+            }
+        }
+        self.save();
+    }
+
+    /// Attribut choisi pour un talent d'attribut de l'arbre réel.
+    pub fn set_passive_attribute(&mut self, id: &str, attribute: usize) {
+        let Some(c) = self.state.active.clone().and_then(|n| self.state.characters.get_mut(&n)) else { return };
+        c.passive_attributes.insert(id.to_string(), attribute);
+        self.save();
+    }
+
+    /// Arbre réel inconnu (journal incomplet) : on part de `passives` (ceux du build, avec leurs
+    /// sets, ou rien), à corriger ensuite en mode édition ; le journal suit les changements.
+    pub fn start_tree(&mut self, passives: &[String], sets: &HashMap<String, u8>) {
+        let Some(c) = self.state.active.clone().and_then(|n| self.state.characters.get_mut(&n)) else { return };
+        c.passives = passives.iter().cloned().collect();
+        c.passive_sets = passives.iter().filter_map(|id| Some((id.clone(), *sets.get(id)?))).collect();
+        c.passive_attributes.clear();
+        c.passives_known = true;
+        self.save();
+    }
+
+    /// Passif de l'Atlas posé ou retiré à la main (mode édition), enregistré tout de suite.
+    pub fn set_atlas_node(&mut self, id: &str, name: &str, allocated: bool) {
+        let Some(active) = self.state.active.clone() else { return };
+        self.book(&active).atlas_node(id, name, allocated);
+        self.save();
+    }
+
     fn book(&mut self, name: &str) -> &mut Book {
         if !self.maps.contains_key(name) {
             let book = Book::load(&self.book_path(name));
@@ -330,6 +389,8 @@ impl Coach {
             league: None,
             passives: BTreeSet::new(),
             passives_known: false,
+            passive_sets: BTreeMap::new(),
+            passive_attributes: BTreeMap::new(),
         });
         if let Some(cl) = class {
             entry.class = cl.to_string();
@@ -488,6 +549,8 @@ impl Coach {
                 // d'ici (un personnage recréé sous le même nom repart de zéro).
                 if *level == 2 {
                     c.passives.clear();
+                    c.passive_sets.clear();
+                    c.passive_attributes.clear();
                     c.passives_known = true;
                 }
                 if *level <= old {
@@ -560,6 +623,8 @@ impl Coach {
                     c.passives.insert(id.clone());
                 } else {
                     c.passives.remove(id);
+                    c.passive_sets.remove(id);
+                    c.passive_attributes.remove(id);
                 }
                 vec![]
             }

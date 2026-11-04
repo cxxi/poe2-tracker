@@ -244,6 +244,14 @@ struct App {
     full_view: bool,
     /// Détail de l'estimation sur toute la fenêtre, pour voir le plus d'annonces lues à la fois.
     full_estimate: bool,
+    /// Mode édition des aptitudes, des talents et de l'Atlas (bouton en haut à droite de la vue).
+    edit_mode: bool,
+    /// Onglet où le mode édition a été allumé : en changer le quitte.
+    edit_tab: views::Tab,
+    /// Pinceau du mode édition des talents : 0 commun, 1 set I, 2 set II.
+    paint_set: u8,
+    /// Choix ouvert depuis l'arbre en mode édition : attribut ou joyau d'un talent pris.
+    tree_pick: Option<views::TreeAction>,
     /// De combien la colonne des annonces lues est étirée par-dessus celle du calcul (glissé à la
     /// main sur la limite entre les deux).
     estimate_stretch: f32,
@@ -671,6 +679,10 @@ impl App {
             // Développement : `POE2_TRACKER_FULL=1` ouvre la vue en plein écran.
             full_view: std::env::var_os("POE2_TRACKER_FULL").is_some(),
             full_estimate: false,
+            edit_mode: false,
+            edit_tab: views::Tab::Equipment,
+            paint_set: 0,
+            tree_pick: None,
             estimate_stretch: 0.0,
             tree: views::TreeView::default(),
             passive_icons: passive_icons::PassiveIcons::new(&cc.egui_ctx, dirs.cache_dir().to_path_buf(), config.game_dir.clone()),
@@ -1125,9 +1137,10 @@ impl App {
         let unique = step.as_ref().and_then(|s| self.recommended_unique(s, slot));
         let rec_rarity = step.as_ref().map_or(item::Rarity::Rare, |s| self.recommended_rarity(s, slot));
         let rare = if unique.is_none() { step.as_ref().and_then(|s| self.recommended_rare(s, slot, rec_rarity)) } else { None };
-        // L'estimation de la pièce rare recommandée part à l'ouverture (si le trade est permis).
+        // L'estimation de la pièce rare recommandée part à l'ouverture (si le trade est permis et
+        // l'estimation automatique) ; sinon, bouton « Estimer » au bas de la colonne.
         if let Some(r) = rare.as_ref().filter(|_| mode != DetailMode::DiagWorn) {
-            if self.stored.trade_prices && trade::priceable(r) && self.trade.get(r).is_none() {
+            if self.stored.trade_prices && self.stored.auto_estimate && trade::priceable(r) && self.trade.get(r).is_none() {
                 self.trade.request(r);
             }
         }
@@ -1138,6 +1151,8 @@ impl App {
         let mut basis: Option<String> = None;
         let mut link: Option<(String, &str)> = None;
         let mut pending = false;
+        let mut can_estimate = false;
+        let mut estimate = false;
         if let Some(u) = &unique {
             let found = {
                 let data = self.prices.data.lock().unwrap();
@@ -1183,6 +1198,7 @@ impl App {
                     if !self.stored.trade_prices {
                         price = Some((tr!("estimation sur le trade coupée dans les réglages").into(), Color32::GRAY));
                     }
+                    can_estimate = self.stored.trade_prices && trade::priceable(r);
                     link = Some(fallback);
                 }
             }
@@ -1575,15 +1591,22 @@ impl App {
                                 }
                                 ui.label(RichText::new(tr!("AU MARCHÉ")).color(ui::GOLD_DIM).small().strong());
                                 if let Some((text, color)) = &price {
-                                    ui.horizontal(|ui| {
+                                    // Le message d'attente du trade peut être long : il revient à la ligne
+                                    // dans la colonne au lieu de déborder de la fenêtre.
+                                    ui.set_max_width(widths[1]);
+                                    ui.horizontal_top(|ui| {
                                         if pending {
                                             ui.add(egui::Spinner::new().color(ui::GOLD));
                                         }
-                                        ui.label(RichText::new(text).color(*color).size(16.0 * k).strong());
+                                        ui.add(egui::Label::new(RichText::new(text).color(*color).size(16.0 * k).strong()).wrap());
                                     });
                                 }
                                 if let Some(b) = &basis {
                                     ui.label(RichText::new(b).color(dim).small());
+                                }
+                                if can_estimate {
+                                    ui.add_space(2.0);
+                                    estimate = ui::action_button(ui, tr!("💰  Estimer")).on_hover_text(tr!("Cherche des annonces comparables sur le site de trade")).clicked();
                                 }
                                 if let Some((url, text)) = &link {
                                     ui.add_space(2.0);
@@ -1598,6 +1621,9 @@ impl App {
                 });
         });
         let _ = shown;
+        if let Some(r) = rare.as_ref().filter(|_| estimate) {
+            self.trade.request(r);
+        }
         if (content_h - natural).abs() > 0.5 {
             ui.data_mut(|d| d.insert_temp(height_id, content_h / k));
             ui.ctx().request_repaint();
@@ -2182,6 +2208,10 @@ impl App {
             out.push_str(&format!("\n## {}\n\n", tr!("Caractéristiques")));
             out.push_str(&export::stats(&sheets.worn, sheets.build.as_ref(), &sheets.build_title, set, &sheets.penalty, sheets.tree_known));
         }
+        if sections.skills {
+            out.push_str(&format!("\n## {}\n\n", tr!("Aptitudes")));
+            out.push_str(&self.export_skills());
+        }
         if sections.passives {
             out.push_str(&format!("\n## {}\n\n", tr!("Talents")));
             out.push_str(&self.export_passives());
@@ -2202,6 +2232,35 @@ impl App {
         if sections.quests {
             out.push_str(&format!("\n## {}\n\n", tr!("Quêtes")));
             out.push_str(&self.export_quests());
+        }
+        out
+    }
+
+    /// Aptitudes du build à l'étape affichée, chaque gemme marquée selon qu'elle est cochée
+    /// (le personnage l'a) ou non.
+    fn export_skills(&self) -> String {
+        let Some(c) = &self.coach else { return String::new() };
+        let Some(step) = self.shown_step_index().and_then(|i| c.steps.get(i)) else {
+            return format!("{}\n", tr!("Aucun build suivi."));
+        };
+        let owned = &self.gear.gems;
+        let mark = |key: String| if owned.contains(&key) { "✓" } else { "✗" };
+        let mut out = format!("{}\n", tr!("Gemmes du build ({step}) : ✓ le personnage l'a, ✗ pas encore.", step = guide::step_text(&step.label)));
+        if owned.is_empty() {
+            out.push_str(&format!("{}\n", tr!("Gemmes réelles pas encore indiquées dans l'app : tout est marqué ✗.")));
+        }
+        out.push('\n');
+        for s in &step.skills {
+            let set = match s.weapon_set {
+                Some(1) => " (set I)",
+                Some(2) => " (set II)",
+                Some(_) => " (sets I et II)",
+                None => "",
+            };
+            out.push_str(&format!("- {} {}{set}, {}\n", mark(gear::gem_key(&s.name, None)), s.name, tr!("dès le niveau {from}", from = s.from_level)));
+            for (name, lvl) in &s.supports {
+                out.push_str(&format!("  - {} {name}, {}\n", mark(gear::gem_key(&s.name, Some(name))), tr!("support dès le niveau {lvl}", lvl = *lvl)));
+            }
         }
         out
     }
@@ -2239,7 +2298,7 @@ impl App {
         let sockets = of(&|p| p.jewel);
         let mut attr = [0; 3];
         for id in &attributes {
-            attr[self.tree.attribute_choice(id).unwrap_or(main_attr).min(2)] += 1;
+            attr[ch.passive_attributes.get(*id).copied().or_else(|| self.tree.attribute_choice(id)).unwrap_or(main_attr).min(2)] += 1;
         }
         let mut out = format!("{}\n\n", tr!("Arbre réel lu dans le journal du jeu : {n} talents.", n = mine.len()));
         out.push_str(&format!("- {} : {}\n", tr!("Ascendance"), export::names(&grouped(&mut asc.into_iter()))));
@@ -2600,7 +2659,7 @@ impl App {
     }
 
     fn changelog_window(&mut self, ctx: &egui::Context) {
-        let Some(releases) = &self.changelog else { return };
+        let Some(releases) = self.changelog.as_deref().map(changelog::localized) else { return };
         let (ok, closed) = ui::modal(ctx, "changelog", tr!("Nouveautés"), true, 560.0, |ui| {
             ui::plain_widgets(ui);
             egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
@@ -3692,8 +3751,12 @@ impl App {
         } else {
             self.build_view(ui, ui::place(area, scale, ui::VIEW_AREA));
         }
-        if matches!(self.tab, views::Tab::Passives | views::Tab::Atlas) {
+        if matches!(self.tab, views::Tab::Skills | views::Tab::Passives | views::Tab::Atlas) {
             self.full_view_button(ui, ui::place(area, scale, ui::VIEW_AREA));
+            if self.edit_mode {
+                ui::edit_frame(ui, ui::place(area, scale, ui::STONE_PANEL));
+            }
+            self.tree_pick_window(ui, ui::place(area, scale, ui::VIEW_AREA));
         }
         // Détail d'une case : sur l'équipement ; ceux du diagnostic, sur n'importe quel onglet.
         // Détail d'une case : sur l'équipement. Ceux du diagnostic s'ouvrent sur toute la fenêtre
@@ -3708,11 +3771,20 @@ impl App {
         self.tab_row(ui, tabs);
     }
 
-    /// Boutons du coin haut droit de la vue : recentrer, puis plein écran (entrée et sortie).
+    /// Boutons du coin haut droit de la vue : édition, recentrer, puis plein écran (entrée et
+    /// sortie). Les aptitudes n'ont que l'édition.
     fn full_view_button(&mut self, ui: &mut egui::Ui, view: egui::Rect) {
         let size = 30.0;
         let full = egui::Rect::from_min_size(egui::pos2(view.max.x - size, view.min.y), Vec2::splat(size));
         let center = full.translate(Vec2::new(-(size + 6.0), 0.0));
+        let edit_right = if self.tab == views::Tab::Skills { full.max.x } else { center.min.x - 6.0 };
+        if ui::edit_button(ui, egui::pos2(edit_right, view.min.y), size, self.edit_mode).clicked() {
+            self.edit_mode = !self.edit_mode;
+            self.edit_tab = self.tab;
+        }
+        if self.tab == views::Tab::Skills {
+            return;
+        }
         let tip = if self.tab == views::Tab::Atlas { tr!("Recentrer (ou double-clic)") } else { tr!("Centrer sur l'ascendance (double-clic : tout le build)") };
         if ui::view_button(ui, center, ui::ViewIcon::Recenter).on_hover_text(tip).clicked() {
             self.recenter_view();
@@ -3763,11 +3835,14 @@ impl App {
             Some(c) => {
                 let main_attr = shown.map_or(2, |i| c.catalog().main_attribute(&c.steps[i]));
                 let attr_of = |id: &str| self.tree.attribute_choice(id).unwrap_or(main_attr);
-                // Le journal ne dit pas sur quel set d'armes un talent est pris : celui que lui donne
-                // le build à l'étape affichée, sinon les deux.
                 let sets = shown.map(|i| &c.steps[i].passive_sets);
                 let in_set = |id: &String| sets.and_then(|s| s.get(id)).is_none_or(|n| *n == set);
-                let worn = c.character().filter(|(_, ch)| ch.passives_known).map(|(_, ch)| stats::tree_lines(ch.passives.iter().filter(|id| in_set(id)), c.catalog(), attr_of));
+                // Ton arbre : le set et l'attribut posés à la main, sinon ceux du build (le journal ne
+                // les dit pas).
+                let ch = c.character().filter(|(_, ch)| ch.passives_known).map(|(_, ch)| ch);
+                let real_in_set = |id: &&String| ch.is_some_and(|ch| matches!(ch.passive_set(id, sets), 0) || ch.passive_set(id, sets) == set);
+                let real_attr = |id: &str| ch.and_then(|ch| ch.passive_attributes.get(id).copied()).unwrap_or_else(|| attr_of(id));
+                let worn = ch.map(|ch| stats::tree_lines(ch.passives.iter().filter(real_in_set), c.catalog(), real_attr));
                 let build = shown.map(|i| stats::tree_lines(c.steps[i].passives.iter().filter(|id| in_set(id)), c.catalog(), attr_of));
                 // Joyaux : leurs mods, et pour un joyau à rayon ce qu'il ajoute aux talents pris
                 // autour de sa châsse.
@@ -3780,7 +3855,7 @@ impl App {
                     }
                     out
                 };
-                let real: Vec<&String> = c.character().filter(|(_, ch)| ch.passives_known).map(|(_, ch)| ch.passives.iter().filter(|id| in_set(id)).collect()).unwrap_or_default();
+                let real: Vec<&String> = ch.map(|ch| ch.passives.iter().filter(real_in_set).collect()).unwrap_or_default();
                 let real_taken: HashSet<&str> = real.iter().map(|s| s.as_str()).collect();
                 let worn_jewels: Vec<String> = tracked_jewels
                     .iter()
@@ -3897,7 +3972,12 @@ impl App {
             }
             Some(Ok(tree)) => {
                 let allocated: HashSet<&str> = allocated.iter().map(String::as_str).collect();
-                self.atlas_view.show(ui, rect, tree, &allocated, &mut self.passive_icons);
+                let toggled = self.atlas_view.show(ui, rect, tree, &allocated, &mut self.passive_icons, self.edit_mode);
+                // Nom dans la langue du jeu quand on l'a, comme ceux lus dans le journal.
+                if let (Some((n, on)), Some(c)) = (toggled, self.coach.as_mut()) {
+                    let name = if n.name.is_empty() { &n.name_en } else { &n.name };
+                    c.set_atlas_node(&n.id, name, on);
+                }
             }
         }
     }
@@ -3985,7 +4065,7 @@ impl App {
                 socket,
             })
             .collect();
-        let mut socket_pick: Option<(String, Option<usize>)> = None;
+        let mut tree_action: Option<views::TreeAction> = None;
         let Some(coach) = self.coach.as_ref() else {
             ui.put(rect, egui::Label::new(RichText::new(tr!("Chargement du guide…")).color(Color32::GRAY)));
             return;
@@ -4017,12 +4097,31 @@ impl App {
             self.tree.use_overrides_file(self.builds.dir_of(&b.id).join("attributes.json"));
         }
         let gem_infos = self.gem_infos.get();
-        let (tab, assets, tree, icons, weapon_set) = (self.tab, &mut self.assets, &mut self.tree, &mut self.passive_icons, &mut self.gear.set);
+        let (tab, assets, tree, icons, weapon_set, gems, edit, paint) = (self.tab, &mut self.assets, &mut self.tree, &mut self.passive_icons, &mut self.gear.set, &self.gear.gems, self.edit_mode, &mut self.paint_set);
+        let mut gem_toggle = None;
         let shown = shown.min(coach.steps.len() - 1);
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             // Set d'armes de l'arbre, partagé avec l'écran d'équipement (l'étape se choisit dans la
             // barre du haut). Style doré pour le sélecteur seulement.
-            if tab == views::Tab::Passives && coach.steps.iter().any(|s| !s.passive_sets.is_empty()) {
+            if tab == views::Tab::Passives && edit {
+                // Mode édition : la barre des sets devient le pinceau (commun, set I, set II) ; un
+                // set choisi est aussi celui affiché.
+                ui.horizontal(|ui| {
+                    ui::gold_widgets(ui);
+                    ui.label(RichText::new(tr!("Poser en")).color(ui::GOLD_DIM));
+                    for (v, label) in [(0u8, tr!("Commun")), (1, tr!("Set I")), (2, tr!("Set II"))] {
+                        let color = if v == 0 { ui::GOLD } else { ui::SET_COLORS[v as usize - 1] };
+                        let hint = if v == 0 { tr!("Talent pris pour les deux sets d'armes") } else { tr!("Talent pris pour ce set d'armes seulement (affiché)") };
+                        if ui.selectable_label(*paint == v, RichText::new(label).color(color).strong()).on_hover_text(hint).clicked() {
+                            *paint = v;
+                            if v > 0 {
+                                *weapon_set = v;
+                            }
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+            } else if tab == views::Tab::Passives && coach.steps.iter().any(|s| !s.passive_sets.is_empty()) {
                 ui.horizontal(|ui| {
                     ui::gold_widgets(ui);
                     let h = ui.spacing().interact_size.y + 4.0;
@@ -4040,20 +4139,181 @@ impl App {
             let prev = shown.checked_sub(1).map(|i| &coach.steps[i]);
             match tab {
                 views::Tab::Skills => {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| views::skills(ui, step, prev, level, assets, gem_infos.as_deref()));
+                    // Place du bouton d'édition, posé en haut à droite de la vue.
+                    ui.add_space(36.0);
+                    gem_toggle = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| views::skills(ui, step, prev, level, assets, gem_infos.as_deref(), gems, edit)).inner;
                 }
                 views::Tab::Passives => {
                     let r = ui.available_rect_before_wrap();
-                    // Arbre réel, s'il est connu depuis le début du personnage.
-                    let mine = coach.character().filter(|(_, c)| c.passives_known).map(|(_, c)| &c.passives);
-                    socket_pick = tree.show(ui, r, step, prev, coach.catalog(), icons, key, (*weapon_set).max(1), &tree_jewels, mine, &worn_jewels);
+                    // Arbre réel, s'il est connu depuis le début du personnage (ou posé à la main).
+                    let mine = coach
+                        .character()
+                        .filter(|(_, c)| c.passives_known)
+                        .map(|(_, c)| views::RealTree { passives: &c.passives, sets: &c.passive_sets, attributes: &c.passive_attributes });
+                    tree_action = tree.show(ui, r, step, prev, coach.catalog(), icons, key, (*weapon_set).max(1), &tree_jewels, mine, &worn_jewels, edit.then_some(*paint));
                 }
                 views::Tab::Equipment | views::Tab::Stats | views::Tab::Atlas | views::Tab::Guide => {}
             }
         });
-        if let Some((socket, shown)) = socket_pick {
-            self.gear.cycle_jewel(&socket, shown);
+        if let Some(a) = tree_action {
+            self.tree_action(a, shown);
+        }
+        if let Some(key) = gem_toggle {
+            self.gear.toggle_gem(key);
             let _ = self.gear.save();
+        }
+    }
+
+    /// Clic dans l'arbre des talents en mode édition.
+    fn tree_action(&mut self, action: views::TreeAction, shown: usize) {
+        let Some(c) = self.coach.as_mut() else { return };
+        match action {
+            views::TreeAction::Set { id, set } => {
+                let fresh = set.is_some() && c.character().is_some_and(|(_, ch)| !ch.passives.contains(&id));
+                let kind = c.catalog().passives.get(&id).map(|p| (p.attribute, p.jewel));
+                c.set_passive(&id, set);
+                // Talent d'attribut ou châsse qu'on vient de prendre : son choix tout de suite.
+                self.tree_pick = match kind {
+                    Some((true, _)) if fresh => Some(views::TreeAction::Attribute { id, removable: true }),
+                    Some((_, true)) if fresh => Some(views::TreeAction::Jewel { id, removable: true }),
+                    _ => None,
+                };
+            }
+            views::TreeAction::StartFromBuild => {
+                if let Some(step) = c.steps.get(shown).cloned() {
+                    c.start_tree(&step.passives, &step.passive_sets);
+                }
+            }
+            views::TreeAction::StartEmpty => c.start_tree(&[], &HashMap::new()),
+            pick => self.tree_pick = Some(pick),
+        }
+    }
+
+    /// Choix de l'attribut d'un talent d'attribut, ou du joyau d'une châsse, de ton arbre : une
+    /// modale sur la zone de l'arbre (`zone`).
+    fn tree_pick_window(&mut self, ui: &mut egui::Ui, zone: egui::Rect) {
+        if self.tab != views::Tab::Passives || !self.edit_mode {
+            self.tree_pick = None;
+        }
+        let Some(pick) = &self.tree_pick else { return };
+        let (id, removable, attribute) = match pick {
+            views::TreeAction::Attribute { id, removable } => (id.clone(), *removable, true),
+            views::TreeAction::Jewel { id, removable } => (id.clone(), *removable, false),
+            _ => return,
+        };
+        let current_attr = self.coach.as_ref().and_then(|c| c.character()).and_then(|(_, ch)| ch.passive_attributes.get(&id).copied());
+        let shown_label = self.coach.as_ref().and_then(|c| self.shown_step_index().and_then(|i| c.steps.get(i)).map(|s| s.label.clone()));
+        let tree_jewels = self.tree_jewels(shown_label.as_deref().unwrap_or_default());
+        let places = self.jewel_places(&tree_jewels);
+        // Chaque joyau suivi : sa fiche (image, nom, base, mods) et s'il est serti ici.
+        let jewels: Vec<(Option<egui::TextureHandle>, String, Color32, String, Vec<String>, bool)> = self
+            .gear
+            .jewel_items()
+            .into_iter()
+            .zip(&places)
+            .map(|(j, s)| {
+                let tex = self.assets.base_art(&j.base).and_then(|ic| self.passive_icons.get(&ic).cloned());
+                // Le nom seul : la base suit en gris.
+                (tex, j.name.clone(), ui::rarity_color(j.rarity), if j.base == j.name { String::new() } else { j.base.clone() }, j.mods.clone(), s.as_deref() == Some(id.as_str()))
+            })
+            .collect();
+        let title = if attribute { tr!("Attribut du talent") } else { tr!("Joyau serti") };
+        let mut chosen: Option<Option<usize>> = None;
+        let mut remove = false;
+        let mut untrack: Option<usize> = None;
+        let (_, closed) = ui::zone_modal(ui, zone, "tree_pick", title, if attribute { 380.0 } else { 520.0 }, |ui| {
+            if attribute {
+                ui.label(RichText::new(tr!("Ce que ce talent donne : +5 à l'attribut choisi.")).color(Color32::GRAY));
+                ui.add_space(8.0);
+                for (k, name) in [tr!("Force"), tr!("Dextérité"), tr!("Intelligence")].into_iter().enumerate() {
+                    let on = current_attr == Some(k);
+                    let text = RichText::new(format!("+5 {name}")).color(views::attribute_color(k)).size(16.0).strong();
+                    if ui.add_sized([ui.available_width(), 32.0], egui::Button::new(text).selected(on)).clicked() {
+                        chosen = Some(Some(k));
+                    }
+                }
+            } else {
+                if jewels.is_empty() {
+                    ui.label(RichText::new(tr!("Aucun joyau suivi : Ctrl+Alt+C sur un joyau serti en jeu pour l'ajouter.")).color(Color32::GRAY));
+                }
+                {
+                    for (k, (tex, name, color, base, mods, here)) in jewels.iter().enumerate() {
+                        // Une carte par joyau, comme sa fiche au survol ; celui serti ici entouré d'or.
+                        let card = egui::Frame::new()
+                            .fill(Color32::from_rgb(20, 18, 15))
+                            .stroke(egui::Stroke::new(if *here { 2.0_f32 } else { 1.0 }, if *here { ui::GOLD } else { ui::GOLD_DIM }))
+                            .corner_radius(4)
+                            .inner_margin(8)
+                            .outer_margin(egui::Margin::symmetric(0, 3))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal_top(|ui| {
+                                    match tex {
+                                        Some(tex) => ui.image((tex.id(), Vec2::splat(48.0))),
+                                        None => ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover()).1,
+                                    };
+                                    ui.vertical(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(RichText::new(gametext::name(name)).color(*color).size(16.0).strong());
+                                            if !base.is_empty() {
+                                                ui.label(RichText::new(gametext::name(base)).color(Color32::GRAY).size(14.0));
+                                            }
+                                        });
+                                        for m in mods {
+                                            ui.label(RichText::new(gametext::line(m)).color(ui::MOD_COLOR).size(12.5));
+                                        }
+                                    });
+                                });
+                            })
+                            .response
+                            .interact(egui::Sense::click())
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if card.hovered() && !*here {
+                            ui.painter().rect_stroke(card.rect.shrink(1.0), 4.0, egui::Stroke::new(1.0_f32, ui::GOLD), egui::StrokeKind::Inside);
+                        }
+                        // Ne plus suivre ce joyau : posé après la carte, pour garder son clic.
+                        let close = egui::Rect::from_min_size(card.rect.right_top() + Vec2::new(-30.0, 6.0), Vec2::splat(24.0));
+                        if ui.put(close, egui::Button::new(RichText::new("✕").color(Color32::GRAY)).frame(false)).on_hover_text(tr!("Ne plus suivre ce joyau")).clicked() {
+                            untrack = Some(k);
+                        } else if card.clicked() {
+                            chosen = Some(Some(k));
+                        }
+                    }
+                }
+                let none = !jewels.iter().any(|j| j.5);
+                if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(RichText::new(tr!("Aucun joyau suivi")).color(Color32::GRAY)).selected(none)).clicked() {
+                    chosen = Some(None);
+                }
+            }
+            ui.add_space(10.0);
+            ui.separator();
+            let label = if attribute { tr!("Retirer ce talent") } else { tr!("Retirer cette châsse") };
+            let resp = ui.add_enabled(removable, egui::Button::new(RichText::new(label).color(Color32::from_rgb(220, 120, 100))));
+            remove = resp.on_disabled_hover_text(tr!("Le retirer couperait l'arbre")).clicked();
+        });
+        if let Some(k) = untrack {
+            self.gear.remove_jewel(k);
+            let _ = self.gear.save();
+        }
+        if let Some(k) = chosen {
+            if attribute {
+                if let (Some(c), Some(k)) = (self.coach.as_mut(), k) {
+                    c.set_passive_attribute(&id, k);
+                }
+            } else {
+                self.gear.set_jewel(&id, k);
+                let _ = self.gear.save();
+            }
+            self.tree_pick = None;
+        }
+        if remove {
+            if let Some(c) = self.coach.as_mut() {
+                c.set_passive(&id, None);
+            }
+            self.tree_pick = None;
+        }
+        if closed {
+            self.tree_pick = None;
         }
     }
 
@@ -6331,8 +6591,13 @@ impl eframe::App for App {
         // Emplacement de charme donné par la campagne : compte dans les charmes ouverts.
         self.gear.quest_charm_slots = self.quest_bonuses().charm_slots;
         // Plein écran (Talents, Atlas) : la vue seule, sans barre ni panneaux.
+        // Le mode édition ne vaut que pour l'onglet où il a été allumé.
+        if self.edit_mode && self.tab != self.edit_tab {
+            self.edit_mode = false;
+        }
         let full = self.full_view && matches!(self.tab, views::Tab::Passives | views::Tab::Atlas);
-        if full && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Échap ferme d'abord la modale ouverte sur l'arbre.
+        if full && self.tree_pick.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.full_view = false;
         }
         if full && self.full_view {
@@ -6348,6 +6613,10 @@ impl eframe::App for App {
                         self.build_view(ui, rect);
                     }
                     self.full_view_button(ui, rect);
+                    self.tree_pick_window(ui, rect);
+                    if self.edit_mode {
+                        ui::edit_frame(ui, ui.max_rect().expand(8.0));
+                    }
                 });
             return;
         }

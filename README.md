@@ -64,12 +64,17 @@ cliquer pendant ce temps.)
   (survolé dans l'arbre en jeu) : il rejoint les joyaux suivis.
 - **Talents** : ton arbre réel, lu dans le journal du jeu (chaque talent pris ou retiré y est
   écrit), face à celui du build : pris, à prendre (pointillé doré), pris hors build (rouge
-  foncé). Le journal ne dit ni l'attribut choisi sur un talent d'attribut ni la châsse d'un
-  joyau : clic droit dans l'arbre pour les préciser.
+  foncé). Le journal ne dit ni le set d'armes d'un talent, ni l'attribut choisi sur un talent
+  d'attribut, ni la châsse d'un joyau : le mode Édition (en haut à droite) permet de les
+  préciser, de corriger l'arbre talent par talent, ou de le déclarer quand le journal ne couvre
+  pas le personnage depuis le début (en partant de l'arbre du build ou de zéro).
+- **Mode Édition** (Aptitudes, Talents, Atlas) : cocher ses gemmes (celles du build restent
+  grisées tant qu'elles ne le sont pas), prendre ou retirer des passifs de l'Atlas et des
+  talents sans jamais couper l'arbre.
 - **Caractéristiques** : le personnage calculé comme en jeu (base du niveau et de la classe,
   attributs, équipement, arbre réel, joyaux suivis dont les Time-Lost et leur rayon,
   récompenses de quête, pourcentages augmentés, pénalité de résistances), face au build.
-- **Exporter le personnage** (⚙ Menu) : équipement, caractéristiques, talents, joyaux, Atlas,
+- **Exporter le personnage** (⚙ Menu) : équipement, caractéristiques, aptitudes, talents, joyaux, Atlas,
   maps et quêtes en Markdown, à coller dans une conversation avec une IA.
 - **Route de leveling** (en bas) : contenus facultatifs de la campagne à ne pas rater
   (points de passif, résistances, esprit…), d'après `data/route.json`. Le journal du jeu

@@ -1620,6 +1620,47 @@ pub fn view_button(ui: &mut egui::Ui, rect: egui::Rect, icon: ViewIcon) -> egui:
     resp
 }
 
+/// Cadre doré autour du panneau tant que le mode édition est actif.
+pub fn edit_frame(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter().rect_stroke(rect, 4.0, Stroke::new(2.0_f32, GOLD), egui::StrokeKind::Inside);
+}
+
+/// Bouton « Édition » des vues (aptitudes, talents, Atlas) : crayon et libellé, dans le style des
+/// boutons carrés voisins, aligné à droite sur `right_top`. Allumé tant que le mode est actif.
+pub fn edit_button(ui: &mut egui::Ui, right_top: Pos2, size: f32, on: bool) -> egui::Response {
+    let label = if on { tr!("Quitter l'édition") } else { tr!("Édition") };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(14.0), GOLD);
+    let pad = 8.0;
+    let icon = size - 16.0;
+    let width = pad + icon + 6.0 + galley.size().x + pad + 2.0;
+    let rect = egui::Rect::from_min_size(right_top - Vec2::new(width, 0.0), Vec2::new(width, size));
+    let resp = ui.interact(rect, ui.id().with("edit_button"), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let color = if resp.hovered() || on { GOLD } else { GOLD_DIM };
+    let fill = if on { Color32::from_rgba_unmultiplied(60, 48, 26, 235) } else { Color32::from_rgba_unmultiplied(12, 11, 10, 220) };
+    let painter = ui.painter();
+    painter.rect(rect, 4.0, fill, Stroke::new(1.0_f32, color), egui::StrokeKind::Inside);
+    // Crayon en biais : corps, pointe en bas à gauche, embout en haut à droite.
+    let b = egui::Rect::from_min_size(egui::pos2(rect.min.x + pad, rect.center().y - icon / 2.0), Vec2::splat(icon));
+    let stroke = Stroke::new(2.0_f32, color);
+    let (tip, end) = (b.left_bottom() + Vec2::new(1.0, -1.0), b.right_top() + Vec2::new(-1.0, 1.0));
+    let along = (end - tip).normalized();
+    let side = along.rot90() * 2.5;
+    let body = tip + along * 4.0;
+    painter.line_segment([body + side, end + side], stroke);
+    painter.line_segment([body - side, end - side], stroke);
+    painter.line_segment([body + side, tip], stroke);
+    painter.line_segment([body - side, tip], stroke);
+    painter.line_segment([end + side, end - side], stroke);
+    let cap = end - along * 3.0;
+    painter.line_segment([cap + side, cap - side], Stroke::new(1.0_f32, color));
+    let text_color = if resp.hovered() || on { GOLD } else { Color32::from_rgb(190, 165, 110) };
+    painter.galley_with_override_text_color(egui::pos2(b.max.x + 6.0, rect.center().y - galley.size().y / 2.0), galley, text_color);
+    resp.on_hover_text(if on { tr!("Revenir à l'affichage normal") } else { tr!("Corriger à la main ce que l'app affiche") })
+}
+
 /// Combinaison de touches dessinée comme sur un clavier : « [Ctrl] + [C] ».
 /// Montant et sa devise dans un seul champ : une bordure commune, un trait entre les deux ; la
 /// devise est une petite liste (`units`). Vrai si l'un des deux a changé.
@@ -1690,6 +1731,56 @@ pub fn text_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
 
 /// Fenêtre modale : fond assombri, clics bloqués derrière, titre doré et croix de fermeture.
 /// Renvoie le résultat du contenu et `true` si on l'a fermée (croix, Échap, clic à côté).
+/// Modale posée sur une zone de la fenêtre, comme le détail d'une case d'équipement : fond
+/// assombri sur la zone seulement, un clic à côté ou Échap la ferme. Hauteur ajustée au contenu
+/// (mesurée au dernier affichage), réduite à la zone : le contenu défile alors. Vrai en second :
+/// à fermer.
+pub fn zone_modal<R>(ui: &mut egui::Ui, zone: Rect, id: &str, title: &str, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
+    const MARGIN: f32 = 24.0;
+    let height_id = ui.id().with((id, "height"));
+    let natural: f32 = ui.data(|d| d.get_temp(height_id)).unwrap_or(300.0);
+    ui.painter_at(zone).rect_filled(zone, 0.0, Color32::from_black_alpha(170));
+    let backdrop = ui.interact(zone, ui.id().with((id, "backdrop")), Sense::click());
+    let width = width.min(zone.width() - 2.0 * MARGIN);
+    let panel = Rect::from_center_size(zone.center(), Vec2::new(width, natural.min(zone.height() - 2.0 * MARGIN)));
+    // Le panneau garde ses clics (sinon le fond les prendrait, ou l'arbre dessous).
+    ui.interact(panel, ui.id().with((id, "panel")), Sense::click());
+    let mut close = false;
+    let mut measured = natural;
+    let inner = ui
+        .allocate_new_ui(egui::UiBuilder::new().max_rect(panel), |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_rgb(12, 11, 10))
+                .stroke(Stroke::new(1.0_f32, GOLD_DIM))
+                .corner_radius(6)
+                .inner_margin(16)
+                .show(ui, |ui| {
+                    ui.set_width(width - 32.0);
+                    gold_widgets(ui);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(title).color(GOLD).size(17.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| close = text_button(ui, "✕").clicked());
+                    });
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    let top = ui.cursor().top();
+                    let out = egui::ScrollArea::vertical().id_salt(id).max_height(panel.bottom() - 16.0 - top).auto_shrink([false, true]).show(ui, add);
+                    // Un peu de marge : sans elle, un arrondi fait apparaître la barre de défilement.
+                    measured = top - panel.top() + out.content_size.y + 16.0 + 4.0;
+                    out.inner
+                })
+                .inner
+        })
+        .inner;
+    if (measured - natural).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(height_id, measured));
+        ui.ctx().request_repaint();
+    }
+    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    (inner, close || backdrop.clicked() || escape)
+}
+
 pub fn modal<R>(ctx: &egui::Context, id: &str, title: &str, closable: bool, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
     let frame = egui::Frame::window(&ctx.style())
         .fill(Color32::from_rgb(12, 11, 10))

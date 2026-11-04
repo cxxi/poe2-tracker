@@ -27,9 +27,11 @@ const HEADER_KEYS: &[&str] = &[
     "Attacks per Second:", "Reload Time:", "Block chance:", "Limited to:", "Radius:", "Charm Slots:",
     "Grants Skill:", "Note:",
 ];
-/// Consignes d'utilisation des fioles et charmes.
+/// Consignes d'utilisation des fioles, charmes et joyaux.
 const INSTRUCTIONS: &[&str] =
-    &["Right click to drink", "Used automatically", "Currently has", "Can only hold charges"];
+    &["Right click to drink", "Used automatically", "Currently has", "Can only hold charges", "Place into an allocated Jewel Socket"];
+/// Mots d'un mod, absents d'un texte d'ambiance (mots entiers : « Countless » n'est pas « less »).
+static MOD_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(increased|reduced|to|Adds|Gain|more|less|Grants)\b").unwrap());
 
 static ANNOTATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\{.*\}$").unwrap());
 static RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((-?[\d.]+)-(-?[\d.]+)\)").unwrap());
@@ -152,10 +154,7 @@ fn is_flavour(section: &[&str]) -> bool {
         return false; // section annotée par le jeu : ce sont des mods
     }
     let joined = section.join(" ");
-    !joined.chars().any(|c| c.is_ascii_digit())
-        && !["increased", "reduced", "to ", "Adds", "Gain", "more", "less", "Grants"]
-            .iter()
-            .any(|w| joined.contains(w))
+    !joined.chars().any(|c| c.is_ascii_digit()) && !MOD_WORD.is_match(&joined)
 }
 
 pub fn parse(text: &str) -> Option<Item> {
@@ -291,6 +290,38 @@ pub fn parse(text: &str) -> Option<Item> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn jewel_without_flavour_or_instructions() {
+        let it = parse("Item Class: Jewels
+Rarity: Unique
+Heart of the Well
+Diamond
+--------
+Item Level: 82
+--------
+{ Desecrated Unique Modifier }
+2(2-3)% increased Cast Speed
+--------
+Countless souls scream in agonising harmony,
+forever sinking under the weight of the newly dead.
+--------
+Place into an allocated Jewel Socket on the Passive Skill Tree. Right click to remove from the Socket.")
+        .unwrap();
+        assert_eq!(it.mods, ["2% increased Cast Speed"]);
+        let rare = parse("Item Class: Jewels
+Rarity: Rare
+Dusk Joy
+Time-Lost Sapphire
+--------
+Item Level: 43
+--------
+Small Passive Skills in Radius also grant 1(1-2)% increased Cold Damage
+--------
+Place into an allocated Jewel Socket on the Passive Skill Tree. Right click to remove from the Socket.")
+        .unwrap();
+        assert_eq!(rare.mods.len(), 1);
+    }
 
     pub const DUSK_VIGIL: &str = "Item Class: Staves
 Rarity: Unique

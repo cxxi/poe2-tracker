@@ -27,6 +27,12 @@ fn parse(text: &str) -> Vec<Release> {
     out
 }
 
+/// Les mêmes versions dans la langue affichée en ce moment (Alt maintenu compris) : la fenêtre les
+/// garde dans la langue où elle s'est ouverte.
+pub fn localized(shown: &[Release]) -> Vec<Release> {
+    releases().into_iter().filter(|r| shown.iter().any(|s| s.version == r.version)).collect()
+}
+
 /// Versions arrivées depuis `seen`, jusqu'à la version en cours comprise.
 pub fn since(seen: &str, current: &str) -> Vec<Release> {
     releases().into_iter().filter(|r| crate::updater::newer(&r.version, seen) && !crate::updater::newer(&r.version, current)).collect()

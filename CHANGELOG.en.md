@@ -1,5 +1,18 @@
 # What's new
 
+## 0.7.0
+
+- Edit mode, button at the top right of Skills, Passives and Atlas: a golden frame around the panel while it is on; switching tabs leaves it.
+- Skills: the build's gems are greyed out until you mark yours. In Edit mode, a click on a skill or a support turns it on or off; a support turned on turns its skill on. A banner invites you to do it while nothing is marked.
+- Atlas: in Edit mode, a click allocates or removes a passive. Only a passive linked to an allocated one, and never a removal that would cut the tree; green or red ring on hover, with the reason.
+- Passives: in Edit mode, the same logic, set by set. The weapon set bar becomes the brush (shared, set I, set II): a click allocates the passive in that choice, removes it, or moves it to another set.
+- Passives: the attribute of an attribute passive and the jewel of a socket are chosen in a window over the tree (jewels with their image and mods, ✕ to stop tracking one), instead of the right click. These choices are kept with the character.
+- Passives: a tree the game log does not cover from the start is declared in Edit mode, starting from the build's tree or from scratch; the log then follows the changes.
+- Character export: a Skills section, each build gem marked ✓ or ✗.
+- Manual estimate (setting "with the button"): the piece recommended by the build in a slot's detail is no longer estimated on opening, an "Estimate" button starts it. The waiting message wraps instead of overflowing.
+- The flavour text of some uniques ("Countless…") and the jewel help line are no longer read as mods.
+- Holding Alt also translates the what's new window.
+
 ## 0.6.3
 
 - Estimate detail in full screen (button at the end of the listings read title, or to the right of the item when everything fits in one column; Esc to leave): the listings take as many columns as the width allows.

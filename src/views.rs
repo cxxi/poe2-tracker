@@ -1,6 +1,6 @@
 //! Onglets du build : sorts, talents (arbre et ascendance) et uniques, pour une étape du guide.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
@@ -20,6 +20,64 @@ enum NodeState {
     ToTake,
     OffBuild,
     None,
+}
+
+/// Arbre réel du personnage (journal du jeu, corrigé à la main) et ses choix posés à la main.
+pub struct RealTree<'a> {
+    pub passives: &'a BTreeSet<String>,
+    /// Set d'armes posé à la main (0 commun) ; sans choix, celui du build.
+    pub sets: &'a std::collections::BTreeMap<String, u8>,
+    /// Attribut choisi pour un talent d'attribut.
+    pub attributes: &'a std::collections::BTreeMap<String, usize>,
+}
+
+/// Ce que demande un clic dans l'arbre en mode édition.
+pub enum TreeAction {
+    /// Poser le talent dans un set (0 commun, 1, 2), ou le retirer (`None`).
+    Set { id: String, set: Option<u8> },
+    /// Choisir l'attribut d'un talent d'attribut pris ; `removable` : il peut être retiré.
+    Attribute { id: String, removable: bool },
+    /// Choisir le joyau serti dans une châsse prise.
+    Jewel { id: String, removable: bool },
+    /// Arbre réel inconnu : partir de celui du build à l'étape affichée, ou de rien.
+    StartFromBuild,
+    StartEmpty,
+}
+
+/// Talents pris reliés à un départ (`roots`) par des talents actifs dans le set `k` : communs
+/// (0) ou de ce set.
+fn rooted_in(nb: &[Vec<usize>], roots: &[usize], held: &HashMap<usize, u8>, k: u8) -> HashSet<usize> {
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut todo: Vec<usize> = roots.to_vec();
+    while let Some(i) = todo.pop() {
+        for &j in &nb[i] {
+            if held.get(&j).is_some_and(|s| *s == 0 || *s == k) && seen.insert(j) {
+                todo.push(j);
+            }
+        }
+    }
+    seen
+}
+
+/// En mode édition, pourquoi le talent `i` ne peut pas passer à `after` (posé dans ce set, ou
+/// retiré) ; `None` : il le peut. Dans chaque set, ce qui était relié à un départ le reste, et le
+/// talent posé y est relié.
+fn edit_blocked(nb: &[Vec<usize>], roots: &[usize], held: &HashMap<usize, u8>, i: usize, after: Option<u8>) -> Option<&'static str> {
+    let mut next = held.clone();
+    match after {
+        Some(s) => next.insert(i, s),
+        None => next.remove(&i),
+    };
+    for k in [1, 2] {
+        let (before, now) = (rooted_in(nb, roots, held, k), rooted_in(nb, roots, &next, k));
+        if before.iter().any(|j| *j != i && !now.contains(j)) {
+            return Some(if after.is_none() { tr!("Le retirer couperait l'arbre") } else { tr!("Le changer de set couperait l'arbre") });
+        }
+        if after.is_some_and(|s| s == 0 || s == k) && !now.contains(&i) {
+            return Some(tr!("Pas relié à un talent pris (du même set)"));
+        }
+    }
+    None
 }
 
 /// Cercle en pointillé (talent à prendre).
@@ -124,7 +182,41 @@ pub fn gem_tooltip(ui: &mut egui::Ui, name: &str, note: &str, info: Option<&GemI
     }
 }
 
-pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, assets: &mut Assets, infos: Option<&HashMap<String, GemInfo>>) {
+/// Aptitudes de l'étape. Les gemmes que le personnage n'a pas cochées (`owned`, clés de
+/// `gear::gem_key`) sont grisées ; en mode édition, un clic sur un sort ou un soutien le coche ou
+/// le décoche : la clé cliquée est rendue.
+pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, assets: &mut Assets, infos: Option<&HashMap<String, GemInfo>>, owned: &BTreeSet<String>, edit: bool) -> Option<String> {
+    let mut toggled = None;
+    // Rien de coché : invitation à le faire en mode édition.
+    if owned.is_empty() {
+        egui::Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(60, 48, 26, 200))
+            .stroke(Stroke::new(1.0_f32, GOLD))
+            .corner_radius(4)
+            .inner_margin(10)
+            .outer_margin(egui::Margin { bottom: 6, ..Default::default() })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let text = if edit {
+                    tr!("Clique les aptitudes et les soutiens que tu as vraiment : ils s'allument. Un second clic les éteint.")
+                } else {
+                    tr!("Les gemmes du build sont grisées tant que tu n'as pas indiqué les tiennes : passe en mode Édition (en haut à droite) et clique celles que tu as.")
+                };
+                ui.label(RichText::new(text).color(GOLD));
+            });
+    }
+    // Cliquable en mode édition : la main au survol. Hors édition, les noms restent des textes
+    // sélectionnables qui répondent au clic : chaque clic est donc filtré par `edit`.
+    let clickable = |resp: egui::Response| -> egui::Response {
+        if !edit {
+            return resp;
+        }
+        let resp = resp.interact(Sense::click());
+        if resp.hovered() {
+            ui_cursor(&resp);
+        }
+        resp
+    };
     let before: HashSet<&str> = prev.map(|p| p.skills.iter().map(|s| s.name.as_str()).collect()).unwrap_or_default();
     // Supports sur une ligne si ceux de chaque sort tiennent dans la largeur, sinon les uns sous
     // les autres pour tous les sorts : jamais un mélange des deux.
@@ -147,11 +239,20 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let info = infos.and_then(|m| m.get(&skill.name));
+                let skill_key = crate::gear::gem_key(&skill.name, None);
+                let has = owned.contains(&skill_key);
                 ui.horizontal(|ui| {
-                    icon(ui, assets, &skill.name, 44.0).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
+                    let r = clickable(icon(ui, assets, &skill.name, 44.0, !has)).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
+                    if edit && r.clicked() {
+                        toggled = Some(skill_key.clone());
+                    }
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(crate::gametext::name(&skill.name)).color(GOLD).size(16.0).strong()).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
+                            let color = if has { GOLD } else { MISSING_GEM };
+                            let r = clickable(ui.label(RichText::new(crate::gametext::name(&skill.name)).color(color).size(16.0).strong())).on_hover_ui(|ui| gem_tooltip(ui, &skill.name, "", info));
+                            if edit && r.clicked() {
+                                toggled = Some(skill_key.clone());
+                            }
                             if prev.is_some() && !before.contains(skill.name.as_str()) {
                                 ui.label(RichText::new(tr!("nouveau")).color(GREEN).small().strong());
                             }
@@ -176,15 +277,26 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
                             for (name, lvl) in &skill.supports {
                                 let info = infos.and_then(|m| m.get(name));
                                 let note = tr!("support dès le niveau {lvl}", lvl);
+                                let key = crate::gear::gem_key(&skill.name, Some(name));
+                                let has = owned.contains(&key);
                                 ui.horizontal(|ui| {
-                                    icon(ui, assets, name, 22.0).on_hover_ui(|ui| gem_tooltip(ui, name, &note, info));
+                                    let r = clickable(icon(ui, assets, name, 22.0, !has)).on_hover_ui(|ui| gem_tooltip(ui, name, &note, info));
+                                    if edit && r.clicked() {
+                                        toggled = Some(key.clone());
+                                    }
                                     // Gemme spéciale (lignée…) : en couleur, pour la repérer.
                                     let special = info.is_some_and(|i| i.special());
                                     let mut t = RichText::new(crate::gametext::name(name)).color(if special { SPECIAL_GEM } else { Color32::LIGHT_GRAY });
                                     if *lvl > level {
                                         t = t.color(Color32::GRAY).italics();
                                     }
-                                    ui.label(t).on_hover_ui(|ui| gem_tooltip(ui, name, &note, info));
+                                    if !has {
+                                        t = t.color(MISSING_GEM);
+                                    }
+                                    let r = clickable(ui.label(t)).on_hover_ui(|ui| gem_tooltip(ui, name, &note, info));
+                                    if edit && r.clicked() {
+                                        toggled = Some(key.clone());
+                                    }
                                     // Niveau de l'Uncut Support Gem à tailler.
                                     if let Some(n) = info.map(|i| i.uncut_level).filter(|n| *n > 0) {
                                         ui.label(RichText::new(tr!("niv. {level}", level = n)).color(Color32::GRAY).small())
@@ -206,6 +318,18 @@ pub fn skills(ui: &mut egui::Ui, step: &Step, prev: Option<&Step>, level: u32, a
             ui.label(RichText::new(tr!("Abandonnés à cette étape : {gems}", gems = dropped.iter().map(|g| crate::gametext::name(g)).collect::<Vec<_>>().join(", "))).color(Color32::GRAY));
         }
     }
+    toggled
+}
+
+/// Anneau du talent survolé en mode édition : le clic le change, ou pas.
+const EDIT_OK: Color32 = Color32::from_rgb(110, 200, 110);
+const EDIT_BLOCKED: Color32 = Color32::from_rgb(220, 90, 80);
+
+/// Texte d'une gemme du build que le personnage n'a pas (pas cochée).
+const MISSING_GEM: Color32 = Color32::from_gray(105);
+
+fn ui_cursor(resp: &egui::Response) {
+    resp.ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
 }
 
 /// Set d'armes où placer un sort, dans la couleur du set (celle de l'onglet Talents).
@@ -226,12 +350,14 @@ fn set_badge(ui: &mut egui::Ui, set: u8) {
         .on_hover_text(hint);
 }
 
-fn icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32) -> egui::Response {
+/// Icône d'une gemme, assombrie (`dim`) quand le personnage ne l'a pas.
+fn icon(ui: &mut egui::Ui, assets: &mut Assets, name: &str, size: f32, dim: bool) -> egui::Response {
     match assets.texture_by_name(name) {
         Some(tex) => {
             let s = tex.size_vec2();
             let k = (size / s.x).min(size / s.y);
-            ui.add_sized([size, size], egui::Image::new((tex.id(), s * k)).sense(Sense::hover()))
+            let tint = if dim { Color32::from_gray(70) } else { Color32::WHITE };
+            ui.add_sized([size, size], egui::Image::new((tex.id(), s * k)).tint(tint).sense(Sense::hover()))
         }
         None => ui.allocate_exact_size(Vec2::splat(size), Sense::hover()).1,
     }
@@ -287,6 +413,11 @@ const ATTRIBUTES: [(&str, Color32, &str); 3] = [
     (tkey!("Dextérité"), Color32::from_rgb(95, 185, 85), "Art/2DArt/SkillIcons/passives/plusdexterity.dds"),
     (tkey!("Intelligence"), Color32::from_rgb(85, 135, 235), "Art/2DArt/SkillIcons/passives/plusintelligence.dds"),
 ];
+
+/// Couleur d'un attribut (0 Force, 1 Dextérité, 2 Intelligence), celle de l'arbre.
+pub fn attribute_color(k: usize) -> Color32 {
+    ATTRIBUTES[k.min(2)].1
+}
 
 /// Points d'un arc de cercle de `a` à `b` autour de `center`, par le plus court chemin.
 fn arc(a: Pos2, b: Pos2, center: Pos2, segments: usize) -> Vec<Pos2> {
@@ -459,12 +590,6 @@ impl TreeView {
         self.overrides.get(id).copied()
     }
 
-    fn save_overrides(&self) {
-        if let Some(path) = &self.overrides_file {
-            let _ = std::fs::write(path, serde_json::to_string_pretty(&self.overrides).unwrap_or_default());
-        }
-    }
-
     /// Cadre la vue sur les nœuds du build (ou tout l'arbre), avec un minimum de contexte.
     fn fit(&mut self, rect: Rect, ids: &HashSet<usize>) {
         let pts: Vec<Pos2> = if ids.is_empty() { self.nodes.iter().map(|n| n.pos).collect() } else { ids.iter().map(|i| self.nodes[*i].pos).collect() };
@@ -489,9 +614,10 @@ impl TreeView {
         key: String,
         set: u8,
         jewels: &[TreeJewel],
-        mine: Option<&std::collections::BTreeSet<String>>,
+        mine: Option<RealTree>,
         worn_jewels: &[WornJewel],
-    ) -> Option<(String, Option<usize>)> {
+        edit: Option<u8>,
+    ) -> Option<TreeAction> {
         self.build(catalog);
         if self.nodes.is_empty() {
             ui.put(rect, egui::Label::new(RichText::new(tr!("Arbre en cours de chargement…")).color(Color32::GRAY)));
@@ -523,11 +649,19 @@ impl TreeView {
         taken.extend(starts);
         // Arbre réel (journal du jeu) : ses talents, départs compris, face à ceux du build.
         let in_build: HashSet<usize> = step.passives.iter().filter_map(|id| self.index.get(id).copied()).chain(taken.iter().copied()).collect();
-        let real: Option<HashSet<usize>> = mine.map(|m| {
-            // Talent que le build met sur l'autre set : pris pour ce set-là (le journal ne le dit pas).
+        // Set de chaque talent pris : posé à la main, sinon celui du build (le journal ne le dit pas).
+        let real_set = |id: &str| mine.as_ref().and_then(|m| m.sets.get(id).copied()).or_else(|| step.passive_sets.get(id).copied()).unwrap_or(0);
+        // Talents pris (hors départs) et leur set, pour les règles du mode édition.
+        let held: HashMap<usize, u8> = mine
+            .as_ref()
+            .map(|m| m.passives.iter().filter_map(|id| Some((*self.index.get(id)?, real_set(id)))).filter(|(i, _)| self.nodes[*i].kind < 4 && !hidden(&self.nodes[*i])).collect())
+            .unwrap_or_default();
+        let real: Option<HashSet<usize>> = mine.as_ref().map(|m| {
+            // Talent d'un seul set : pris pour ce set-là seulement.
             let mut r: HashSet<usize> = m
+                .passives
                 .iter()
-                .filter(|id| step.passive_sets.get(*id).is_none_or(|n| *n == set))
+                .filter(|id| matches!(real_set(id), 0) || real_set(id) == set)
                 .filter_map(|id| self.index.get(id).copied())
                 .filter(|i| !hidden(&self.nodes[*i]))
                 .collect();
@@ -578,12 +712,11 @@ impl TreeView {
                 self.zoom = new_zoom;
             }
         }
-        if resp.double_clicked() {
-            self.fit(rect, &taken);
-        }
+        let refit = resp.double_clicked() && edit.is_none();
         let main_attr = catalog.main_attribute(step);
         let overrides = &self.overrides;
-        let attr_of = |n: &Node| overrides.get(&n.id).copied().unwrap_or(main_attr);
+        // Attribut d'un talent : choisi pour l'arbre réel, sinon pour le build, sinon supposé.
+        let attr_of = |n: &Node| mine.as_ref().and_then(|m| m.attributes.get(&n.id).copied()).or_else(|| overrides.get(&n.id).copied()).unwrap_or(main_attr);
         // Avec l'arbre réel, les trois états remplacent le vert des nouveautés de l'étape.
         let is_fresh = |i: usize| real.is_none() && prev.is_some() && taken.contains(&i) && !before.contains(&i) && self.nodes[i].kind < 4;
         let lit = |i: usize| match &real {
@@ -741,7 +874,12 @@ impl TreeView {
                 painter.circle_stroke(c, b, Stroke::new(1.0_f32, Color32::BLACK));
                 painter.text(c, egui::Align2::CENTER_CENTER, mark, egui::FontId::proportional(b * 1.5), Color32::WHITE);
             }
-            if let Some(&n) = set_of.get(&i) {
+            // Anneau du set : celui de ton talent pris, sinon celui du build.
+            let ring = match held.get(&i) {
+                Some(&s) => Some(s).filter(|s| *s > 0),
+                None => set_of.get(&i).copied(),
+            };
+            if let Some(n) = ring {
                 let c = crate::ui::SET_COLORS[n as usize - 1];
                 if n == set {
                     painter.circle_stroke(p, r + 3.0, Stroke::new(2.0_f32, c));
@@ -753,8 +891,31 @@ impl TreeView {
                 hovered = Some(i);
             }
         }
-        let mut cycle: Option<String> = None;
-        let mut socket_pick: Option<(String, Option<usize>)> = None;
+        let mut action: Option<TreeAction> = None;
+        // Départs : celui de la classe relié à ton arbre (ou au build), et celui de l'ascendance.
+        let roots: Vec<usize> = if edit.is_some() {
+            let linked = |set: &dyn Fn(usize) -> bool| -> Vec<usize> { (0..self.nodes.len()).filter(|i| self.nodes[*i].kind == 4 && self.nodes[*i].links.iter().any(|(j, _)| set(*j))).collect() };
+            let mut r = linked(&|j| held.contains_key(&j));
+            if r.is_empty() {
+                r = linked(&|j| taken.contains(&j));
+            }
+            r.extend((0..self.nodes.len()).filter(|i| self.nodes[*i].kind == 5 && !hidden(&self.nodes[*i])));
+            r
+        } else {
+            Vec::new()
+        };
+        let nb: Vec<Vec<usize>> = if edit.is_some() {
+            let mut nb = vec![Vec::new(); self.nodes.len()];
+            for (i, n) in self.nodes.iter().enumerate() {
+                for &(j, _) in &n.links {
+                    nb[i].push(j);
+                    nb[j].push(i);
+                }
+            }
+            nb
+        } else {
+            Vec::new()
+        };
         if let Some(i) = hovered {
             let n = &self.nodes[i];
             let status = match state(i) {
@@ -763,39 +924,78 @@ impl TreeView {
                 NodeState::OffBuild => Some(tr!("Pris, hors build")),
                 NodeState::None => None,
             };
-            // Châsse prise de ton arbre : le joyau suivi qu'elle contient, à changer au clic droit.
+            // Mode édition : ce que fait le clic, ou pourquoi il ne fait rien.
+            let mut edit_note: Option<String> = None;
+            let mut ring = Color32::WHITE;
+            if let (Some(paint), Some(_)) = (edit, &real) {
+                let cur = held.get(&i).copied();
+                let pick = (n.attribute || n.kind == 3) && cur == Some(paint);
+                let after = match cur {
+                    Some(s) if s == paint => None,
+                    _ => Some(paint),
+                };
+                let block = if matches!(n.kind, 4 | 5) {
+                    Some(tr!("Départ : pris d'office"))
+                } else if pick {
+                    None
+                } else {
+                    edit_blocked(&nb, &roots, &held, i, after)
+                };
+                let set_name = |s: u8| match s {
+                    1 => tr!("set I"),
+                    2 => tr!("set II"),
+                    _ => tr!("commun"),
+                };
+                edit_note = Some(match (block, pick, cur) {
+                    (Some(why), _, _) => why.to_string(),
+                    (None, true, _) if n.attribute => tr!("Clic : choisir l'attribut").to_string(),
+                    (None, true, _) => tr!("Clic : choisir le joyau serti").to_string(),
+                    (None, false, None) => tr!("Clic : prendre ({set})", set = set_name(paint)),
+                    (None, false, Some(s)) if s == paint => tr!("Clic : retirer").to_string(),
+                    (None, false, Some(s)) => tr!("Clic : passer de {from} à {to}", from = set_name(s), to = set_name(paint)),
+                });
+                ring = if block.is_none() { EDIT_OK } else { EDIT_BLOCKED };
+                ui.ctx().set_cursor_icon(if block.is_none() { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed });
+                if block.is_none() && resp.clicked() {
+                    let removable = || edit_blocked(&nb, &roots, &held, i, None).is_none();
+                    action = Some(match pick {
+                        true if n.attribute => TreeAction::Attribute { id: n.id.clone(), removable: removable() },
+                        true => TreeAction::Jewel { id: n.id.clone(), removable: removable() },
+                        false => TreeAction::Set { id: n.id.clone(), set: after },
+                    });
+                }
+            }
+            // Châsse prise de ton arbre : le joyau suivi qu'elle contient (choisi en mode édition).
             let here = worn_jewels.iter().position(|w| w.socket.as_deref() == Some(n.id.as_str()));
             let socket_note = (n.kind == 3 && real.as_ref().is_some_and(|r| r.contains(&i))).then(|| {
-                if resp.secondary_clicked() {
-                    socket_pick = Some((n.id.clone(), here));
-                }
-                // L'ordre du clic droit : chaque joyau suivi, puis aucun.
-                let order: Vec<&str> = worn_jewels.iter().map(|w| w.title.as_str()).chain([tr!("aucun")]).collect();
                 let now = match here {
                     Some(k) => tr!("Ton joyau ici : {name}", name = worn_jewels[k].title),
                     None => tr!("Aucun joyau suivi ici").to_string(),
                 };
-                format!("{now}\n{}", tr!("Clic droit pour alterner : {order}", order = order.join(" → ")))
+                if edit.is_some() { now } else { format!("{now}\n{}", tr!("Mode Édition pour choisir le joyau")) }
             });
             let status: Option<String> = match (status, socket_note) {
                 (Some(s), Some(n)) => Some(format!("{s} · {n}")),
                 (s, n) => s.map(str::to_string).or(n),
             };
             let status = status.as_deref();
-            let with_status = |note: Option<String>| match (status, note) {
-                (Some(s), Some(n)) => Some(format!("{s} · {n}")),
-                (s, n) => s.map(str::to_string).or(n),
+            let with_status = |note: Option<String>| {
+                let note = match (status, note) {
+                    (Some(s), Some(n)) => Some(format!("{s} · {n}")),
+                    (s, n) => s.map(str::to_string).or(n),
+                };
+                match (note, &edit_note) {
+                    (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+                    (a, b) => a.or(b.clone()),
+                }
             };
             let r = (world_radius(n.kind) * self.zoom).clamp(1.5, 40.0);
-            painter.circle_stroke(to_screen(n.pos), r + 4.0, Stroke::new(1.5_f32, Color32::WHITE));
+            painter.circle_stroke(to_screen(n.pos), r + 4.0, Stroke::new(if edit.is_some() { 2.5_f32 } else { 1.5 }, ring));
             if n.attribute && (taken.contains(&i) || lit(i)) {
-                if resp.secondary_clicked() {
-                    cycle = Some(n.id.clone());
-                }
                 let (name, c, _) = ATTRIBUTES[attr_of(n)];
-                let chosen = overrides.contains_key(&n.id);
+                let chosen = mine.as_ref().is_some_and(|m| m.attributes.contains_key(&n.id)) || overrides.contains_key(&n.id);
                 let why = if chosen { tr!("ton choix") } else { tr!("choix supposé d'après les gemmes du build") };
-                let note = with_status(Some(tr!("{why} — clic droit pour changer", why)));
+                let note = with_status(Some(if edit.is_some() || !lit(i) { why.to_string() } else { tr!("{why} — mode Édition pour changer", why) }));
                 resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &format!("+5 {}", crate::i18n::tr(name)), c, None, &[], note.as_deref()));
             } else if let Some(w) = here.map(|k| &worn_jewels[k]) {
                 // Ton joyau : sa fiche ; le conseil du build pour cette châsse en note.
@@ -816,11 +1016,6 @@ impl TreeView {
                 resp.on_hover_ui_at_pointer(|ui| crate::ui::node_tip(ui, None, &p.name, GOLD, None, &p.stats, note.as_deref()));
             }
         }
-        if let Some(id) = cycle {
-            let next = (self.overrides.get(&id).copied().unwrap_or(main_attr) + 1) % 3;
-            self.overrides.insert(id, next);
-            self.save_overrides();
-        }
         // Légende sur fond, pour rester lisible au-dessus des nœuds.
         let nodes = if per_set == [0, 0] {
             tr!("{counted} nœuds à cette étape", counted)
@@ -828,11 +1023,15 @@ impl TreeView {
             let common = step.passives.len() - per_set[0] - per_set[1];
             tr!("{common} communs + {one} set I + {two} set II (set {shown} affiché)", common, one = per_set[0], two = per_set[1], shown = if set == 2 { "II" } else { "I" })
         };
-        let legend = tr!(
-            "{nodes}{fresh} · glisser : déplacer · molette : zoom · double-clic : recadrer",
-            nodes,
-            fresh = if prev.is_some() && real.is_none() { tr!(", dont {n} nouveaux en vert", n = fresh_count) } else { String::new() }
-        );
+        let legend = if edit.is_some() {
+            tr!("Mode édition · clic : prendre, retirer ou changer de set (celui choisi au-dessus) · glisser : déplacer · molette : zoom").to_string()
+        } else {
+            tr!(
+                "{nodes}{fresh} · glisser : déplacer · molette : zoom · double-clic : recadrer",
+                nodes,
+                fresh = if prev.is_some() && real.is_none() { tr!(", dont {n} nouveaux en vert", n = fresh_count) } else { String::new() }
+            )
+        };
         let galley = painter.layout_no_wrap(legend, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);
         let pos = rect.left_top() + Vec2::new(8.0, 8.0);
         painter.rect_filled(Rect::from_min_size(pos, galley.size()).expand(5.0), 3.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
@@ -874,7 +1073,27 @@ impl TreeView {
             }
             None => chip(tr!("Ton arbre réel n'est pas connu (journal du jeu incomplet) : arbre du build").into(), Color32::GRAY, None),
         }
-        socket_pick
+        // Arbre inconnu en mode édition : d'où partir, à corriger ensuite talent par talent.
+        if edit.is_some() && real.is_none() {
+            let y = below + 30.0;
+            let mut x = pos.x;
+            for (text, start) in [(tr!("Partir de l'arbre du build (étape affichée)"), TreeAction::StartFromBuild), (tr!("Partir de zéro"), TreeAction::StartEmpty)] {
+                let g = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(14.0), GOLD);
+                let r = Rect::from_min_size(Pos2::new(x, y), g.size()).expand2(Vec2::new(10.0, 6.0));
+                let resp = ui.interact(r, ui.id().with(("tree_start", x as i32)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                let fill = if resp.hovered() { Color32::from_rgba_unmultiplied(70, 56, 30, 240) } else { Color32::from_rgba_unmultiplied(40, 32, 18, 230) };
+                painter.rect(r, 4.0, fill, Stroke::new(1.0_f32, GOLD), egui::StrokeKind::Inside);
+                painter.galley(r.min + Vec2::new(10.0, 6.0), g, GOLD);
+                x = r.max.x + 10.0;
+                if resp.clicked() {
+                    action = Some(start);
+                }
+            }
+        }
+        if refit {
+            self.fit(rect, &taken);
+        }
+        action
     }
 }
 
@@ -1194,4 +1413,32 @@ pub fn stats(
             }
         });
     remove_jewel
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_edit_rules_per_weapon_set() {
+        // Départ 0 — 1 — 2 — 3, et 2 — 4.
+        let mut nb = vec![Vec::new(); 5];
+        for (a, b) in [(0, 1), (1, 2), (2, 3), (2, 4)] {
+            nb[a].push(b);
+            nb[b].push(a);
+        }
+        let roots = [0];
+        // 1 commun, 2 en set I.
+        let held: HashMap<usize, u8> = [(1, 0), (2, 1)].into();
+        // Au bout de 2 : en set I oui, en set II non (2 n'est pas pris pour le set II), commun non plus.
+        assert!(edit_blocked(&nb, &roots, &held, 3, Some(1)).is_none());
+        assert!(edit_blocked(&nb, &roots, &held, 3, Some(2)).is_some());
+        assert!(edit_blocked(&nb, &roots, &held, 3, Some(0)).is_some());
+        // 2 passe en commun : permis ; 1 en set II couperait 2 (set I) du départ.
+        assert!(edit_blocked(&nb, &roots, &held, 2, Some(0)).is_none());
+        assert!(edit_blocked(&nb, &roots, &held, 1, Some(2)).is_some());
+        // Retirer : le bout oui, le milieu non.
+        assert!(edit_blocked(&nb, &roots, &held, 2, None).is_none());
+        assert!(edit_blocked(&nb, &roots, &held, 1, None).is_some());
+    }
 }

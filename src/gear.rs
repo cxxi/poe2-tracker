@@ -2,7 +2,7 @@
 //!
 //! On ne lit pas l'équipement dans le jeu : tu enregistres chaque pièce avec Ctrl+Alt+C.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -157,6 +157,10 @@ pub struct Gear {
     /// vide pour une châsse déclarée sans joyau suivi.
     #[serde(default)]
     pub jewel_sockets: BTreeMap<String, String>,
+    /// Gemmes que le personnage a vraiment, cochées à la main dans les aptitudes : le nom du sort,
+    /// ou « sort|soutien » pour un soutien (posé dans ce sort). Voir `gem_key`.
+    #[serde(default)]
+    pub gems: BTreeSet<String>,
     #[serde(skip)]
     path: PathBuf,
     /// Set d'armes affiché (1 ou 2) : Ctrl+Alt+C y range les armes, Ctrl+C les y compare.
@@ -166,6 +170,14 @@ pub struct Gear {
     /// Emplacements de charme ouverts par la campagne (récompense cochée sur la route).
     #[serde(skip)]
     pub quest_charm_slots: usize,
+}
+
+/// Clé d'une gemme cochée : le sort seul, ou le soutien posé dans ce sort.
+pub fn gem_key(skill: &str, support: Option<&str>) -> String {
+    match support {
+        Some(s) => format!("{skill}|{s}"),
+        None => skill.to_string(),
+    }
 }
 
 impl Gear {
@@ -184,6 +196,18 @@ impl Gear {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(&self.path, serde_json::to_string_pretty(self).unwrap())
+    }
+
+    /// Coche ou décoche une gemme (clé de `gem_key`). Un soutien coché coche aussi son sort : il y
+    /// est posé.
+    pub fn toggle_gem(&mut self, key: String) {
+        if self.gems.remove(&key) {
+            return;
+        }
+        if let Some((skill, _)) = key.split_once('|') {
+            self.gems.insert(skill.to_string());
+        }
+        self.gems.insert(key);
     }
 
     pub fn item(&self, slot: Slot) -> Option<Item> {
@@ -237,11 +261,10 @@ impl Gear {
         }
     }
 
-    /// Joyau suivant pour la châsse `socket` (clic droit dans l'arbre), après `shown` qui y est
-    /// affiché ; après le dernier, la châsse est déclarée sans joyau suivi.
-    pub fn cycle_jewel(&mut self, socket: &str, shown: Option<usize>) {
-        let next = shown.map_or(0, |i| i + 1);
-        let raw = self.jewels.get(next).cloned().unwrap_or_default();
+    /// Joyau suivi `pick` serti dans la châsse `socket` (choisi en mode édition dans l'arbre) ;
+    /// `None` : la châsse est déclarée sans joyau suivi.
+    pub fn set_jewel(&mut self, socket: &str, pick: Option<usize>) {
+        let raw = pick.and_then(|i| self.jewels.get(i)).cloned().unwrap_or_default();
         // Un joyau n'est que dans une châsse.
         self.jewel_sockets.retain(|s, r| s == socket || raw.is_empty() || *r != raw);
         self.jewel_sockets.insert(socket.to_string(), raw);
@@ -359,7 +382,7 @@ mod tests {
     }
 
     fn gear() -> Gear {
-        Gear { slots: BTreeMap::new(), jewels: vec![], jewel_sockets: BTreeMap::new(), path: PathBuf::new(), set: 1, quest_charm_slots: 0 }
+        Gear { slots: BTreeMap::new(), jewels: vec![], jewel_sockets: BTreeMap::new(), gems: BTreeSet::new(), path: PathBuf::new(), set: 1, quest_charm_slots: 0 }
     }
 
     #[test]
@@ -384,9 +407,9 @@ mod tests {
         g.equip(&other);
         let free = ["s1".to_string(), "s2".to_string()];
         assert_eq!(g.jewel_places(&[(1, "s2".into())], &free), [Some("s1".into()), Some("s2".into())]);
-        g.cycle_jewel("s1", Some(0));
+        g.set_jewel("s1", Some(1));
         assert_eq!(g.jewel_places(&[], &free), [Some("s2".into()), Some("s1".into())]);
-        g.cycle_jewel("s1", Some(1));
+        g.set_jewel("s1", None);
         assert_eq!(g.jewel_places(&[], &free), [Some("s2".into()), None]);
         g.remove_jewel(0);
         assert_eq!(g.jewels.len(), 1);
@@ -422,6 +445,18 @@ mod tests {
         assert!(!missing.contains(&Slot::Offhand));
         assert!(missing.contains(&Slot::Charm1));
         assert!(!missing.contains(&Slot::Charm2));
+    }
+
+    #[test]
+    fn gems_toggle_by_skill_and_support() {
+        let mut g = Gear::default();
+        // Le soutien allume son sort.
+        g.toggle_gem(gem_key("Spark", Some("Pierce")));
+        assert!(g.gems.contains("Spark") && g.gems.contains("Spark|Pierce"));
+        // Le même soutien dans un autre sort est une autre gemme.
+        assert!(!g.gems.contains(&gem_key("Frost Bomb", Some("Pierce"))));
+        g.toggle_gem(gem_key("Spark", None));
+        assert_eq!(g.gems.iter().collect::<Vec<_>>(), ["Spark|Pierce"]);
     }
 
     #[test]

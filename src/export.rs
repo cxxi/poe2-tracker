@@ -11,6 +11,7 @@ use crate::stats::{Group, Sheet, Total, RES_CAP};
 pub struct Sections {
     pub gear: bool,
     pub stats: bool,
+    pub skills: bool,
     pub passives: bool,
     pub jewels: bool,
     pub atlas: bool,
@@ -21,16 +22,17 @@ pub struct Sections {
 impl Default for Sections {
     fn default() -> Self {
         // Les maps, la section la plus longue, seulement à la demande.
-        Sections { gear: true, stats: true, passives: true, jewels: true, atlas: true, maps: false, quests: true }
+        Sections { gear: true, stats: true, skills: true, passives: true, jewels: true, atlas: true, maps: false, quests: true }
     }
 }
 
 impl Sections {
     /// Chaque section, son nom et ce qu'elle contient, pour les cases de la fenêtre.
-    pub fn items(&mut self) -> [(&mut bool, &'static str, &'static str); 7] {
+    pub fn items(&mut self) -> [(&mut bool, &'static str, &'static str); 8] {
         [
             (&mut self.gear, tr!("Équipement"), tr!("chaque pièce suivie, telle que copiée en jeu")),
             (&mut self.stats, tr!("Caractéristiques"), tr!("totaux et leurs sources, porté face au build")),
+            (&mut self.skills, tr!("Aptitudes"), tr!("gemmes du build, cochées ou non")),
             (&mut self.passives, tr!("Talents"), tr!("ton arbre réel et l'écart avec le build")),
             (&mut self.jewels, tr!("Joyaux"), tr!("joyaux suivis et leur châsse")),
             (&mut self.atlas, tr!("Atlas"), tr!("passifs de l'Atlas pris")),

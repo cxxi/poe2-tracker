@@ -1,5 +1,18 @@
 # Nouveautés
 
+## 0.7.0
+
+- Mode Édition, bouton en haut à droite des Aptitudes, des Talents et de l'Atlas : un cadre doré autour du panneau tant qu'il est actif ; changer d'onglet le quitte.
+- Aptitudes : les gemmes du build sont grisées tant que tu n'as pas coché les tiennes. En mode Édition, un clic sur un sort ou un soutien l'allume ou l'éteint ; un soutien allumé allume son sort. Un bandeau invite à le faire tant que rien n'est coché.
+- Atlas : en mode Édition, un clic pose ou retire un passif. Seulement un passif relié à un passif posé, et jamais un retrait qui couperait l'arbre ; anneau vert ou rouge au survol, avec la raison.
+- Talents : en mode Édition, même logique, set par set. La barre des sets devient le pinceau (commun, set I, set II) : un clic prend le talent dans ce choix, le retire, ou le change de set.
+- Talents : l'attribut d'un talent d'attribut et le joyau d'une châsse se choisissent dans une fenêtre posée sur l'arbre (joyaux avec leur image et leurs mods, ✕ pour ne plus en suivre un), à la place du clic droit. Ces choix sont gardés avec le personnage.
+- Talents : un arbre que le journal ne couvre pas depuis le début se déclare en mode Édition, en partant de l'arbre du build ou de zéro ; le journal suit ensuite les changements.
+- Export du personnage : une section Aptitudes, chaque gemme du build marquée ✓ ou ✗.
+- Estimation manuelle (réglage « avec le bouton ») : la pièce recommandée par le build dans le détail d'une case n'est plus estimée à l'ouverture, un bouton « Estimer » la lance. Le message d'attente passe à la ligne au lieu de déborder.
+- Le texte d'ambiance de certains uniques (« Countless… ») et l'aide des joyaux ne sont plus lus comme des mods.
+- Maintenir Alt traduit aussi la fenêtre des nouveautés.
+
 ## 0.6.3
 
 - Détail de l'estimation en plein écran (bouton au bout du titre des annonces lues, ou à droite de la pièce quand tout tient sur une colonne ; Échap pour sortir) : les annonces s'affichent sur autant de colonnes que la largeur en tient.
