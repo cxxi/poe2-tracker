@@ -196,7 +196,7 @@ fn load_index(cache: &Path, league: &str, force: bool) -> Option<ArtIndex> {
             Some(idx.finish())
         }
         Err(e) => {
-            eprintln!("index des illustrations indisponible : {e}");
+            crate::log_warn!("index des illustrations indisponible : {e}");
             // Hors ligne : on reprend l'ancien index même périmé.
             std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<ArtIndex>(&s).ok()).map(ArtIndex::finish)
         }

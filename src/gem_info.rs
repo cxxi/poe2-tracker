@@ -139,7 +139,7 @@ impl GemInfos {
                         let _ = std::fs::write(&path, serde_json::to_string(&c).unwrap_or_default());
                         *out.lock().unwrap() = Some(Arc::new(c));
                     }
-                    Err(e) => eprintln!("catalogue indisponible : {e}"),
+                    Err(e) => crate::log_warn!("catalogue indisponible : {e}"),
                 }
             }
         });

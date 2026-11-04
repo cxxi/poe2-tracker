@@ -349,7 +349,7 @@ impl Prices {
                         let _ = std::fs::write(&path, serde_json::to_string(&d).unwrap_or_default());
                         *shared.lock().unwrap() = Some(d);
                     }
-                    Err(e) => eprintln!("prix poe.ninja indisponibles : {e}"),
+                    Err(e) => crate::log_warn!("prix poe.ninja indisponibles : {e}"),
                 }
                 busy.store(false, Ordering::Relaxed);
             }

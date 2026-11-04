@@ -102,7 +102,7 @@ pub fn start(ctx: eframe::egui::Context, cache: PathBuf, game_dir: PathBuf) {
             MEMO.lock().unwrap().clear();
             ctx.request_repaint();
         }
-        Err(e) => eprintln!("textes du jeu en français indisponibles : {e}"),
+        Err(e) => crate::log_warn!("textes du jeu en français indisponibles : {e}"),
     });
 }
 
@@ -348,7 +348,7 @@ fn build(index: &bundles::Index, key: String) -> Data {
         let read = |p: String| index.read(&p).ok().and_then(Dat::new);
         let (Some(en), Some(fr)) = (read(format!("data/balance/{table}.datc64")), read(format!("data/balance/french/{table}.datc64"))) else { continue };
         if en.rows != fr.rows || !(0..en.rows).any(|r| en.string(r, *col_en) == *sample) {
-            eprintln!("{table} : colonne des noms introuvable");
+            crate::log_warn!("{table} : colonne des noms introuvable");
             continue;
         }
         for r in 0..en.rows {

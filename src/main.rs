@@ -7,6 +7,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[macro_use]
+mod applog;
+#[macro_use]
 mod i18n;
 mod art;
 mod atlas;
@@ -27,6 +29,7 @@ mod guide;
 mod item;
 mod leagues;
 mod logwatch;
+mod mapwatch;
 mod mapping;
 mod passive_icons;
 mod richtext;
@@ -35,6 +38,8 @@ mod profile;
 mod prices;
 mod route;
 mod rules;
+mod screen;
+mod share;
 mod stats;
 mod statdesc;
 mod trade;
@@ -99,6 +104,10 @@ struct Config {
     server_token: String,
     /// Identifiant public du profil de chaque personnage envoyé.
     profile_ids: BTreeMap<String, String>,
+    /// Lecture de l'écran du jeu dans les maps : fin de map et boss.
+    screen_watch: bool,
+    /// Erreurs de l'app et boss lus à l'écran envoyés au serveur de poe2-tracker.
+    share_data: bool,
 }
 
 impl Default for Config {
@@ -115,6 +124,8 @@ impl Default for Config {
             public_profile: false,
             server_token: String::new(),
             profile_ids: BTreeMap::new(),
+            screen_watch: true,
+            share_data: false,
         }
     }
 }
@@ -264,6 +275,10 @@ struct App {
     tree_pick: Option<views::TreeAction>,
     /// Envois du profil public au serveur.
     profile_sync: profile::Sync,
+    /// Lecture de l'écran du jeu dans les maps (réglage « Lecture de l'écran »).
+    mapwatch: Option<mapwatch::Watch>,
+    /// Erreurs et boss des maps partagés avec le serveur (réglage « Envoyer les erreurs »).
+    share: share::Share,
     /// De combien la colonne des annonces lues est étirée par-dessus celle du calcul (glissé à la
     /// main sur la limite entre les deux).
     estimate_stretch: f32,
@@ -306,6 +321,8 @@ struct App {
     /// Fenêtre d'export du personnage ouverte.
     export_open: bool,
     updater: updater::Updater,
+    /// Relance déjà tentée d'office après l'installation d'une mise à jour.
+    update_restarted: bool,
 }
 
 /// Réglages en cours de modification : appliqués et enregistrés par « Enregistrer », oubliés
@@ -320,6 +337,8 @@ struct SettingsDraft {
     market_min_unit: String,
     boss_tab: bool,
     public_profile: bool,
+    screen_watch: bool,
+    share_data: bool,
     lang: i18n::Lang,
     /// Choix du dossier du jeu en cours (fenêtre du système).
     picking: Option<Receiver<Option<PathBuf>>>,
@@ -337,6 +356,8 @@ impl SettingsDraft {
             market_min_unit: stored.market_min_unit.clone(),
             boss_tab: stored.boss_tab,
             public_profile: stored.public_profile,
+            screen_watch: stored.screen_watch,
+            share_data: stored.share_data,
             lang: i18n::base(),
             picking: None,
         }
@@ -354,6 +375,9 @@ struct Welcome {
 
 /// Dossier des données propres à un personnage (équipement suivi, historique).
 /// Nom d'une map : celui affiché par le jeu, sinon son code sans « Map ».
+/// Map terminée (« Map Completed » vu à l'écran).
+const MAP_DONE: Color32 = Color32::from_rgb(110, 200, 110);
+
 fn run_name(r: &mapping::Run) -> String {
     r.zone.as_deref().map(|z| gametext::name(z).into_owned()).unwrap_or_else(|| r.code.trim_start_matches("Map").to_string())
 }
@@ -698,6 +722,8 @@ impl App {
             paint_set: 0,
             tree_pick: None,
             profile_sync: profile::Sync::default(),
+            mapwatch: stored.screen_watch.then(|| mapwatch::Watch::start(dirs.data_dir().join("models"), cc.egui_ctx.clone())),
+            share: share::Share::default(),
             estimate_stretch: 0.0,
             tree: views::TreeView::default(),
             passive_icons: passive_icons::PassiveIcons::new(&cc.egui_ctx, dirs.cache_dir().to_path_buf(), config.game_dir.clone()),
@@ -708,6 +734,7 @@ impl App {
                 ..Default::default()
             },
             updater: updater::Updater::start(&cc.egui_ctx, config.auto_update),
+            update_restarted: false,
             // Développement : réglages ouverts d'office (POE2_TRACKER_SETTINGS=1).
             export_open: std::env::var_os("POE2_TRACKER_EXPORT").is_some(),
             settings: std::env::var_os("POE2_TRACKER_SETTINGS")
@@ -2162,7 +2189,8 @@ impl App {
         }
     }
 
-    /// Nouvelle version publiée : bouton pour l'installer, puis pour relancer.
+    /// Nouvelle version publiée : bouton pour l'installer, l'app se relance ensuite d'elle-même
+    /// (bouton de relance seulement si ça a échoué).
     fn update_status(&mut self, ui: &mut egui::Ui) {
         use updater::State;
         ui::gold_widgets(ui);
@@ -2181,7 +2209,9 @@ impl App {
                 ui.spinner();
             }
             State::Ready { version } => {
-                if ui.button(RichText::new(tr!("Version {version} installée — redémarrer", version)).color(Color32::from_rgb(120, 200, 120))).clicked() {
+                // Installée sur demande (bouton) : relancée aussitôt, une seule fois.
+                let auto = !std::mem::replace(&mut self.update_restarted, true);
+                if auto || ui.button(RichText::new(tr!("Version {version} installée — redémarrer", version)).color(Color32::from_rgb(120, 200, 120))).clicked() {
                     match updater::restart() {
                         Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
                         Err(e) => self.say(tr!("Redémarrage impossible : {e} (relance l'app à la main)", e)),
@@ -2279,6 +2309,49 @@ impl App {
             markdown: export::join(&header, &sections),
             sections,
         })
+    }
+
+    /// Lecture de l'écran : ce qui a été vu (fin de map, boss), puis la map où l'on est. Le boss
+    /// déjà connu pour ce genre de map est repris sans relire l'écran.
+    fn watch_maps(&mut self) {
+        for e in self.share.poll() {
+            match e {
+                share::Event::Token(t) => {
+                    self.stored.server_token = t;
+                    self.stored.save(&self.dirs);
+                }
+                share::Event::Bosses(_) => {}
+            }
+        }
+        if self.stored.share_data {
+            self.share.report(self.stored.server_token.clone(), self.character.clone());
+        }
+        let (Some(w), Some(c)) = (&self.mapwatch, &mut self.coach) else { return };
+        self.share.fetch_bosses();
+        for seen in w.poll() {
+            match seen {
+                mapwatch::Seen::Completed { map } => c.map_completed(&map.0, map.1),
+                mapwatch::Seen::Boss { map, name } => {
+                    c.map_boss(&map.0, map.1, &name);
+                    if self.stored.share_data {
+                        self.share.send_boss(self.stored.server_token.clone(), map.0, name);
+                    }
+                }
+            }
+        }
+        let map = c.inside_map();
+        let mut boss = false;
+        if let Some((code, seed)) = &map {
+            let book = c.maps();
+            let unknown = book.and_then(|b| b.current()).is_some_and(|(r, _)| r.boss.is_none());
+            let known = book.and_then(|b| b.known_boss(code)).or(self.share.bosses.get(code).map(String::as_str)).map(str::to_string);
+            match (unknown, known) {
+                (true, Some(name)) => c.map_boss(code, *seed, &name),
+                (true, None) => boss = true,
+                _ => {}
+            }
+        }
+        w.want(mapwatch::Want { map, boss, game_dir: self.config.game_dir.clone() });
     }
 
     /// Profil public : résultats des envois, puis nouvel envoi si le personnage a changé.
@@ -2445,10 +2518,11 @@ impl App {
             }
         }
         out.push_str(&format!("- {} : {}\n\n", tr!("Par palier"), tiers.iter().map(|(t, k)| format!("{t} ×{k}")).collect::<Vec<_>>().join(", ")));
-        out.push_str(&format!("| {} | {} | {} | {} | {} | {} |\n|---|---|---|---|---|---|\n", tr!("Date"), tr!("Map"), tr!("Palier"), tr!("Durée"), tr!("Morts"), tr!("Groupe")));
+        out.push_str(&format!("| {} | {} | {} | {} | {} | {} | {} | {} |\n|---|---|---|---|---|---|---|---|\n", tr!("Date"), tr!("Map"), tr!("Palier"), tr!("Boss"), tr!("Durée"), tr!("Terminée en"), tr!("Morts"), tr!("Groupe")));
         for r in runs.iter().rev().take(20) {
             let group = if r.group { tr!("oui") } else { tr!("non") };
-            out.push_str(&format!("| {} | {} | {} | {} | {} | {group} |\n", date_text(r.start), run_name(r), run_tier(r), duration_text(r.active_secs()), r.deaths));
+            let done = r.completed_secs.map(duration_text).unwrap_or_else(|| "—".into());
+            out.push_str(&format!("| {} | {} | {} | {} | {} | {done} | {} | {group} |\n", date_text(r.start), run_name(r), run_tier(r), r.boss.as_deref().unwrap_or("—"), duration_text(r.active_secs()), r.deaths));
         }
         out
     }
@@ -2708,6 +2782,29 @@ impl App {
                         ui.end_row();
                     }
 
+                    section(ui, tr!("Lecture de l'écran"));
+                    label(
+                        ui,
+                        tr!("Fin de map et boss"),
+                        tr!("dans une map, le panneau des objectifs en haut à droite du jeu est lu une fois par seconde : heure de fin de la map et nom de son boss"),
+                    );
+                    ui.checkbox(&mut draft.screen_watch, tr!("activée"));
+                    ui.end_row();
+
+                    section(ui, tr!("Améliorer poe2-tracker"));
+                    label(
+                        ui,
+                        tr!("Envoyer les erreurs"),
+                        tr!("les erreurs de l'app (avec la fin de son journal) et les boss lus à l'écran, envoyés au serveur de poe2-tracker pour corriger les problèmes et partager les boss des maps"),
+                    );
+                    ui.checkbox(&mut draft.share_data, tr!("activé"));
+                    ui.end_row();
+                    label(ui, tr!("Journal de l'app"), tr!("ce que fait l'app et ses erreurs, utile pour signaler un problème"));
+                    if ui.small_button(tr!("Ouvrir le journal")).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{}", applog::path(self.dirs.data_dir()).display())));
+                    }
+                    ui.end_row();
+
                     section(ui, tr!("Expérimental"));
                     label(
                         ui,
@@ -2739,6 +2836,11 @@ impl App {
             self.config.market_min_unit = draft.market_min_unit.clone();
             self.market_min_unit = draft.market_min_unit.clone();
             self.stored.boss_tab = draft.boss_tab;
+            if draft.screen_watch != self.stored.screen_watch {
+                self.stored.screen_watch = draft.screen_watch;
+                self.mapwatch = draft.screen_watch.then(|| mapwatch::Watch::start(self.dirs.data_dir().join("models"), ctx.clone()));
+            }
+            self.stored.share_data = draft.share_data;
             if draft.public_profile != self.stored.public_profile {
                 self.stored.public_profile = draft.public_profile;
                 if draft.public_profile {
@@ -3523,6 +3625,9 @@ impl App {
                     tier_badge(ui, &mut self.passive_icons, run, 44.0, dim);
                     ui.label(RichText::new(run_name(run)).color(ui::GOLD).size(20.0).strong());
                     ui.label(group_label(run));
+                    if let Some(boss) = &run.boss {
+                        ui.label(RichText::new(boss).color(dim).size(13.5));
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let color = if inside.is_some() { Color32::from_gray(230) } else { dim };
                         ui.label(RichText::new(clock_text(secs)).color(color).size(28.0).monospace()).on_hover_text(time_note(run));
@@ -3534,6 +3639,10 @@ impl App {
                         // Dehors après y être entré : retour en ville, le chrono est arrêté.
                         None => ui.label(RichText::new(tr!("en pause")).color(Color32::from_rgb(230, 160, 70)).size(13.5)),
                     };
+                    if let Some(secs) = run.completed_secs {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(tr!("✔ terminée en {time}", time = clock_text(secs))).color(MAP_DONE).size(13.5));
+                    }
                     ui.add_space(10.0);
                     icon_count(ui, &mut self.passive_icons, TOMB_ICON, run.deaths, &trn!(run.deaths, "{n} mort", "{n} morts"), Color32::from_rgb(225, 90, 80));
                     ui.add_space(10.0);
@@ -5560,11 +5669,15 @@ impl App {
                             // Le nom tronqué laisse la place à solo/groupe juste derrière lui.
                             let group = group_label(run);
                             let group_w = ui.painter().layout_no_wrap(group.text().to_string(), egui::FontId::proportional(13.5), Color32::GRAY).size().x;
-                            let name_w = (ui.available_width() - group_w - ui.spacing().item_spacing.x).max(0.0);
+                            let done_w = if run.completed_at.is_some() { 16.0 + ui.spacing().item_spacing.x } else { 0.0 };
+                            let name_w = (ui.available_width() - group_w - done_w - ui.spacing().item_spacing.x).max(0.0);
                             ui.scope(|ui| {
                                 ui.set_max_width(name_w);
                                 ui.add(egui::Label::new(RichText::new(run_name(run)).color(Color32::from_gray(220)).size(16.5)).truncate());
                             });
+                            if run.completed_at.is_some() {
+                                ui.label(RichText::new("✔").color(MAP_DONE).size(15.0));
+                            }
                             ui.label(group);
                         });
                         let row = egui::InnerResponse::new((), ui.interact(rect, ui.id().with(("map_line", i)), egui::Sense::hover()));
@@ -5577,6 +5690,12 @@ impl App {
                             ui.label(RichText::new(format!("{} · {}", run_tier(run), run_name(run))).color(ui::GOLD));
                             ui.label(RichText::new(date_text(run.start)).color(Color32::LIGHT_GRAY).size(13.5));
                             ui.label(RichText::new(format!("{} · {}", deaths_text, returns_text)).color(Color32::LIGHT_GRAY).size(13.5));
+                            if let Some(boss) = &run.boss {
+                                ui.label(RichText::new(tr!("Boss : {boss}", boss)).color(Color32::LIGHT_GRAY).size(13.5));
+                            }
+                            if let Some(secs) = run.completed_secs {
+                                ui.label(RichText::new(tr!("Terminée en {time}", time = duration_text(secs))).color(MAP_DONE).size(13.5));
+                            }
                             ui.label(RichText::new(time_note(run)).color(Color32::GRAY).size(13.5).italics());
                             if let Some(w) = &run.waystone {
                                 ui.add_space(4.0);
@@ -6645,6 +6764,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_profile();
+        self.watch_maps();
         // Alt maintenu : tout dans l'autre langue (interface et textes du jeu), le temps de l'appui.
         // Développement : `POE2_TRACKER_ALT=1` fait comme si Alt était maintenu.
         if i18n::set_flip(ctx.input(|i| i.modifiers.alt) || std::env::var_os("POE2_TRACKER_ALT").is_some()) {
@@ -7501,6 +7621,7 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    applog::init(dirs.data_dir());
     std::thread::spawn(desktop::install);
     // Lancé depuis le dépôt (`target/debug` ou `target/release`) : version de développement, à
     // distinguer de l'application installée dans la barre de titre.

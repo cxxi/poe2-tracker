@@ -39,7 +39,7 @@ pub fn spawn(tx: Sender<CopyEvent>, ctx: egui::Context) {
         let mut clipboard = match arboard::Clipboard::new() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("presse-papier inaccessible : {e}");
+                crate::log_warn!("presse-papier inaccessible : {e}");
                 return;
             }
         };

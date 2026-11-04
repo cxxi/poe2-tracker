@@ -23,8 +23,8 @@ Proton, Flatpak, version autonome Windows) ou te laisse indiquer son dossier.
 
 Au lancement puis toutes les 5 minutes, poe2-tracker regarde s'il existe une version plus
 récente sur GitHub. Si oui, un bouton apparaît dans la barre du bas : un clic télécharge la
-nouvelle version, vérifie son empreinte SHA-256, remplace l'exécutable, puis propose de
-redémarrer. Rien ne s'installe sans clic. La recherche se coupe dans les réglages, ou avec
+nouvelle version, vérifie son empreinte SHA-256, remplace l'exécutable, puis relance l'app.
+Rien ne s'installe sans clic. La recherche se coupe dans les réglages, ou avec
 `POE2_TRACKER_NO_UPDATE=1`. Après une mise à jour, la fenêtre « Nouveautés » montre ce qui a
 changé, versions sautées comprises.
 
@@ -79,6 +79,15 @@ cliquer pendant ce temps.)
 - **Profil public** (réglages, décoché par défaut) : le même export envoyé au serveur de
   poe2-tracker quand il change, lisible par un lien public (Markdown) ; décoché, il est retiré.
   Le serveur est dans `server/` (API Rust/axum, MariaDB), son déploiement dans `server/deploy/`.
+- **Fin de map et boss** (réglage « Lecture de l'écran », coché par défaut) : dans une map,
+  l'app lit une fois par seconde le panneau des objectifs à droite de l'écran du jeu (capture
+  de cette zone seulement, rien n'est lu dans la mémoire du jeu). « Map Completed » note la
+  fin de map et son temps ; le nom du boss est lu par OCR (modèles d'ocrs, téléchargés une
+  fois depuis le serveur) puis ramené au nom de monstre le plus proche des fichiers du jeu.
+- **Journal** : `poe2-tracker.log` dans le dossier des données (bouton « Ouvrir le journal »
+  dans les réglages). « Envoyer les erreurs » (décoché par défaut) envoie au serveur les
+  avertissements, erreurs et plantages avec la fin du journal, et partage les boss lus pour
+  qu'une même map ne soit pas relue.
 - **Route de leveling** (en bas) : contenus facultatifs de la campagne à ne pas rater
   (points de passif, résistances, esprit…), d'après `data/route.json`. Le journal du jeu
   annonce chaque récompense permanente : elle est cochée toute seule. Le reste se coche à la

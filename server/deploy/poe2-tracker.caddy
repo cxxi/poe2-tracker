@@ -1,6 +1,14 @@
-# poe2-tracker : API (poe2-server, systemd poe2-tracker.service, 127.0.0.1:8787).
+# poe2-tracker : API (poe2-server, systemd poe2-tracker.service, 127.0.0.1:8787) et modèles de
+# l'OCR de l'app (/opt/poe2-tracker/models, posés par deploy.sh).
 # Sur le VPS : /etc/caddy/sites.d/poe2-tracker.caddy, importé par /etc/caddy/host.caddyfile.
 poe2-tracker.cxxi.io {
 	encode gzip zstd
-	reverse_proxy 127.0.0.1:8787
+	handle_path /models/* {
+		root * /opt/poe2-tracker/models
+		header Cache-Control "public, max-age=86400"
+		file_server
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8787
+	}
 }

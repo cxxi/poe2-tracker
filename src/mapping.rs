@@ -129,6 +129,14 @@ pub struct Run {
     /// joueur y est entré ou en est sorti.
     #[serde(default)]
     pub group: bool,
+    /// « Map Completed » vu à l'écran : heure du log et temps de jeu dans la map à ce moment.
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub completed_secs: Option<i64>,
+    /// Boss de la map, lu à l'écran dans son objectif.
+    #[serde(default)]
+    pub boss: Option<String>,
 }
 
 impl Run {
@@ -219,6 +227,40 @@ impl Book {
         Some((self.runs.get(self.open?)?, self.inside_since))
     }
 
+    /// Map où l'on est en ce moment (code et seed).
+    pub fn inside(&self) -> Option<(&str, u64)> {
+        self.inside_since?;
+        let r = self.runs.get(self.open?)?;
+        Some((&r.code, r.seed))
+    }
+
+    /// Map ouverte, si c'est celle-là.
+    fn open_run(&mut self, code: &str, seed: u64) -> Option<&mut Run> {
+        self.runs.get_mut(self.open?).filter(|r| r.code == code && r.seed == seed)
+    }
+
+    /// « Map Completed » vu à l'écran à l'heure `t` du log (la première fois seulement : revenir
+    /// dans une map finie l'affiche encore).
+    pub fn completed(&mut self, code: &str, seed: u64, t: i64) {
+        let secs = self.live_secs(t);
+        let Some(r) = self.open_run(code, seed).filter(|r| r.completed_at.is_none()) else { return };
+        r.completed_at = Some(t);
+        r.completed_secs = secs;
+        self.dirty.set(true);
+    }
+
+    /// Boss de la map, lu à l'écran.
+    pub fn boss(&mut self, code: &str, seed: u64, name: &str) {
+        let Some(r) = self.open_run(code, seed).filter(|r| r.boss.as_deref() != Some(name)) else { return };
+        r.boss = Some(name.to_string());
+        self.dirty.set(true);
+    }
+
+    /// Boss déjà lu pour ce genre de map (le même à chaque fois).
+    pub fn known_boss(&self, code: &str) -> Option<&str> {
+        self.runs.iter().rev().find(|r| r.code == code && r.boss.is_some())?.boss.as_deref()
+    }
+
     /// Temps de jeu dans la map en cours à l'heure `now` (heure du log), hors AFK.
     pub fn live_secs(&self, now: i64) -> Option<i64> {
         let r = self.runs.get(self.open?)?;
@@ -293,7 +335,7 @@ impl Book {
                             }
                             _ => None,
                         };
-                        self.runs.push(Run { code: code.to_string(), level, seed, kind, zone: None, start: t, last: t, inside_secs: 0, afk_secs: 0, entries: 1, deaths: 0, sub_areas: vec![], waystone, group: !self.device });
+                        self.runs.push(Run { code: code.to_string(), level, seed, kind, zone: None, start: t, last: t, inside_secs: 0, afk_secs: 0, entries: 1, deaths: 0, sub_areas: vec![], waystone, group: !self.device, completed_at: None, completed_secs: None, boss: None });
                         self.device = false;
                         self.runs.len() - 1
                     }

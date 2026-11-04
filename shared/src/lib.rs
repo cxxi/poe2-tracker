@@ -1,5 +1,8 @@
 //! Ce que poe2-tracker et son serveur s'échangent : le profil public d'un personnage (le même
-//! contenu que « Exporter le personnage ») et les réponses de l'API.
+//! contenu que « Exporter le personnage »), les boss des maps lus à l'écran, les rapports
+//! d'erreurs et les réponses de l'API.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -73,4 +76,36 @@ pub struct PublicProfile {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
+}
+
+/// Boss d'un genre de map, lu à l'écran par l'app (`PUT /v1/me/map-bosses/{code}`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MapBoss {
+    pub boss: String,
+}
+
+/// Boss connus des maps (`GET /v1/map-bosses`) : code de la map (« MapSlick ») → nom du boss le
+/// plus signalé.
+pub type MapBosses = BTreeMap<String, String>;
+
+/// Rapport d'erreurs de l'app (`POST /v1/me/reports`), envoyé si le joueur l'a permis.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Report {
+    pub app_version: String,
+    /// « linux », « windows ».
+    pub os: String,
+    /// Personnage actif, pour savoir de qui vient le rapport.
+    pub character: Option<String>,
+    pub entries: Vec<ReportEntry>,
+    /// Fin du journal de l'app, pour le contexte.
+    pub log_tail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReportEntry {
+    /// Secondes Unix.
+    pub at: i64,
+    /// « WARN » ou « ERROR ».
+    pub level: String,
+    pub message: String,
 }

@@ -1,5 +1,13 @@
 # What's new
 
+## 0.9.0
+
+- Map completion: inside a map, the app reads the objectives panel on the right of the game screen. "Map Completed" marks it done, with its time; ✔ in the history, time and boss on hover, two more columns in the export.
+- Map boss: its name is read on screen (OCR) as soon as the objective shows, corrected against the game's monster names, then kept for that map. "Screen reading" setting to turn the capture off.
+- App log, `poe2-tracker.log` ("Open the log" button in the settings): startups, warnings, errors and crashes.
+- "Send errors" (settings, off by default): warnings, errors and crashes sent to the poe2-tracker server so they can be fixed, along with the bosses read, shared so a known map isn't read again.
+- One-click update: the app restarts by itself once the new version is installed.
+
 ## 0.8.0
 
 - Public profile (settings, off by default): your character, the same content as the export, sent to the poe2-tracker server when it changes (at most every 30 seconds). The settings give its public link, the export in Markdown always up to date, to give to an AI or a friend. Unticked: the profile is removed from the server.

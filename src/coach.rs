@@ -269,6 +269,25 @@ impl Coach {
         self.maps.get_mut(name).unwrap()
     }
 
+    /// Map où le personnage actif est en ce moment (code et seed).
+    pub fn inside_map(&mut self) -> Option<(String, u64)> {
+        self.maps()?.inside().map(|(c, s)| (c.to_string(), s))
+    }
+
+    /// Fin de la map vue à l'écran (maintenant).
+    pub fn map_completed(&mut self, code: &str, seed: u64) {
+        let (Some(name), Some(now)) = (self.state.active.clone(), self.log_now()) else { return };
+        self.book(&name).completed(code, seed, now);
+        self.save();
+    }
+
+    /// Boss de la map lu à l'écran.
+    pub fn map_boss(&mut self, code: &str, seed: u64, boss: &str) {
+        let Some(name) = self.state.active.clone() else { return };
+        self.book(&name).boss(code, seed, boss);
+        self.save();
+    }
+
     /// Waystone copié en jeu : il sera associé à la prochaine map du personnage actif.
     pub fn set_waystone(&mut self, w: crate::mapping::Waystone) -> bool {
         let Some(name) = self.state.active.clone() else { return false };

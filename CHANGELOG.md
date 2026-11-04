@@ -1,5 +1,13 @@
 # Nouveautés
 
+## 0.9.0
+
+- Fin de map : dans une map, l'app lit le panneau des objectifs à droite de l'écran du jeu. « Map Completed » la marque terminée, avec son temps ; ✔ dans l'historique, temps et boss au survol, deux colonnes de plus dans l'export.
+- Boss de map : son nom est lu à l'écran (OCR) dès que l'objectif s'affiche, corrigé d'après les noms de monstres du jeu, puis gardé pour cette map. Réglage « Lecture de l'écran » pour couper la capture.
+- Journal de l'app, `poe2-tracker.log` (bouton « Ouvrir le journal » dans les réglages) : démarrages, avertissements, erreurs et plantages.
+- « Envoyer les erreurs » (réglages, décoché par défaut) : avertissements, erreurs et plantages envoyés au serveur de poe2-tracker pour qu'on puisse les corriger, avec les boss lus, partagés pour ne pas relire une map déjà connue.
+- Mise à jour en un clic : l'app se relance d'elle-même une fois la nouvelle version installée.
+
 ## 0.8.0
 
 - Profil public (réglages, décoché par défaut) : ton personnage, le même contenu que l'export, envoyé au serveur de poe2-tracker quand il change (au plus toutes les 30 secondes). Les réglages donnent son lien public, l'export en Markdown toujours à jour, à donner à une IA ou à un ami. Décoché : le profil est retiré du serveur.

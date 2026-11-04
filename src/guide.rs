@@ -326,7 +326,7 @@ impl Catalog {
                 c
             }
             Err(e) => {
-                eprintln!("noms des gemmes/passifs indisponibles : {e}");
+                crate::log_warn!("noms des gemmes/passifs indisponibles : {e}");
                 cached().unwrap_or_default()
             }
         }

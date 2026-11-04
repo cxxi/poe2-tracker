@@ -155,7 +155,10 @@ impl Updater {
         std::thread::spawn(move || {
             let next = match install(&url, &sha_url) {
                 Ok(()) => State::Ready { version },
-                Err(e) => State::Failed(e),
+                Err(e) => {
+                    crate::log_error!("mise à jour {version} impossible : {e}");
+                    State::Failed(e)
+                }
             };
             *shared.state.lock().unwrap() = next;
             ctx.request_repaint();

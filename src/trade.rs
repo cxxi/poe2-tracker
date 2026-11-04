@@ -124,7 +124,7 @@ impl StatIndex {
                 Some(v)
             }
             Err(e) => {
-                eprintln!("stats du trade indisponibles : {e}");
+                crate::log_warn!("stats du trade indisponibles : {e}");
                 cached()
             }
         });

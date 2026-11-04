@@ -64,7 +64,7 @@ fn fingerprint(p: &Profile) -> u64 {
     h.finish()
 }
 
-fn error_text(e: ureq::Error) -> String {
+pub fn error_text(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, r) => {
             let msg = r.into_json::<poe2_shared::ApiError>().map(|e| e.error).unwrap_or_default();
@@ -74,7 +74,7 @@ fn error_text(e: ureq::Error) -> String {
     }
 }
 
-fn create_install() -> Result<String, ureq::Error> {
+pub fn create_install() -> Result<String, ureq::Error> {
     let r: InstallCreated = ureq::post(&format!("{}/v1/installs", server())).set("User-Agent", USER_AGENT).timeout(Duration::from_secs(20)).call()?.into_json()?;
     Ok(r.token)
 }
@@ -91,7 +91,7 @@ fn put(token: &str, profile: &Profile) -> Result<String, ureq::Error> {
 }
 
 /// Nom de personnage dans un chemin d'URL.
-fn percent(s: &str) -> String {
+pub fn percent(s: &str) -> String {
     s.bytes()
         .map(|b| if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' { (b as char).to_string() } else { format!("%{b:02X}") })
         .collect()
@@ -132,7 +132,9 @@ impl Sync {
                         t
                     }
                     Err(e) => {
-                        events.push(Event::Failed(error_text(e)));
+                        let e = error_text(e);
+                        crate::log_warn!("profil public : création de l'installation impossible : {e}");
+                        events.push(Event::Failed(e));
                         let _ = tx.send(Done { events, sent: None });
                         return;
                     }
@@ -150,7 +152,9 @@ impl Sync {
                     if matches!(e, ureq::Error::Status(401, _)) {
                         events.push(Event::Token(String::new()));
                     }
-                    events.push(Event::Failed(error_text(e)));
+                    let e = error_text(e);
+                    crate::log_warn!("profil public : envoi de {name} impossible : {e}");
+                    events.push(Event::Failed(e));
                     None
                 }
             };
@@ -171,7 +175,9 @@ impl Sync {
             for c in &characters {
                 let url = format!("{}/v1/me/profiles/{}", server(), percent(c));
                 if let Err(e) = ureq::delete(&url).set("User-Agent", USER_AGENT).set("Authorization", &format!("Bearer {token}")).timeout(Duration::from_secs(20)).call() {
-                    failed = Some(error_text(e));
+                    let e = error_text(e);
+                    crate::log_warn!("profil public : suppression de {c} impossible : {e}");
+                    failed = Some(e);
                 }
             }
             let events = vec![failed.map_or(Event::Deleted, Event::Failed)];

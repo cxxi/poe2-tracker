@@ -5,13 +5,16 @@
 //!   son identifiant public en retour, stable pour ce personnage.
 //! - `DELETE /v1/me/profiles/{personnage}` (jeton) : profil retiré (profil public décoché).
 //! - `GET /v1/profiles/{id}` : le profil, en JSON ; `{id}.md` : l'export en Markdown.
+//! - `GET /v1/map-bosses` : boss connus des maps (code → nom).
+//! - `PUT /v1/me/map-bosses/{code}` (jeton) : boss d'une map lu à l'écran.
+//! - `POST /v1/me/reports` (jeton) : rapport d'erreurs de l'app (les 50 derniers gardés).
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use poe2_shared::{ApiError, InstallCreated, PROFILE_FORMAT, Profile, ProfileSaved, PublicProfile};
+use poe2_shared::{ApiError, InstallCreated, MapBoss, MapBosses, PROFILE_FORMAT, Profile, ProfileSaved, PublicProfile, Report};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::MySqlPool;
@@ -27,6 +30,9 @@ pub fn router(db: MySqlPool) -> Router {
         .route("/v1/installs", post(create_install))
         .route("/v1/me/profiles/{character}", put(save_profile).delete(delete_profile))
         .route("/v1/profiles/{id}", get(public_profile))
+        .route("/v1/map-bosses", get(map_bosses))
+        .route("/v1/me/map-bosses/{code}", put(save_map_boss))
+        .route("/v1/me/reports", post(save_report))
         .layer(RequestBodyLimitLayer::new(MAX_BODY))
         .layer(TraceLayer::new_for_http())
         .with_state(db)
@@ -169,6 +175,61 @@ async fn public_profile(State(db): State<MySqlPool>, Path(id): Path<String>) -> 
     Ok(Json(PublicProfile { id, updated_at, profile }).into_response())
 }
 
+/// Boss de chaque map : le nom le plus signalé (à égalité, le plus récent).
+async fn map_bosses(State(db): State<MySqlPool>) -> Result<Json<MapBosses>, Error> {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT code, boss FROM map_bosses GROUP BY code, boss ORDER BY code, COUNT(*) DESC, MAX(updated_at) DESC").fetch_all(&db).await?;
+    let mut out = MapBosses::new();
+    for (code, boss) in rows {
+        out.entry(code).or_insert(boss);
+    }
+    Ok(Json(out))
+}
+
+async fn save_map_boss(State(db): State<MySqlPool>, headers: HeaderMap, Path(code): Path<String>, Json(b): Json<MapBoss>) -> Result<StatusCode, Error> {
+    let install = install_of(&db, &headers).await?;
+    if code.is_empty() || code.len() > 80 || !code.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return Err(Error::BadRequest("code de map invalide".into()));
+    }
+    let boss = b.boss.trim();
+    if boss.is_empty() || boss.chars().count() > 120 {
+        return Err(Error::BadRequest("nom de boss invalide".into()));
+    }
+    sqlx::query("INSERT INTO map_bosses (install_id, code, boss, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE boss = VALUES(boss), updated_at = VALUES(updated_at)")
+        .bind(install)
+        .bind(&code)
+        .bind(boss)
+        .bind(now())
+        .execute(&db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Rapports gardés par installation : les plus anciens partent.
+const REPORTS_KEPT: i64 = 50;
+
+async fn save_report(State(db): State<MySqlPool>, headers: HeaderMap, Json(r): Json<Report>) -> Result<StatusCode, Error> {
+    let install = install_of(&db, &headers).await?;
+    if r.entries.is_empty() || r.entries.len() > 500 || r.app_version.len() > 32 || r.os.len() > 32 || r.character.as_ref().is_some_and(|c| c.chars().count() > 64) {
+        return Err(Error::BadRequest("rapport invalide".into()));
+    }
+    let entries = serde_json::to_string(&r.entries).map_err(|e| Error::BadRequest(e.to_string()))?;
+    sqlx::query("INSERT INTO reports (install_id, created_at, app_version, os, character_name, entries, log_tail) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(install)
+        .bind(now())
+        .bind(&r.app_version)
+        .bind(&r.os)
+        .bind(&r.character)
+        .bind(&entries)
+        .bind(&r.log_tail)
+        .execute(&db)
+        .await?;
+    let old: Option<u64> = sqlx::query_scalar("SELECT id FROM reports WHERE install_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?").bind(install).bind(REPORTS_KEPT - 1).fetch_optional(&db).await?;
+    if let Some(old) = old {
+        sqlx::query("DELETE FROM reports WHERE install_id = ? AND id < ?").bind(install).bind(old).execute(&db).await?;
+    }
+    Ok(StatusCode::CREATED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,7 +259,7 @@ mod tests {
     async fn profile_round_trip() {
         let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
         let db = MySqlPool::connect(&url).await.unwrap();
-        sqlx::query("DROP TABLE IF EXISTS profiles, installs, _sqlx_migrations").execute(&db).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS reports, map_bosses, profiles, installs, _sqlx_migrations").execute(&db).await.unwrap();
         sqlx::migrate!().run(&db).await.unwrap();
         let app = router(db);
 
@@ -231,6 +292,34 @@ mod tests {
         assert_eq!(serde_json::from_str::<PublicProfile>(&body).unwrap().profile, profile);
         let (_, body) = call(&app, Request::get(format!("/v1/profiles/{id}.md")).body(Body::empty()).unwrap()).await;
         assert_eq!(body, "# Juliana v2");
+
+        // Boss des maps : le plus signalé.
+        let boss = |code: &str, name: &str, token: &str| {
+            Request::put(format!("/v1/me/map-bosses/{code}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&MapBoss { boss: name.into() }).unwrap()))
+                .unwrap()
+        };
+        let (_, body) = call(&app, Request::post("/v1/installs").body(Body::empty()).unwrap()).await;
+        let other = serde_json::from_str::<InstallCreated>(&body).unwrap().token;
+        let (_, body) = call(&app, Request::post("/v1/installs").body(Body::empty()).unwrap()).await;
+        let third = serde_json::from_str::<InstallCreated>(&body).unwrap().token;
+        assert_eq!(call(&app, boss("MapSlick", "Vorrik, The Infernal Engineer", &token)).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(call(&app, boss("MapSlick", "Vorrik, The Infernal Engineer", &other)).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(call(&app, boss("MapSlick", "Mist Raven", &third)).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(call(&app, boss("Map%20Slick", "Mist Raven", &token)).await.0, StatusCode::BAD_REQUEST);
+        let (_, body) = call(&app, Request::get("/v1/map-bosses").body(Body::empty()).unwrap()).await;
+        assert_eq!(serde_json::from_str::<MapBosses>(&body).unwrap().get("MapSlick").map(String::as_str), Some("Vorrik, The Infernal Engineer"));
+        // Rapports : seulement les 50 derniers.
+        let report = Report { app_version: "0.9.0".into(), os: "linux".into(), character: Some("Juliana".into()), entries: vec![poe2_shared::ReportEntry { at: 1, level: "ERROR".into(), message: "boum".into() }], log_tail: "…".into() };
+        for _ in 0..52 {
+            let req = Request::post("/v1/me/reports").header(header::AUTHORIZATION, format!("Bearer {token}")).header(header::CONTENT_TYPE, "application/json").body(Body::from(serde_json::to_string(&report).unwrap())).unwrap();
+            assert_eq!(call(&app, req).await.0, StatusCode::CREATED);
+        }
+        let db = MySqlPool::connect(&url).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reports").fetch_one(&db).await.unwrap();
+        assert_eq!(n, REPORTS_KEPT);
 
         let del = Request::delete("/v1/me/profiles/Juliana").header(header::AUTHORIZATION, format!("Bearer {token}")).body(Body::empty()).unwrap();
         assert_eq!(call(&app, del).await.0, StatusCode::NO_CONTENT);
