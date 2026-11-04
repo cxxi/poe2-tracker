@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.9.2
+
+- Note « vers le build » plus juste : chaque mod visé pèse ce que vaut sa valeur (deux niveaux de sorts comptent bien plus que de la vie et de la dextérité), au lieu de tous compter pareil.
+- Les mods non visés sur la pièce mais que le build cherche ailleurs (résistances, mana, attributs…) comptent aussi, pour la moitié de leur valeur.
+
 ## 0.9.1
 
 - Le chrono de la map s'arrête (en vert) quand elle est terminée.

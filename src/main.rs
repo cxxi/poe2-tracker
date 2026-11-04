@@ -1735,8 +1735,8 @@ impl App {
         for r in &mut runes {
             r.rest.clear();
         }
-        // Correspondance au build : moyenne de ce qu'il vise ici, chaque élément à sa part de la
-        // valeur visée (absent 0) : mods, implicites de la base (une compétence : la même ou
+        // Correspondance au build : moyenne pondérée de ce qu'il vise ici (voir `build_match`),
+        // chaque élément à sa part de la valeur visée (absent 0) : mods, implicites de la base (une compétence : la même ou
         // non), runes conseillées (posée ou non). Ce qui dépasse la valeur visée ne compte qu'une
         // fois tout atteint (le score passe alors 100 %, chaque élément plafonné à 200 %). Un
         // unique visé : ses mods, au moins le minimum de chaque plage.
@@ -1755,24 +1755,29 @@ impl App {
                 }
             }
             Some(b) => {
-                let mut parts: Vec<f64> = b
+                // Chaque élément pèse ce que vaut la valeur visée (poids des mods au marché) :
+                // deux niveaux de sorts comptent bien plus que quelques points de dextérité.
+                let category = trade::category(&it.item_class).unwrap_or_default();
+                let worth = |line: &str| weights::contribution(category, line).max(0.2);
+                let mut parts: Vec<(f64, f64)> = b
                     .lines
                     .iter()
                     .map(|(l, have)| {
                         let want = trade::template(l).1;
-                        match have {
+                        let part = match have {
                             compare::Have::Full(v) => ratio(*v, want).max(1.0),
                             compare::Have::Partial(v) => ratio(*v, want).min(1.0),
                             _ => 0.0,
-                        }
+                        };
+                        (part, worth(l))
                     })
                     .collect();
                 for want in &b.implicits {
                     parts.push(if let Some(skill) = want.strip_prefix(tr!("Octroie l'Aptitude : ")) {
-                        if implicits.iter().any(|h| h.strip_prefix(tr!("Octroie l'Aptitude : ")).is_some_and(|n| n.contains(skill))) { 1.0 } else { 0.0 }
+                        (if implicits.iter().any(|h| h.strip_prefix(tr!("Octroie l'Aptitude : ")).is_some_and(|n| n.contains(skill))) { 1.0 } else { 0.0 }, 1.0)
                     } else {
                         let (tpl, w) = trade::template(want);
-                        implicits.iter().map(|h| trade::template(h)).find(|(t, _)| *t == tpl).map_or(0.0, |(_, h)| ratio(h.unwrap_or(0.0), w))
+                        (implicits.iter().map(|h| trade::template(h)).find(|(t, _)| *t == tpl).map_or(0.0, |(_, h)| ratio(h.unwrap_or(0.0), w)), worth(want))
                     });
                 }
                 let mut posed: Vec<&str> = runes.iter().map(|r| r.name.as_str()).collect();
@@ -1780,17 +1785,28 @@ impl App {
                     parts.push(match posed.iter().position(|p| *p == r.name) {
                         Some(i) => {
                             posed.remove(i);
-                            1.0
+                            (1.0, 1.0)
                         }
-                        None => 0.0,
+                        None => (0.0, 1.0),
                     });
                 }
-                (!parts.is_empty()).then(|| {
-                    let mean = |v: &mut dyn Iterator<Item = f64>| v.sum::<f64>() / parts.len() as f64;
-                    let capped = mean(&mut parts.iter().map(|p| p.min(1.0)));
-                    let score = if capped >= 0.999 { mean(&mut parts.iter().copied()) } else { capped };
-                    (100.0 * score).round() as u32
-                })
+                // Mods non visés ici mais que le build cherche sur une autre pièce (vie, résistances,
+                // mana…) : la moitié de ce qu'ils valent, en plus.
+                let elsewhere: Vec<String> = self
+                    .judging_step()
+                    .map(|s| s.targets.iter().chain(&s.side_targets).flat_map(|(_, _, t)| t.iter().map(|t| trade::template(&t.line).0)).collect())
+                    .unwrap_or_default();
+                let extra: f64 = it
+                    .mods
+                    .iter()
+                    .zip(&it.mod_kinds)
+                    .filter(|(m, k)| **k == item::ModKind::Explicit && {
+                        let tpl = trade::template(m).0;
+                        !targets.contains(&tpl) && useful_elsewhere(&tpl, &elsewhere)
+                    })
+                    .map(|(m, _)| EXTRA_WORTH * worth(m))
+                    .sum();
+                build_match(&parts, extra)
             }
             None => None,
         };
@@ -7220,6 +7236,36 @@ const MARKET_CATEGORIES: &[(&str, &str)] = &[
     ("LineageSupportGems", tkey!("Gemmes de lignée")),
 ];
 
+/// Part de sa valeur que rapporte un mod utile au build mais pas visé sur cette pièce.
+const EXTRA_WORTH: f64 = 0.5;
+
+/// Mod (modèle) que le build cherche ailleurs : le même, ou de la même famille (une résistance
+/// pour des résistances, un attribut pour des attributs).
+fn useful_elsewhere(tpl: &str, wanted: &[String]) -> bool {
+    const ATTRIBUTES: [&str; 4] = ["to Strength", "to Dexterity", "to Intelligence", "to all Attributes"];
+    let attribute = |t: &str| ATTRIBUTES.iter().any(|a| t.contains(a));
+    let resistance = |t: &str| t.contains("Resistance");
+    wanted.iter().any(|w| w == tpl || (resistance(tpl) && resistance(w)) || (attribute(tpl) && attribute(w)))
+}
+
+/// Correspondance au build en %, d'après (part atteinte, poids) de chaque élément visé : moyenne
+/// pondérée des parts plafonnées à 1, ou non plafonnées une fois tout atteint (alors plus de
+/// 100 %), plus `extra` (mods utiles non visés, en poids). Rien de visé : pas de score.
+fn build_match(parts: &[(f64, f64)], extra: f64) -> Option<u32> {
+    let total: f64 = parts.iter().map(|(_, w)| w).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let capped = parts.iter().map(|(p, w)| p.min(1.0) * w).sum::<f64>() / total;
+    let score = if capped >= 0.999 {
+        parts.iter().map(|(p, w)| p * w).sum::<f64>() / total + extra / total
+    } else {
+        // 100 % seulement une fois tout le visé atteint.
+        (capped + extra / total).min(0.99)
+    };
+    Some((100.0 * score).round() as u32)
+}
+
 static RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\)").unwrap());
 
 /// Mods d'un unique (texte PoB, plages « (10-20) ») face à ceux d'une pièce : pour chacun, sa
@@ -7653,6 +7699,36 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Amulette visée : rareté, vie, dextérité, +3 niveaux de sorts, armure. Deux niveaux de
+    /// sorts pèsent bien plus que la vie et la dextérité au complet.
+    #[test]
+    fn build_match_weighs_by_worth() {
+        let lines = ["23% increased Rarity of Items found", "+30 to maximum Life", "+9 to Dexterity", "+3 to Level of all Spell Skills", "21% increased Armour"];
+        let worth: Vec<f64> = lines.iter().map(|l| weights::contribution("accessory.amulet", l).max(0.2)).collect();
+        let parts = |have: [f64; 5]| have.into_iter().zip(worth.iter().copied()).collect::<Vec<_>>();
+        let with = |have: [f64; 5]| build_match(&parts(have), 0.0).unwrap();
+        let spells = with([0.0, 0.0, 0.0, 2.0 / 3.0, 0.0]);
+        let life_dex = with([0.0, 1.0, 1.0, 0.0, 0.0]);
+        assert!(spells > 40 && life_dex < 10, "{spells} {life_dex}");
+        // Tout atteint : au-delà de 100 % si ça dépasse.
+        assert_eq!(with([1.0; 5]), 100);
+        assert!(with([1.0, 2.0, 1.0, 1.0, 1.0]) > 100);
+        assert_eq!(build_match(&[], 1.0), None);
+        // Mods utiles non visés : en plus, sans atteindre 100 % tant que le visé manque.
+        let res = EXTRA_WORTH * weights::contribution("accessory.amulet", "+12% to all Elemental Resistances");
+        assert!(build_match(&parts([0.0, 0.0, 0.0, 2.0 / 3.0, 0.0]), res).unwrap() > spells);
+        assert_eq!(build_match(&parts([0.0; 5]), 1000.0), Some(99));
+    }
+
+    #[test]
+    fn mods_useful_elsewhere() {
+        let wanted = ["+#% to Fire Resistance", "+# to maximum Mana", "+# to Dexterity and Intelligence"].map(String::from);
+        assert!(useful_elsewhere("+#% to all Elemental Resistances", &wanted));
+        assert!(useful_elsewhere("+# to maximum Mana", &wanted));
+        assert!(useful_elsewhere("+# to all Attributes", &wanted));
+        assert!(!useful_elsewhere("+# to Accuracy Rating", &wanted));
+    }
 
     #[test]
     fn unique_lines_against_worn() {

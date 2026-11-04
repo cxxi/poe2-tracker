@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.2
+
+- Fairer "towards the build" score: each targeted mod weighs what its value is worth (two spell levels count far more than some life and dexterity), instead of all counting the same.
+- Mods not targeted on the piece but that the build looks for elsewhere (resistances, mana, attributes…) count too, for half their worth.
+
 ## 0.9.1
 
 - The map timer stops (in green) once the map is completed.
