@@ -1125,7 +1125,7 @@ pub fn stats(
     jewels: &[(String, Color32)],
 ) -> Option<usize> {
     let mut remove_jewel = None;
-    use crate::stats::{Group, Line, RES_CAP, Total};
+    use crate::stats::{Group, Line, Total};
     let fmt = |v: f64| {
         if (v - v.round()).abs() < 0.05 {
             format!("{}", v.round())
@@ -1162,12 +1162,21 @@ pub fn stats(
             ui.label(format!("{slot} : {}{suffix}", fmt(*v)));
         }
         // Pourcentages augmentés : leurs sources, puis le calcul.
-        if !t.inc_from.is_empty() {
+        if !t.inc_from.is_empty() || !t.body_inc_from.is_empty() {
             ui.separator();
             for (slot, v) in &t.inc_from {
                 ui.label(tr!("{slot} : {n} % augmenté", slot, n = fmt(*v)));
             }
-            ui.label(RichText::new(tr!("{flat} × {k} = {total}", flat = fmt(t.flat), k = format!("{:.2}", 1.0 + t.inc / 100.0), total = fmt(t.value))).color(Color32::GRAY));
+            for (slot, v) in &t.body_inc_from {
+                ui.label(tr!("{slot} : {n} % augmenté sur l'armure de corps", slot, n = fmt(*v)));
+            }
+            let k = format!("{:.2}", 1.0 + t.inc / 100.0);
+            let calc = if t.body_inc_from.is_empty() {
+                tr!("{flat} × {k} = {total}", flat = fmt(t.flat), k, total = fmt(t.value))
+            } else {
+                tr!("{flat} × {k} + {body} × {b} = {total}", flat = fmt(t.flat), k, body = fmt(t.body), b = format!("{:.2}", t.body_inc / 100.0), total = fmt(t.value))
+            };
+            ui.label(RichText::new(calc).color(Color32::GRAY));
         }
     };
     // Largeurs : la moitié pour les noms, un quart pour chaque colonne de valeurs.
@@ -1235,15 +1244,15 @@ pub fn stats(
     let res_row = |ui: &mut egui::Ui, name: &str, idx: usize| {
         let pen = if idx < 3 { penalty.0 } else { 0.0 };
         let total = |t: &Total| t.value + pen;
-        let eff = |t: &Total| total(t).min(RES_CAP);
+        let eff = |t: &Total| total(t).min(t.cap());
         let hover = |ui: &mut egui::Ui, t: &Total| {
             breakdown(ui, t, " %");
             ui.separator();
             if idx < 3 {
                 ui.label(tr!("Pénalité ({when}) : {n} %", when = penalty.1, n = fmt(pen)));
             }
-            ui.label(tr!("Plafond : {n} %", n = fmt(RES_CAP)));
-            let over = t.value + pen - RES_CAP;
+            ui.label(tr!("Plafond : {n} %", n = fmt(t.cap())));
+            let over = t.value + pen - t.cap();
             if over > 0.0 {
                 ui.label(tr!("{n} % au-dessus du plafond", n = fmt(over)));
             }

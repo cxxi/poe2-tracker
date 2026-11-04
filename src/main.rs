@@ -2471,6 +2471,11 @@ impl App {
         out.push_str(&format!("- {} : {}\n", tr!("Notables"), export::names(&grouped(&mut notables.into_iter()))));
         out.push_str(&format!("- {} : {}\n", tr!("Talents mineurs"), export::names(&grouped(&mut small.into_iter()))));
         out.push_str(&format!("- {}\n", tr!("Talents d'attribut : {n} (Force {s}, Dextérité {d}, Intelligence {i})", n = attributes.len(), s = attr[0], d = attr[1], i = attr[2])));
+        // Le journal ne dit pas l'attribut choisi : sans choix posé à la main, c'est celui du build.
+        let guessed = attributes.iter().filter(|id| !ch.passive_attributes.contains_key(**id)).count();
+        if guessed > 0 {
+            out.push_str(&format!("  - {}\n", tr!("dont {n} supposés comme le build (attribut non choisi dans l'app) : l'écart avec le jeu peut venir de là", n = guessed)));
+        }
         out.push_str(&format!("- {}\n", tr!("Châsses de joyau prises : {n}", n = sockets.len())));
         if let Some(step) = step {
             let want: HashSet<&String> = step.passives.iter().collect();

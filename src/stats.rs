@@ -44,6 +44,20 @@ pub struct Total {
     pub inc_from: Vec<(String, f64)>,
     /// Somme des apports avant le pourcentage augmenté.
     pub flat: f64,
+    /// Part de l'armure de corps, et ce qu'elle seule a d'augmenté (« 50% increased Energy
+    /// Shield from Equipped Body Armour »), ajouté au pourcentage global pour cette part.
+    pub body: f64,
+    pub body_inc: f64,
+    pub body_inc_from: Vec<(String, f64)>,
+    /// Résistances : ce qui s'ajoute au plafond (« +1% to Maximum Fire Resistance »).
+    pub max: f64,
+}
+
+impl Total {
+    /// Plafond d'une résistance.
+    pub fn cap(&self) -> f64 {
+        RES_CAP + self.max
+    }
 }
 
 impl Total {
@@ -63,11 +77,19 @@ impl Total {
         }
     }
 
+    fn add_body_inc(&mut self, slot: &str, v: f64) {
+        self.body_inc += v;
+        match self.body_inc_from.iter_mut().find(|(s, _)| s == slot) {
+            Some((_, total)) => *total += v,
+            None => self.body_inc_from.push((slot.to_string(), v)),
+        }
+    }
+
     /// Applique le pourcentage augmenté, arrondi au plus proche (comme PoB).
     fn apply_inc(&mut self) {
         self.flat = self.value;
-        if self.inc != 0.0 {
-            self.value = (self.value * (1.0 + self.inc / 100.0)).round();
+        if self.inc != 0.0 || self.body_inc != 0.0 {
+            self.value = (self.value * (1.0 + self.inc / 100.0) + self.body * self.body_inc / 100.0).round();
         }
     }
 }
@@ -381,6 +403,18 @@ fn add_known(sheet: &mut Sheet, slot: &str, template: &str, v: f64) -> bool {
     // Pourcentages augmentés globaux : « 5% increased maximum Life », « 30% increased Global
     // Armour, Evasion and Energy Shield », « 20% increased Armour and Evasion ».
     if let Some(rest) = template.strip_prefix("#% increased ") {
+        // Ne vaut que pour l'armure de corps : « 50% increased Energy Shield from Equipped Body
+        // Armour ».
+        if let Some(names) = rest.strip_suffix(" from Equipped Body Armour") {
+            let parts: Vec<&str> = names.split(", ").flat_map(|p| p.split(" and ")).collect();
+            let idx: Vec<usize> = parts.iter().filter_map(|p| DEFENCE_NAMES.iter().position(|d| p.trim_end_matches(" Rating") == *d)).collect();
+            if !idx.is_empty() && idx.len() == parts.len() {
+                for i in idx {
+                    sheet.defences[i].add_body_inc(slot, v);
+                }
+                return true;
+            }
+        }
         let rest = rest.strip_prefix("Global ").unwrap_or(rest);
         let parts: Vec<&str> = rest.split(", ").flat_map(|p| p.split(" and ")).collect();
         let target = |p: &str| -> Option<usize> {
@@ -449,6 +483,23 @@ fn add_known(sheet: &mut Sheet, slot: &str, template: &str, v: f64) -> bool {
         return true;
     }
     if let Some(rest) = template.strip_prefix("+#% to ") {
+        // Plafonds : « Maximum Fire Resistance », « all Maximum Elemental Resistances ».
+        let max = match rest {
+            "all Maximum Elemental Resistances" => vec![0, 1, 2],
+            "all Maximum Resistances" => vec![0, 1, 2, 3],
+            _ => rest
+                .strip_prefix("Maximum ")
+                .and_then(|r| r.strip_suffix(" Resistance"))
+                .and_then(|r| RES.iter().chain(&["Chaos"]).position(|n| *n == r))
+                .into_iter()
+                .collect(),
+        };
+        if !max.is_empty() {
+            for r in max {
+                sheet.resistances[r].max += v;
+            }
+            return true;
+        }
         if rest == "all Elemental Resistances" {
             for r in 0..3 {
                 sheet.resistances[r].add(slot, v);
@@ -552,6 +603,9 @@ pub fn sheet_of(pieces: &[Piece]) -> Sheet {
         for (i, v) in shown.iter().enumerate() {
             if *v > 0.0 {
                 sheet.defences[i].add(name, v.round());
+                if p.slot == Slot::Body {
+                    sheet.defences[i].body += v.round();
+                }
             }
         }
         if let Some(v) = p.props.get("Spirit") {
@@ -780,6 +834,30 @@ mod tests {
         finish(&mut s, 1, "Warrior");
         assert_eq!(s.attributes[0].value, 53.0);
         assert_eq!(s.life.value, 28.0 + 106.0);
+    }
+
+    #[test]
+    fn body_armour_increase_counts_only_the_body() {
+        // Juliana : corps 211, gants 42, bottes 43 ; 40 % global et 50 % sur le corps → 520 en jeu.
+        let es = |slot, v: u32| piece(slot, &format!("Item Class: Gloves\nRarity: Normal\nSilk Gloves\n--------\nEnergy Shield: {v}\n--------\nItem Level: 1\n"));
+        let mut s = sheet_of(&[es(Slot::Body, 211), es(Slot::Gloves, 42), es(Slot::Boots, 43)]);
+        add_source(&mut s, "x", &["40% increased Energy Shield".to_string(), "50% increased Energy Shield from Equipped Body Armour".to_string()]);
+        finish(&mut s, 1, "");
+        assert_eq!(s.defences[2].value, 520.0);
+        assert_eq!(s.defences[2].body_inc, 50.0);
+    }
+
+    #[test]
+    fn catalysed_ring_and_maximum_resistance() {
+        // Bague de Robin, qualité feu +10 % : 22 + 19 + 10 en base, 24 + 20 + 11 en jeu.
+        let ring = piece(
+            Slot::RingLeft,
+            "Item Class: Rings\nRarity: Rare\nCorruption Knot\nRuby Ring\n--------\nQuality (Fire Modifiers): +10% (augmented)\n--------\nItem Level: 52\n--------\n{ Implicit Modifier — Elemental, Fire, Resistance — 10% Increased }\n+22(20-30)% to Fire Resistance\n--------\n{ Suffix Modifier \"of the Drake\" (Tier: 6) — Elemental, Fire, Resistance — 10% Increased }\n+19(16-20)% to Fire Resistance\n{ Suffix Modifier \"of the Kaleidoscope\" (Tier: 3) — Elemental, Fire, Cold, Lightning, Resistance — 10% Increased }\n+10(9-11)% to all Elemental Resistances\n{ Prefix Modifier \"Robust\" (Tier: 3) — Life }\n+84(70-84) to maximum Life\n",
+        );
+        let mut s = sheet_of(&[ring]);
+        assert_eq!([s.resistances[0].value, s.resistances[1].value, s.life.value], [55.0, 11.0, 84.0]);
+        add_source(&mut s, "Joyaux", &["+1% to Maximum Fire Resistance".to_string()]);
+        assert_eq!([s.resistances[0].cap(), s.resistances[1].cap()], [76.0, 75.0]);
     }
 
     #[test]

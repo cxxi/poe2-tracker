@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::stats::{Group, Sheet, Total, RES_CAP};
+use crate::stats::{Group, Sheet, Total};
 
 /// Sections cochées dans la fenêtre d'export (gardées dans la config).
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -72,6 +72,10 @@ fn sources(t: &Total) -> String {
         let inc: Vec<String> = t.inc_from.iter().map(|(s, v)| format!("{s} {} %", fmt(*v))).collect();
         out.push(tr!("puis × {k} ({inc})", k = format!("{:.2}", 1.0 + t.inc / 100.0), inc = inc.join(", ")));
     }
+    if !t.body_inc_from.is_empty() {
+        let inc: Vec<String> = t.body_inc_from.iter().map(|(s, v)| format!("{s} {} %", fmt(*v))).collect();
+        out.push(tr!("plus {n} % sur l'armure de corps ({inc})", n = fmt(t.body_inc), inc = inc.join(", ")));
+    }
     out.join(", ")
 }
 
@@ -100,7 +104,7 @@ pub fn stats(worn: &Sheet, build: Option<&Sheet>, build_title: &str, set: u8, pe
     // Résistances comme en jeu : effective (avant plafond).
     let res = |t: &Total, i: usize| {
         let total = t.value + if i < 3 { penalty.0 } else { 0.0 };
-        format!("{} % ({} %)", fmt(total.min(RES_CAP)), fmt(total))
+        format!("{} % ({} %)", fmt(total.min(t.cap())), fmt(total))
     };
     for (i, name) in [tr!("Feu"), tr!("Froid"), tr!("Foudre"), tr!("Chaos")].into_iter().enumerate() {
         let b = build.map_or("—".to_string(), |b| res(&b.resistances[i], i));

@@ -34,6 +34,10 @@ const INSTRUCTIONS: &[&str] =
 static MOD_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(increased|reduced|to|Adds|Gain|more|less|Grants)\b").unwrap());
 
 static ANNOTATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\{.*\}$").unwrap());
+/// Mod renforcé par la qualité d'un bijou catalysé : « { … — 10% Increased } ». Le texte copié
+/// donne la valeur de base.
+static BOOST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"—\s*(\d+)% Increased\s*\}$").unwrap());
+static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+(?:\.\d+)?").unwrap());
 static RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((-?[\d.]+)-(-?[\d.]+)\)").unwrap());
 static SUFFIX_TAG: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\s+—\s+Unscalable Value$|\s+\((implicit|enchant|rune|crafted|desecrated|fractured)\)$")
@@ -144,6 +148,20 @@ fn clean_mod(line: &str) -> String {
     SUFFIX_TAG.replace_all(&line, "").trim().to_string()
 }
 
+/// Nombres d'un mod augmentés de `pct` %, arrondis à l'inférieur comme en jeu (22 → 24 à 10 %).
+fn boosted(line: &str, pct: f64) -> String {
+    NUMBER
+        .replace_all(line, |c: &regex::Captures| {
+            let v = num(&c[0]) * (1.0 + pct / 100.0);
+            if c[0].contains('.') {
+                format!("{}", (v * 100.0).floor() / 100.0)
+            } else {
+                format!("{}", v.floor())
+            }
+        })
+        .into_owned()
+}
+
 fn num(text: &str) -> f64 {
     text.replace(',', ".").parse().unwrap_or(0.0)
 }
@@ -202,6 +220,7 @@ pub fn parse(text: &str) -> Option<Item> {
 
     for section in &sections[1..] {
         let mut kind = ModKind::Explicit;
+        let mut boost = 0.0;
         for line in section {
             let line = line.trim();
             if line.is_empty() {
@@ -209,6 +228,7 @@ pub fn parse(text: &str) -> Option<Item> {
             }
             if ANNOTATION.is_match(line) {
                 kind = kind_from_annotation(line);
+                boost = BOOST.captures(line).map_or(0.0, |m| num(&m[1]));
                 continue;
             }
             if let Some(v) = line.strip_prefix("Item Level:") {
@@ -280,7 +300,8 @@ pub fn parse(text: &str) -> Option<Item> {
                 break;
             } else {
                 item.mod_kinds.push(kind_from_suffix(line).unwrap_or(kind));
-                item.mods.push(clean_mod(line));
+                let m = clean_mod(line);
+                item.mods.push(if boost > 0.0 { boosted(&m, boost) } else { m });
             }
         }
     }
