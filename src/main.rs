@@ -3312,6 +3312,8 @@ impl App {
                     Ok(()) => self.say(msg),
                     Err(e) => self.say(tr!("Impossible d'enregistrer l'équipement : {e}", e)),
                 }
+                // Le profil public suit tout de suite la pièce.
+                self.profile_sync.soon();
             }
         }
     }
@@ -6790,7 +6792,6 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.sync_profile();
         self.watch_maps();
         // Alt maintenu : tout dans l'autre langue (interface et textes du jeu), le temps de l'appui.
         // Développement : `POE2_TRACKER_ALT=1` fait comme si Alt était maintenu.
@@ -6800,6 +6801,8 @@ impl eframe::App for App {
         while let Ok(ev) = self.copies.try_recv() {
             self.on_copy(ev);
         }
+        // Après les copies : une pièce suivie part au serveur dans la même image.
+        self.sync_profile();
         self.assets.poll(ctx);
         self.ui_art.poll(ctx);
         self.passive_icons.poll(ctx);

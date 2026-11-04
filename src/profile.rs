@@ -107,6 +107,12 @@ impl Sync {
         true
     }
 
+    /// Le prochain regard tout de suite (pièce suivie en jeu), sans attendre les 30 s ; envoyé
+    /// seulement s'il a changé. Un envoi en cours : le regard suit sa fin.
+    pub fn soon(&mut self) {
+        self.last_check = None;
+    }
+
     /// Le prochain regard tout de suite, et le profil renvoyé même inchangé (profil public coché).
     pub fn force(&mut self) {
         self.last_check = None;

@@ -6,6 +6,7 @@
   - bijoux catalysés : les mods renforcés par la qualité (« 10% Increased ») comptent leur vraie valeur ;
   - « +1% to Maximum Fire Resistance » et les autres résistances max relèvent le plafond (76 % au lieu de 75 %) ;
   - « increased Energy Shield / Armour / Evasion from Equipped Body Armour » ne s'applique qu'à l'armure de corps, au lieu d'être ignoré.
+- Profil public : une pièce suivie en jeu (Ctrl+Alt+C) part tout de suite au serveur, sans attendre la synchro des 30 secondes.
 - Profil exporté : le nombre de talents d'attribut dont l'attribut est supposé (pas choisi dans l'app) est indiqué.
 
 ## 0.9.4
