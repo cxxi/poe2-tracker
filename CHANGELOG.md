@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.9.1
+
+- Le chrono de la map s'arrête (en vert) quand elle est terminée.
+- Lecture de l'écran bien plus légère, pour ne plus faire saccader le jeu : une capture toutes les 3 secondes, seulement la bande du panneau des objectifs une fois trouvé, et plus rien une fois la map terminée.
+
 ## 0.9.0
 
 - Fin de map : dans une map, l'app lit le panneau des objectifs à droite de l'écran du jeu. « Map Completed » la marque terminée, avec son temps ; ✔ dans l'historique, temps et boss au survol, deux colonnes de plus dans l'export.

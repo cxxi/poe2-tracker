@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.1
+
+- The map timer stops (in green) once the map is completed.
+- Much lighter screen reading, so the game no longer stutters: one capture every 3 seconds, only the objectives panel strip once found, and nothing once the map is completed.
+
 ## 0.9.0
 
 - Map completion: inside a map, the app reads the objectives panel on the right of the game screen. "Map Completed" marks it done, with its time; ✔ in the history, time and boss on hover, two more columns in the export.

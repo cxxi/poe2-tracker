@@ -3629,7 +3629,12 @@ impl App {
                         ui.label(RichText::new(boss).color(dim).size(13.5));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let color = if inside.is_some() { Color32::from_gray(230) } else { dim };
+                        // Map terminée : le chrono s'arrête sur son temps.
+                        let (secs, color) = match run.completed_secs {
+                            Some(done) => (done, MAP_DONE),
+                            None if inside.is_some() => (secs, Color32::from_gray(230)),
+                            None => (secs, dim),
+                        };
                         ui.label(RichText::new(clock_text(secs)).color(color).size(28.0).monospace()).on_hover_text(time_note(run));
                     });
                 });

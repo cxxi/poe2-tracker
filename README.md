@@ -80,7 +80,7 @@ cliquer pendant ce temps.)
   poe2-tracker quand il change, lisible par un lien public (Markdown) ; décoché, il est retiré.
   Le serveur est dans `server/` (API Rust/axum, MariaDB), son déploiement dans `server/deploy/`.
 - **Fin de map et boss** (réglage « Lecture de l'écran », coché par défaut) : dans une map,
-  l'app lit une fois par seconde le panneau des objectifs à droite de l'écran du jeu (capture
+  l'app lit toutes les 3 secondes le panneau des objectifs à droite de l'écran du jeu (capture
   de cette zone seulement, rien n'est lu dans la mémoire du jeu). « Map Completed » note la
   fin de map et son temps ; le nom du boss est lu par OCR (modèles d'ocrs, téléchargés une
   fois depuis le serveur) puis ramené au nom de monstre le plus proche des fichiers du jeu.

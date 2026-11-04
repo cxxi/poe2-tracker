@@ -1,8 +1,8 @@
 //! Fin de map et boss de la map, lus à l'écran pendant qu'on est dans une map.
 //!
 //! En haut à droite, le jeu affiche « Map Objectives » puis l'objectif : « Defeat <boss> »
-//! tant que le boss est debout, « Map Completed » ensuite. On capture cette colonne une fois
-//! par seconde, on y cherche l'en-tête par corrélation avec un modèle (sa hauteur change avec
+//! tant que le boss est debout, « Map Completed » ensuite. On capture cette colonne toutes les
+//! 3 secondes (puis seulement la bande du panneau, une fois trouvé), on y cherche l'en-tête par corrélation avec un modèle (sa hauteur change avec
 //! la mini-carte), puis on compare la ligne dessous au modèle « Map Completed ». Panneau
 //! introuvable (inventaire ouvert, infobulle, repaire) : on ne conclut rien.
 //!
@@ -37,8 +37,15 @@ const HEADER_MIN: f32 = 0.6;
 const DONE_MIN: f32 = 0.7;
 
 const TICK: Duration = Duration::from_secs(1);
+/// Entre deux captures : chacune fait attendre le rendu du jeu (lecture de l'écran par le GPU),
+/// on en fait donc peu. « Map Completed » vu, la suivante vient au bout d'une seconde.
+const EVERY: Duration = Duration::from_secs(3);
 /// Entre deux lectures du nom du boss.
 const OCR_EVERY: Duration = Duration::from_secs(3);
+/// En-tête déjà trouvé : seule cette bande autour de lui est capturée (en-tête, objectif et
+/// ligne lue par l'OCR), de `y - 8` à `y + 64`.
+const BAND_ABOVE: u32 = 8;
+const BAND_BELOW: u32 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Panel {
@@ -312,17 +319,31 @@ impl Watch {
     }
 }
 
-/// Colonne de droite de la fenêtre du jeu, ramenée en pixels 1080p.
-fn capture(grab: &mut dyn screen::Grabber) -> Option<RgbImage> {
+/// Colonne de droite de la fenêtre du jeu, ramenée en pixels 1080p. Avec la hauteur de
+/// l'en-tête, seule la bande autour de lui est capturée (le reste de la colonne reste noir).
+fn capture(grab: &mut dyn screen::Grabber, header: Option<u32>) -> Option<RgbImage> {
     let (w, h) = grab.game_size()?;
     if h < 400 {
         return None;
     }
+    let (top, rows) = match header {
+        Some(y) => {
+            let top = y.saturating_sub(BAND_ABOVE);
+            (top, (y + BAND_BELOW).min(REF_H) - top)
+        }
+        None => (0, REF_H),
+    };
     let s = h as f32 / 1080.0;
     let cw = ((REF_W as f32 * s).round() as u32).min(w);
-    let r = Rect { x: (w - cw) as i32, y: (REF_Y as f32 * s).round() as i32, w: cw, h: (REF_H as f32 * s).round() as u32 };
+    let r = Rect { x: (w - cw) as i32, y: ((REF_Y + top) as f32 * s).round() as i32, w: cw, h: (rows as f32 * s).round() as u32 };
     let img = grab.grab(r)?;
-    Some(if h == 1080 { img } else { image::imageops::resize(&img, REF_W, REF_H, image::imageops::FilterType::Triangle) })
+    let img = if h == 1080 { img } else { image::imageops::resize(&img, REF_W, rows, image::imageops::FilterType::Triangle) };
+    if rows == REF_H {
+        return Some(img);
+    }
+    let mut column = RgbImage::new(REF_W, REF_H);
+    image::imageops::replace(&mut column, &img, 0, top as i64);
+    Some(column)
 }
 
 fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Context) {
@@ -334,6 +355,7 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
     let (mut done_frames, mut done_sent, mut boss_sent) = (0, false, false);
     let mut votes: Vec<String> = Vec::new();
     let mut last_ocr: Option<Instant> = None;
+    let mut last_grab: Option<Instant> = None;
     let mut seen_game = false;
     loop {
         std::thread::sleep(TICK);
@@ -349,6 +371,15 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
             detector.last_y = None;
         }
         let Some(map) = current.clone() else { continue };
+        // Map terminée : plus rien à lire (le boss ne s'affiche plus).
+        if done_sent {
+            continue;
+        }
+        let every = if done_frames > 0 { TICK } else { EVERY };
+        if last_grab.is_some_and(|t| t.elapsed() < every) {
+            continue;
+        }
+        last_grab = Some(Instant::now());
         if grabber.is_none() {
             grabber = screen::grabber();
             if grabber.is_none() {
@@ -356,7 +387,7 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
                 return;
             }
         }
-        let Some(column) = capture(grabber.as_deref_mut().unwrap()) else { continue };
+        let Some(column) = capture(grabber.as_deref_mut().unwrap(), detector.last_y) else { continue };
         if !seen_game {
             seen_game = true;
             crate::log_info!("fenêtre du jeu capturée ({:?})", grabber.as_deref_mut().unwrap().game_size());
@@ -416,6 +447,34 @@ mod tests {
         assert_eq!(d.panel(&fixture("hidden")), Panel::Hidden);
         // Ligne en partie cachée par l'étiquette d'un objet au sol : l'en-tête est vu.
         assert!(matches!(d.panel(&fixture("occluded")), Panel::Objective { .. }));
+    }
+
+    /// Écran 1080p avec une capture posée à sa place.
+    struct Screen(RgbImage);
+
+    impl screen::Grabber for Screen {
+        fn game_size(&mut self) -> Option<(u32, u32)> {
+            Some(self.0.dimensions())
+        }
+        fn grab(&mut self, r: Rect) -> Option<RgbImage> {
+            Some(image::imageops::crop_imm(&self.0, r.x as u32, r.y as u32, r.w, r.h).to_image())
+        }
+    }
+
+    /// En-tête trouvé dans la colonne entière, puis retrouvé dans sa seule bande.
+    #[test]
+    fn band_capture_keeps_the_panel() {
+        let mut screen = RgbImage::new(1920, 1080);
+        image::imageops::replace(&mut screen, &fixture("vorrik"), 1300, 200);
+        let mut screen = Screen(screen);
+        let mut d = Detector::default();
+        assert_eq!(d.panel(&capture(&mut screen, None).unwrap()), Panel::Objective { y: 188 });
+        let band = capture(&mut screen, d.last_y).unwrap();
+        assert_eq!(band.dimensions(), (REF_W, REF_H));
+        assert_eq!(d.panel(&band), Panel::Objective { y: 188 });
+        // Panneau déplacé (mini-carte) : la bande ne le voit plus, la capture suivante est entière.
+        assert_eq!(d.panel(&capture(&mut screen, Some(400)).unwrap()), Panel::Hidden);
+        assert_eq!(d.last_y, None);
     }
 
     #[test]
