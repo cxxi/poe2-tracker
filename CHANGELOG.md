@@ -1,5 +1,13 @@
 # Nouveautés
 
+## 0.9.5
+
+- Caractéristiques plus proches du jeu :
+  - bijoux catalysés : les mods renforcés par la qualité (« 10% Increased ») comptent leur vraie valeur ;
+  - « +1% to Maximum Fire Resistance » et les autres résistances max relèvent le plafond (76 % au lieu de 75 %) ;
+  - « increased Energy Shield / Armour / Evasion from Equipped Body Armour » ne s'applique qu'à l'armure de corps, au lieu d'être ignoré.
+- Profil exporté : le nombre de talents d'attribut dont l'attribut est supposé (pas choisi dans l'app) est indiqué.
+
 ## 0.9.4
 
 - Lecture de l'écran seulement dans les maps et les logbooks : plus aucune capture dans les arènes de boss, les épreuves et les repaires.

@@ -1,5 +1,13 @@
 # What's new
 
+## 0.9.5
+
+- Stats closer to the game:
+  - catalysed jewellery: mods boosted by quality ("10% Increased") count their real value;
+  - "+1% to Maximum Fire Resistance" and other maximum resistances raise the cap (76% instead of 75%);
+  - "increased Energy Shield / Armour / Evasion from Equipped Body Armour" applies to the body armour only, instead of being ignored.
+- Exported profile: the number of attribute passives whose attribute is assumed (not chosen in the app) is shown.
+
 ## 0.9.4
 
 - Screen reading only in maps and logbooks: no more captures in boss arenas, trials and hideouts.
