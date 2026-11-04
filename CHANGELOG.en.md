@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.4
+
+- Screen reading only in maps and logbooks: no more captures in boss arenas, trials and hideouts.
+- Area without an objectives panel (never seen in about a minute): capture stops until the next area.
+
 ## 0.9.3
 
 - Expedition logbooks: no boss to read (their objective: place the explosives), only the map completion is watched.

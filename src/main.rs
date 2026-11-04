@@ -2355,7 +2355,8 @@ impl App {
                 }
             }
         }
-        let map = c.inside_map();
+        // Capture seulement là où le jeu affiche les objectifs de map.
+        let map = c.inside_map().filter(|(code, _)| mapping::has_objectives(code));
         let mut boss = false;
         if let Some((code, seed)) = map.as_ref().filter(|(code, _)| mapping::has_boss(code)) {
             let book = c.maps();

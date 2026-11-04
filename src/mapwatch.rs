@@ -45,6 +45,9 @@ const OCR_EVERY: Duration = Duration::from_secs(3);
 /// Lectures sans nom de boss après lesquelles on abandonne pour cette map (un boss caché par
 /// une étiquette d'objet le reste rarement aussi longtemps).
 const GIVE_UP: u32 = 8;
+/// Captures sans jamais voir le panneau des objectifs (environ une minute) après lesquelles la
+/// zone n'en a pas : on ne capture plus.
+const NO_PANEL: u32 = 20;
 /// En-tête déjà trouvé : seule cette bande autour de lui est capturée (en-tête, objectif et
 /// ligne lue par l'OCR), de `y - 8` à `y + 64`.
 const BAND_ABOVE: u32 = 8;
@@ -358,6 +361,8 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
     let (mut done_frames, mut done_sent, mut boss_sent) = (0, false, false);
     let mut votes: Vec<String> = Vec::new();
     let mut misses = 0;
+    // Captures sans panneau tant qu'il n'a jamais été vu dans cette zone.
+    let (mut unseen, mut panel_seen) = (0, false);
     let mut last_ocr: Option<Instant> = None;
     let mut last_grab: Option<Instant> = None;
     let mut seen_game = false;
@@ -373,11 +378,12 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
             (done_frames, done_sent, boss_sent) = (0, false, false);
             votes.clear();
             misses = 0;
+            (unseen, panel_seen) = (0, false);
             detector.last_y = None;
         }
         let Some(map) = current.clone() else { continue };
-        // Map terminée : plus rien à lire (le boss ne s'affiche plus).
-        if done_sent {
+        // Map terminée (le boss ne s'affiche plus), ou zone sans panneau : plus rien à lire.
+        if done_sent || unseen >= NO_PANEL {
             continue;
         }
         let every = if done_frames > 0 { TICK } else { EVERY };
@@ -397,7 +403,18 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
             seen_game = true;
             crate::log_info!("fenêtre du jeu capturée ({:?})", grabber.as_deref_mut().unwrap().game_size());
         }
-        match detector.panel(&column) {
+        let panel = detector.panel(&column);
+        if panel == Panel::Hidden {
+            if !panel_seen {
+                unseen += 1;
+                if unseen >= NO_PANEL {
+                    crate::log_info!("pas de panneau d'objectifs dans {} : plus de capture", map.0);
+                }
+            }
+        } else {
+            panel_seen = true;
+        }
+        match panel {
             Panel::Hidden => {}
             Panel::Completed { .. } => {
                 done_frames += 1;

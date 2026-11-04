@@ -55,6 +55,12 @@ pub fn place(code: &str) -> Place {
     Place::Other
 }
 
+/// Zone où le jeu affiche le panneau des objectifs de map (« Map Objectives ») : maps et logbooks,
+/// pas les arènes de boss ni les épreuves.
+pub fn has_objectives(code: &str) -> bool {
+    place(code) == Place::Run(RunKind::Map)
+}
+
 /// Map dont l'objectif est un boss à tuer : pas un logbook d'Expedition (son objectif : poser
 /// les explosifs et lancer le détonateur).
 pub fn has_boss(code: &str) -> bool {
@@ -542,6 +548,8 @@ Corrupted";
         assert_eq!(place("Sanctum_1_Foyer_1"), Place::Other);
         assert_eq!(place("ExpeditionLogBook_Peninsula"), Place::Run(RunKind::Map));
         assert!(!has_boss("ExpeditionLogBook_Basin") && has_boss("MapEpitaph"));
+        assert!(has_objectives("MapEpitaph") && has_objectives("ExpeditionLogBook_Basin"));
+        assert!(!has_objectives("MapUberBoss_FallenStar") && !has_objectives("Sanctum_1_Foyer_1") && !has_objectives("HideoutShrine"));
     }
 
     #[test]

@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.9.4
+
+- Lecture de l'écran seulement dans les maps et les logbooks : plus aucune capture dans les arènes de boss, les épreuves et les repaires.
+- Zone sans panneau des objectifs (jamais vu en une minute environ) : la capture s'arrête jusqu'à la zone suivante.
+
 ## 0.9.3
 
 - Logbooks d'Expedition : pas de boss à lire (leur objectif : poser les explosifs), seule la fin de map est guettée.
