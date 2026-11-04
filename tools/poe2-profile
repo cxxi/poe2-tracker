@@ -1,0 +1,28 @@
+#!/bin/sh
+# Lit un profil public poe2-tracker, en lecture seule, toujours sur le serveur de poe2-tracker :
+#   poe2-profile <id>            l'export entier (Markdown), précédé de sa date de mise à jour
+#   poe2-profile <id> <section>  une seule section (gear, stats, skills, passives, jewels, atlas,
+#                                maps, quests)
+# Faite pour être autorisée telle quelle à un assistant : l'identifiant et la section sont vérifiés,
+# rien d'autre n'est passé à curl.
+set -eu
+id=${1:-}
+section=${2:-}
+case $id in
+    *[!a-z2-7]* | '') echo "poe2-profile : identifiant invalide (26 caractères a–z et 2–7)" >&2; exit 2 ;;
+esac
+[ ${#id} -eq 26 ] || { echo "poe2-profile : identifiant invalide (26 caractères a–z et 2–7)" >&2; exit 2; }
+case $section in
+    *[!a-z_]*) echo "poe2-profile : section invalide" >&2; exit 2 ;;
+esac
+[ $# -le 2 ] || { echo "usage : poe2-profile <id> [section]" >&2; exit 2; }
+
+json=$(curl -sS --fail-with-body --max-time 20 "https://poe2-tracker.cxxi.io/v1/profiles/$id") || {
+    echo "poe2-profile : profil introuvable ou serveur injoignable ($json)" >&2
+    exit 1
+}
+printf '%s' "$json" | jq -r --arg s "$section" '
+    "Mis à jour : \(.updated_at | todate) (il y a \(((now - .updated_at) / 60) | floor) min)\n",
+    if $s == "" then .profile.markdown
+    else (.profile.sections[] | select(.key == $s) | "## \(.title)\n\n\(.markdown)") // "Section « \($s) » absente du profil."
+    end'
