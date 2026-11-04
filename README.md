@@ -76,6 +76,9 @@ cliquer pendant ce temps.)
   récompenses de quête, pourcentages augmentés, pénalité de résistances), face au build.
 - **Exporter le personnage** (⚙ Menu) : équipement, caractéristiques, aptitudes, talents, joyaux, Atlas,
   maps et quêtes en Markdown, à coller dans une conversation avec une IA.
+- **Profil public** (réglages, décoché par défaut) : le même export envoyé au serveur de
+  poe2-tracker quand il change, lisible par un lien public (Markdown) ; décoché, il est retiré.
+  Le serveur est dans `server/` (API Rust/axum, MariaDB), son déploiement dans `server/deploy/`.
 - **Route de leveling** (en bas) : contenus facultatifs de la campagne à ne pas rater
   (points de passif, résistances, esprit…), d'après `data/route.json`. Le journal du jeu
   annonce chaque récompense permanente : elle est cochée toute seule. Le reste se coche à la

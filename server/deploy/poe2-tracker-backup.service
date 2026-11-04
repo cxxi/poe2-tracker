@@ -1,0 +1,8 @@
+[Unit]
+Description=Sauvegarde de la base poe2-tracker
+After=mariadb.service
+Requires=mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/poe2-tracker/poe2-tracker-backup.sh

@@ -1,5 +1,9 @@
 # Nouveautés
 
+## 0.8.0
+
+- Profil public (réglages, décoché par défaut) : ton personnage, le même contenu que l'export, envoyé au serveur de poe2-tracker quand il change (au plus toutes les 30 secondes). Les réglages donnent son lien public, l'export en Markdown toujours à jour, à donner à une IA ou à un ami. Décoché : le profil est retiré du serveur.
+
 ## 0.7.0
 
 - Mode Édition, bouton en haut à droite des Aptitudes, des Talents et de l'Atlas : un cadre doré autour du panneau tant qu'il est actif ; changer d'onglet le quitte.

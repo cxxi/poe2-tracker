@@ -1,0 +1,10 @@
+[Unit]
+Description=Sauvegarde quotidienne de la base poe2-tracker
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

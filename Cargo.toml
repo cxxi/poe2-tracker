@@ -1,8 +1,11 @@
 [package]
 name = "poe2-tracker"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "MIT"
+
+[workspace]
+members = ["shared", "server"]
 
 [dependencies]
 arboard = "3"
@@ -12,6 +15,7 @@ directories = "5"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 oozextract = "0.5"
+poe2-shared = { path = "shared" }
 regex = "1"
 rfd = "0.15"
 self-replace = "1"

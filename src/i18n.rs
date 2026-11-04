@@ -85,6 +85,11 @@ pub fn set_flip(on: bool) -> bool {
     FLIP.swap(on, Ordering::Relaxed) != on
 }
 
+/// Alt maintenu : l'affichage est dans l'autre langue.
+pub fn flipped() -> bool {
+    FLIP.load(Ordering::Relaxed)
+}
+
 /// Langue affichée en anglais : celle des réglages, ou l'autre tant qu'Alt est maintenu.
 pub fn english() -> bool {
     ENGLISH.load(Ordering::Relaxed) != FLIP.load(Ordering::Relaxed)

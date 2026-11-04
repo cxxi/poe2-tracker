@@ -1,0 +1,26 @@
+[Unit]
+Description=poe2-tracker API
+After=network.target mariadb.service
+Requires=mariadb.service
+
+[Service]
+User=poe2
+Group=poe2
+EnvironmentFile=/etc/poe2-tracker/env
+ExecStart=/opt/poe2-tracker/poe2-server
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

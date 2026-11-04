@@ -27,6 +27,11 @@ impl Default for Sections {
 }
 
 impl Sections {
+    /// Toutes les sections : le profil public.
+    pub fn all() -> Self {
+        Sections { gear: true, stats: true, skills: true, passives: true, jewels: true, atlas: true, maps: true, quests: true }
+    }
+
     /// Chaque section, son nom et ce qu'elle contient, pour les cases de la fenêtre.
     pub fn items(&mut self) -> [(&mut bool, &'static str, &'static str); 8] {
         [
@@ -40,6 +45,15 @@ impl Sections {
             (&mut self.quests, tr!("Quêtes"), tr!("récompenses obtenues et choix faits")),
         ]
     }
+}
+
+/// L'export entier : l'en-tête, puis chaque section sous son titre.
+pub fn join(header: &str, sections: &[poe2_shared::Section]) -> String {
+    let mut out = header.to_string();
+    for s in sections {
+        out.push_str(&format!("\n## {}\n\n{}", s.title, s.markdown));
+    }
+    out
 }
 
 pub fn fmt(v: f64) -> String {

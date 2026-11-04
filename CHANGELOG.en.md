@@ -1,5 +1,9 @@
 # What's new
 
+## 0.8.0
+
+- Public profile (settings, off by default): your character, the same content as the export, sent to the poe2-tracker server when it changes (at most every 30 seconds). The settings give its public link, the export in Markdown always up to date, to give to an AI or a friend. Unticked: the profile is removed from the server.
+
 ## 0.7.0
 
 - Edit mode, button at the top right of Skills, Passives and Atlas: a golden frame around the panel while it is on; switching tabs leaves it.

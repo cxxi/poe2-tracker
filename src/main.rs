@@ -31,6 +31,7 @@ mod mapping;
 mod passive_icons;
 mod richtext;
 mod paths;
+mod profile;
 mod prices;
 mod route;
 mod rules;
@@ -92,6 +93,12 @@ struct Config {
     lang: String,
     /// Sections cochées dans la fenêtre d'export du personnage.
     export: export::Sections,
+    /// Profil public : le personnage envoyé au serveur de poe2-tracker, lisible par un lien.
+    public_profile: bool,
+    /// Jeton de cette installation auprès du serveur (donné au premier envoi).
+    server_token: String,
+    /// Identifiant public du profil de chaque personnage envoyé.
+    profile_ids: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -105,6 +112,9 @@ impl Default for Config {
             lang: String::new(),
             market_min_unit: "ex".into(),
             export: export::Sections::default(),
+            public_profile: false,
+            server_token: String::new(),
+            profile_ids: BTreeMap::new(),
         }
     }
 }
@@ -252,6 +262,8 @@ struct App {
     paint_set: u8,
     /// Choix ouvert depuis l'arbre en mode édition : attribut ou joyau d'un talent pris.
     tree_pick: Option<views::TreeAction>,
+    /// Envois du profil public au serveur.
+    profile_sync: profile::Sync,
     /// De combien la colonne des annonces lues est étirée par-dessus celle du calcul (glissé à la
     /// main sur la limite entre les deux).
     estimate_stretch: f32,
@@ -307,6 +319,7 @@ struct SettingsDraft {
     market_min_ex: f64,
     market_min_unit: String,
     boss_tab: bool,
+    public_profile: bool,
     lang: i18n::Lang,
     /// Choix du dossier du jeu en cours (fenêtre du système).
     picking: Option<Receiver<Option<PathBuf>>>,
@@ -323,6 +336,7 @@ impl SettingsDraft {
             market_min_ex: stored.market_min_ex,
             market_min_unit: stored.market_min_unit.clone(),
             boss_tab: stored.boss_tab,
+            public_profile: stored.public_profile,
             lang: i18n::base(),
             picking: None,
         }
@@ -683,6 +697,7 @@ impl App {
             edit_tab: views::Tab::Equipment,
             paint_set: 0,
             tree_pick: None,
+            profile_sync: profile::Sync::default(),
             estimate_stretch: 0.0,
             tree: views::TreeView::default(),
             passive_icons: passive_icons::PassiveIcons::new(&cc.egui_ctx, dirs.cache_dir().to_path_buf(), config.game_dir.clone()),
@@ -1633,7 +1648,16 @@ impl App {
         }
     }
 
-    /// Niveau du personnage suivi (100 sans personnage : rien n'est jugé trop haut).
+        /// Où en est un personnage : acte, interludes ou endgame.
+    fn progress_text(ch: &coach::CharState) -> String {
+        match ch.max_act {
+            6.. => tr!("endgame").to_string(),
+            5 => tr!("interludes").to_string(),
+            act => tr!("acte {act}", act),
+        }
+    }
+
+/// Niveau du personnage suivi (100 sans personnage : rien n'est jugé trop haut).
     fn char_level(&self) -> u32 {
         self.coach.as_ref().and_then(|c| c.character().map(|(_, ch)| ch.level)).unwrap_or(100)
     }
@@ -2173,7 +2197,13 @@ impl App {
     /// Le personnage en Markdown, à coller dans une conversation avec une IA : son contexte, puis
     /// les sections cochées dans la fenêtre d'export.
     fn export_character(&mut self) -> String {
-        let sections = self.stored.export;
+        let (header, parts) = self.export_parts(self.stored.export);
+        export::join(&header, &parts)
+    }
+
+    /// Export du personnage : l'en-tête (personnage, ligue, build), puis les sections cochées
+    /// dans `sections`, chacune avec sa clé, son titre et son contenu en Markdown.
+    fn export_parts(&mut self, sections: export::Sections) -> (String, Vec<poe2_shared::Section>) {
         let set = self.gear.set.max(1);
         let character = self.coach.as_ref().and_then(|c| c.character().map(|(n, s)| (n.to_string(), s.clone())));
         let mut out = match &character {
@@ -2181,12 +2211,7 @@ impl App {
             None => "# Path of Exile 2\n\n".to_string(),
         };
         if let Some((_, ch)) = &character {
-            let progress = match ch.max_act {
-                6.. => tr!("endgame").to_string(),
-                5 => tr!("interludes").to_string(),
-                act => tr!("acte {act}", act),
-            };
-            out.push_str(&format!("- {}\n", tr!("Classe : {class}, niveau {level}, {progress}", class = ch.class, level = ch.level, progress)));
+            out.push_str(&format!("- {}\n", tr!("Classe : {class}, niveau {level}, {progress}", class = ch.class, level = ch.level, progress = Self::progress_text(ch))));
         }
         if !self.league.is_empty() {
             out.push_str(&format!("- {}\n", tr!("Ligue : {league}", league = self.league)));
@@ -2199,41 +2224,91 @@ impl App {
             }
         }
         out.push_str(&format!("- {}\n", tr!("Textes du jeu en anglais, tels que copiés en jeu")));
+        let mut parts = Vec::new();
+        let mut part = |key: &str, title: &str, markdown: String| parts.push(poe2_shared::Section { key: key.into(), title: title.into(), markdown });
         if sections.gear {
-            out.push_str(&format!("\n## {}\n\n", tr!("Équipement")));
-            out.push_str(&self.gear.export());
+            part("gear", tr!("Équipement"), self.gear.export());
         }
         if sections.stats {
             let sheets = self.character_sheets(set);
-            out.push_str(&format!("\n## {}\n\n", tr!("Caractéristiques")));
-            out.push_str(&export::stats(&sheets.worn, sheets.build.as_ref(), &sheets.build_title, set, &sheets.penalty, sheets.tree_known));
+            part("stats", tr!("Caractéristiques"), export::stats(&sheets.worn, sheets.build.as_ref(), &sheets.build_title, set, &sheets.penalty, sheets.tree_known));
         }
         if sections.skills {
-            out.push_str(&format!("\n## {}\n\n", tr!("Aptitudes")));
-            out.push_str(&self.export_skills());
+            part("skills", tr!("Aptitudes"), self.export_skills());
         }
         if sections.passives {
-            out.push_str(&format!("\n## {}\n\n", tr!("Talents")));
-            out.push_str(&self.export_passives());
+            part("passives", tr!("Talents"), self.export_passives());
         }
         if sections.jewels {
-            out.push_str(&format!("\n## {}\n\n", tr!("Joyaux")));
-            out.push_str(&self.export_jewels());
+            part("jewels", tr!("Joyaux"), self.export_jewels());
         }
         if sections.atlas {
-            out.push_str(&format!("\n## {}\n\n", tr!("Atlas")));
             let atlas: Vec<String> = self.coach.as_mut().and_then(|c| c.maps()).map(|b| b.atlas.values().cloned().collect()).unwrap_or_default();
-            out.push_str(&format!("{} : {}\n", tr!("Passifs de l'Atlas pris"), export::names(&atlas)));
+            part("atlas", tr!("Atlas"), format!("{} : {}\n", tr!("Passifs de l'Atlas pris"), export::names(&atlas)));
         }
         if sections.maps {
-            out.push_str(&format!("\n## {}\n\n", tr!("Maps")));
-            out.push_str(&self.export_maps());
+            part("maps", tr!("Maps"), self.export_maps());
         }
         if sections.quests {
-            out.push_str(&format!("\n## {}\n\n", tr!("Quêtes")));
-            out.push_str(&self.export_quests());
+            part("quests", tr!("Quêtes"), self.export_quests());
         }
-        out
+        (out, parts)
+    }
+
+    /// Profil public du personnage suivi : l'export complet, toutes sections.
+    fn public_profile(&mut self) -> Option<poe2_shared::Profile> {
+        let (name, ch) = self.coach.as_ref()?.character().map(|(n, c)| (n.to_string(), c.clone()))?;
+        let (header, sections) = self.export_parts(export::Sections::all());
+        let build = self.builds.active().map(|b| poe2_shared::BuildInfo {
+            name: b.name.clone(),
+            url: b.source.clone(),
+            step: self.judging_step().map(|s| guide::step_text(&s.label).to_string()),
+        });
+        Some(poe2_shared::Profile {
+            format: poe2_shared::PROFILE_FORMAT,
+            lang: if i18n::english() { "en" } else { "fr" }.into(),
+            app_version: updater::VERSION.into(),
+            character: poe2_shared::CharacterInfo {
+                name,
+                class: ch.class.clone(),
+                level: ch.level,
+                progress: Self::progress_text(&ch),
+                league: Some(self.league.clone()).filter(|l| !l.is_empty()),
+                build,
+            },
+            markdown: export::join(&header, &sections),
+            sections,
+        })
+    }
+
+    /// Profil public : résultats des envois, puis nouvel envoi si le personnage a changé.
+    fn sync_profile(&mut self) {
+        for e in self.profile_sync.poll() {
+            match e {
+                profile::Event::Token(t) => {
+                    self.stored.server_token = t;
+                    self.stored.save(&self.dirs);
+                }
+                profile::Event::Saved { character, id } if self.stored.public_profile => {
+                    if self.stored.profile_ids.get(&character) != Some(&id) {
+                        self.stored.profile_ids.insert(character, id);
+                        self.stored.save(&self.dirs);
+                    }
+                }
+                profile::Event::Deleted => {
+                    self.stored.profile_ids.clear();
+                    self.stored.save(&self.dirs);
+                }
+                _ => {}
+            }
+        }
+        // Alt maintenu : l'export serait dans l'autre langue, le profil changerait pour rien.
+        if !self.stored.public_profile || i18n::flipped() || !self.profile_sync.due() {
+            return;
+        }
+        if let Some(p) = self.public_profile() {
+            self.profile_sync.send(self.stored.server_token.clone(), p);
+        }
     }
 
     /// Aptitudes du build à l'étape affichée, chaque gemme marquée selon qu'elle est cochée
@@ -2439,6 +2514,9 @@ impl App {
     /// le menu (toutes).
     /// Réglages de l'application : appliqués et enregistrés par « Enregistrer ».
     fn settings_window(&mut self, ctx: &egui::Context) {
+        // Lien du profil public du personnage suivi, s'il a déjà été envoyé.
+        let public_link = self.character.as_ref().filter(|_| self.stored.public_profile).and_then(|c| self.stored.profile_ids.get(c)).map(|id| profile::public_url(id));
+        let sync_status = self.profile_sync.status.clone().filter(|_| self.stored.public_profile || self.stored.profile_ids.is_empty());
         let Some(draft) = &mut self.settings else {
             return;
         };
@@ -2606,6 +2684,30 @@ impl App {
                     ui.checkbox(&mut draft.auto_update, tr!("activée"));
                     ui.end_row();
 
+                    section(ui, tr!("Profil public"));
+                    label(
+                        ui,
+                        tr!("Profil public"),
+                        tr!("ton personnage (le contenu de l'export) envoyé au serveur de poe2-tracker quand il change, lisible par qui a le lien ; décoché : retiré du serveur"),
+                    );
+                    ui.checkbox(&mut draft.public_profile, tr!("activé"));
+                    ui.end_row();
+                    if let Some(url) = public_link.as_ref() {
+                        label(ui, tr!("Lien public"), tr!("à donner à une IA ou à un ami : l'export en Markdown, toujours à jour"));
+                        ui.horizontal(|ui| {
+                            ui.hyperlink_to(RichText::new(url).small(), url);
+                            if ui.small_button(tr!("Copier")).clicked() {
+                                ui.ctx().copy_text(url.clone());
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    if let Some((text, error)) = &sync_status {
+                        label(ui, tr!("Dernier envoi"), "");
+                        ui.label(RichText::new(text).color(if *error { Color32::from_rgb(230, 120, 100) } else { Color32::GRAY }));
+                        ui.end_row();
+                    }
+
                     section(ui, tr!("Expérimental"));
                     label(
                         ui,
@@ -2637,6 +2739,17 @@ impl App {
             self.config.market_min_unit = draft.market_min_unit.clone();
             self.market_min_unit = draft.market_min_unit.clone();
             self.stored.boss_tab = draft.boss_tab;
+            if draft.public_profile != self.stored.public_profile {
+                self.stored.public_profile = draft.public_profile;
+                if draft.public_profile {
+                    self.profile_sync.force();
+                } else {
+                    // Décoché : les profils envoyés sont retirés du serveur.
+                    let mut names: Vec<String> = self.stored.profile_ids.keys().cloned().collect();
+                    names.extend(self.character.clone().filter(|c| !names.contains(c)));
+                    self.profile_sync.delete(self.stored.server_token.clone(), names);
+                }
+            }
             self.config.trade_prices = draft.trade_prices;
             self.config.auto_update = draft.auto_update;
             self.config.market_min_ex = draft.market_min_ex;
@@ -6531,6 +6644,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_profile();
         // Alt maintenu : tout dans l'autre langue (interface et textes du jeu), le temps de l'appui.
         // Développement : `POE2_TRACKER_ALT=1` fait comme si Alt était maintenu.
         if i18n::set_flip(ctx.input(|i| i.modifiers.alt) || std::env::var_os("POE2_TRACKER_ALT").is_some()) {
