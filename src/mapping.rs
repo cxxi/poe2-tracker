@@ -55,6 +55,12 @@ pub fn place(code: &str) -> Place {
     Place::Other
 }
 
+/// Map dont l'objectif est un boss à tuer : pas un logbook d'Expedition (son objectif : poser
+/// les explosifs et lancer le détonateur).
+pub fn has_boss(code: &str) -> bool {
+    !code.starts_with("ExpeditionLogBook")
+}
+
 /// Waystone copié (Ctrl+C) avant d'ouvrir la map : ses chiffres d'en-tête et ses mods.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Waystone {
@@ -535,6 +541,7 @@ Corrupted";
         assert_eq!(place("P1_5"), Place::Campaign);
         assert_eq!(place("Sanctum_1_Foyer_1"), Place::Other);
         assert_eq!(place("ExpeditionLogBook_Peninsula"), Place::Run(RunKind::Map));
+        assert!(!has_boss("ExpeditionLogBook_Basin") && has_boss("MapEpitaph"));
     }
 
     #[test]

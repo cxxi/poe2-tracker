@@ -2357,7 +2357,7 @@ impl App {
         }
         let map = c.inside_map();
         let mut boss = false;
-        if let Some((code, seed)) = &map {
+        if let Some((code, seed)) = map.as_ref().filter(|(code, _)| mapping::has_boss(code)) {
             let book = c.maps();
             let unknown = book.and_then(|b| b.current()).is_some_and(|(r, _)| r.boss.is_none());
             let known = book.and_then(|b| b.known_boss(code)).or(self.share.bosses.get(code).map(String::as_str)).map(str::to_string);

@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.3
+
+- Expedition logbooks: no boss to read (their objective: place the explosives), only the map completion is watched.
+- An objective that isn't a boss is no longer read for the whole map: reading stops after about 25 seconds.
+
 ## 0.9.2
 
 - Fairer "towards the build" score: each targeted mod weighs what its value is worth (two spell levels count far more than some life and dexterity), instead of all counting the same.

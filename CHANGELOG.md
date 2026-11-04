@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.9.3
+
+- Logbooks d'Expedition : pas de boss à lire (leur objectif : poser les explosifs), seule la fin de map est guettée.
+- Un objectif qui n'est pas un boss n'est plus relu toute la map : la lecture s'arrête au bout de 25 secondes environ.
+
 ## 0.9.2
 
 - Note « vers le build » plus juste : chaque mod visé pèse ce que vaut sa valeur (deux niveaux de sorts comptent bien plus que de la vie et de la dextérité), au lieu de tous compter pareil.

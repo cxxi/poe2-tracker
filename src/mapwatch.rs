@@ -42,6 +42,9 @@ const TICK: Duration = Duration::from_secs(1);
 const EVERY: Duration = Duration::from_secs(3);
 /// Entre deux lectures du nom du boss.
 const OCR_EVERY: Duration = Duration::from_secs(3);
+/// Lectures sans nom de boss après lesquelles on abandonne pour cette map (un boss caché par
+/// une étiquette d'objet le reste rarement aussi longtemps).
+const GIVE_UP: u32 = 8;
 /// En-tête déjà trouvé : seule cette bande autour de lui est capturée (en-tête, objectif et
 /// ligne lue par l'OCR), de `y - 8` à `y + 64`.
 const BAND_ABOVE: u32 = 8;
@@ -354,6 +357,7 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
     let mut current: Option<(String, u64)> = None;
     let (mut done_frames, mut done_sent, mut boss_sent) = (0, false, false);
     let mut votes: Vec<String> = Vec::new();
+    let mut misses = 0;
     let mut last_ocr: Option<Instant> = None;
     let mut last_grab: Option<Instant> = None;
     let mut seen_game = false;
@@ -368,6 +372,7 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
             current = w.map.clone();
             (done_frames, done_sent, boss_sent) = (0, false, false);
             votes.clear();
+            misses = 0;
             detector.last_y = None;
         }
         let Some(map) = current.clone() else { continue };
@@ -413,15 +418,22 @@ fn run(want: Arc<Mutex<Want>>, tx: Sender<Seen>, models: PathBuf, ctx: egui::Con
                     Reader::load(&models, &w.game_dir).map_err(|e| crate::log_warn!("lecture du nom des boss impossible : {e}"))
                 });
                 let Ok(r) = r else { continue };
-                if let Some(name) = r.boss(&column, y) {
-                    if votes.contains(&name) {
+                let Some(name) = r.boss(&column, y) else {
+                    // Objectif qui n'est pas un boss (« Place Explosives… ») : on arrête de le lire.
+                    misses += 1;
+                    if misses >= GIVE_UP {
                         boss_sent = true;
-                        crate::log_info!("boss de {} : {name}", map.0);
-                        let _ = tx.send(Seen::Boss { map: map.clone(), name });
-                        ctx.request_repaint();
-                    } else {
-                        votes.push(name);
+                        crate::log_info!("pas de boss lisible dans l'objectif de {}", map.0);
                     }
+                    continue;
+                };
+                if votes.contains(&name) {
+                    boss_sent = true;
+                    crate::log_info!("boss de {} : {name}", map.0);
+                    let _ = tx.send(Seen::Boss { map: map.clone(), name });
+                    ctx.request_repaint();
+                } else {
+                    votes.push(name);
                 }
             }
         }
