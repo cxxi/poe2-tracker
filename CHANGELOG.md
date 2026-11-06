@@ -1,5 +1,18 @@
 # Nouveautés
 
+## 0.9.6
+
+- Nouvel onglet Boutique : tes annonces sur le site de trade (recherche par ton compte vendeur).
+  - En vente : depuis combien de temps, à quel prix (et son évolution), le total demandé ; tri par durée ou par prix ; fiche de l'objet au survol, son diagnostic au clic.
+  - À classer : les annonces disparues, vendues ou retirées (le site ne dit pas lequel) : deux boutons pour le préciser. Une pastille sur l'onglet et une ligne dans le fil d'activité les signalent.
+  - Historique : les ventes (prix en vert) et les retraits, à filtrer ou rechercher ; un clic change l'état.
+  - Relue toute seule (toutes les 15 minutes par défaut) ou avec « Actualiser » : réglages Diagnostic et prix, Boutique.
+  - Les objets marqués « vendu » sont envoyés au serveur de poe2-tracker (réglage « Partager mes ventes »), pour de meilleures estimations plus tard.
+- Estimations : tes propres annonces ne comptent plus parmi les annonces comparables.
+- Compte Path of Exile (Pseudo#1234) demandé au premier lancement ; le lien de ton profil public devient celui de ton compte.
+- Builds Mobalytics : une nouvelle version sur le site est signalée par un bouton vert en haut de l'app (un clic la télécharge) ; la date de la version dans le gestionnaire de builds. Réglage « Nouvelles versions des builds ».
+- Réglages rangés par catégories, plus lisibles.
+
 ## 0.9.5
 
 - Caractéristiques plus proches du jeu :

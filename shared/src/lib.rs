@@ -67,9 +67,71 @@ pub struct ProfileSaved {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicProfile {
     pub id: String,
+    /// Compte Path of Exile du joueur (« Pseudo#1234 »), s'il l'a donné à l'app.
+    #[serde(default)]
+    pub account: Option<String>,
     /// Dernière mise à jour, en secondes depuis l'époque Unix.
     pub updated_at: i64,
     pub profile: Profile,
+}
+
+/// Compte Path of Exile d'une installation (`PUT /v1/me/account`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Account {
+    pub account: String,
+}
+
+/// Compte Path of Exile bien formé : lettres, chiffres ou « _ », puis « # » et quatre chiffres
+/// (« cxxi#2432 »).
+pub fn valid_account(s: &str) -> bool {
+    let Some((name, tag)) = s.split_once('#') else { return false };
+    !name.is_empty() && name.len() <= 32 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') && tag.len() == 4 && tag.bytes().all(|b| b.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_format() {
+        assert!(valid_account("cxxi#2432"));
+        assert!(valid_account("THEALIASFMR#3293"));
+        assert!(valid_account("Gamer_42#0007"));
+        for bad in ["", "cxxi", "cxxi#243", "cxxi#24321", "#2432", "cx xi#2432", "cxxi#24a2", "cxxi#2432#1", "Zoé#1234"] {
+            assert!(!valid_account(bad), "{bad}");
+        }
+    }
+}
+
+/// Objet vendu par le joueur (`PUT /v1/me/sales/{annonce}`) : une annonce de sa boutique qu'il a
+/// marquée « vendu ». Pour les estimations à venir : ce qui part, à quel prix, en combien de temps.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sale {
+    pub league: String,
+    /// Classe d'objet comme dans le texte en jeu (« Body Armours »).
+    pub item_class: String,
+    pub rarity: String,
+    pub name: String,
+    pub base: String,
+    pub item_level: u32,
+    /// Propriétés, implicites et autres mods, tels que le site les donne.
+    pub properties: Vec<String>,
+    pub implicits: Vec<String>,
+    pub mods: Vec<String>,
+    /// Dernier prix demandé (« 70 », « exalted »).
+    pub amount: f64,
+    pub currency: String,
+    /// Mise en vente (date la plus ancienne donnée par le site) et dernière date du site, en
+    /// secondes Unix.
+    pub listed_at: Option<i64>,
+    pub indexed: Option<i64>,
+    /// Lecture où l'annonce n'était plus en vente.
+    pub gone_at: i64,
+}
+
+/// Identifiant d'annonce du site de trade : 64 caractères hexadécimaux.
+pub fn valid_listing_id(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Erreur renvoyée par l'API.

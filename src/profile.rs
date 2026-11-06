@@ -24,6 +24,11 @@ pub fn public_url(id: &str) -> String {
     format!("{}/v1/profiles/{id}.md", server())
 }
 
+/// Lien public d'un personnage par son compte (« # » écrit %23) : le même export.
+pub fn account_url(account: &str, character: &str) -> String {
+    format!("{}/v1/profiles/{}/{}.md", server(), percent(account), percent(character))
+}
+
 pub enum Event {
     /// Jeton de l'installation, à garder dans la config (vide : refusé par le serveur, à refaire).
     Token(String),

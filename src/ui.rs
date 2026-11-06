@@ -1307,6 +1307,9 @@ pub const GOLD: Color32 = Color32::from_rgb(200, 172, 112);
 /// Fond des cartes (route, activité) : un cran plus clair que les panneaux.
 pub const CARD_FILL: Color32 = Color32::from_rgb(20, 18, 15);
 pub const GOLD_DIM: Color32 = Color32::from_rgb(120, 100, 64);
+/// Ce qui attend le joueur (annonces à classer), et ce qui a réussi (vendu).
+pub const ORANGE: Color32 = Color32::from_rgb(230, 150, 70);
+pub const GREEN: Color32 = Color32::from_rgb(120, 200, 120);
 
 /// Listes et boutons sombres à liseré doré (barre posée sur le fond du jeu).
 pub fn gold_widgets(ui: &mut egui::Ui) {
@@ -1371,6 +1374,18 @@ pub fn tab_strip<T: Copy + PartialEq>(
     tabs: &[(T, &str)],
     current: T,
 ) -> Option<T> {
+    tab_strip_badged(ui, rect, tabs, current, |_| 0)
+}
+
+/// Comme `tab_strip`, avec une pastille orange sur un onglet qui attend le joueur (`badge` :
+/// combien de choses, 0 sans pastille).
+pub fn tab_strip_badged<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    tabs: &[(T, &str)],
+    current: T,
+    badge: impl Fn(T) -> usize,
+) -> Option<T> {
     let line_y = rect.bottom() - 1.0;
     ui.painter().hline(
         rect.x_range(),
@@ -1385,9 +1400,11 @@ pub fn tab_strip<T: Copy + PartialEq>(
         let galley = ui
             .painter()
             .layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE);
+        let count = badge(*tab);
+        let badge_w = if count > 0 { 20.0 } else { 0.0 };
         let r = Rect::from_min_max(
             egui::pos2(x, rect.top() + 3.0),
-            egui::pos2(x + galley.size().x + 24.0, line_y),
+            egui::pos2(x + galley.size().x + 24.0 + badge_w, line_y),
         );
         let resp = ui
             .interact(r, ui.id().with(("tab", *label)), Sense::click())
@@ -1424,13 +1441,24 @@ pub fn tab_strip<T: Copy + PartialEq>(
         } else {
             Color32::GRAY
         };
+        let text_center = r.center() - Vec2::new(badge_w / 2.0, 0.0);
         painter.text(
-            r.center(),
+            text_center,
             Align2::CENTER_CENTER,
             *label,
             font.clone(),
             color,
         );
+        if count > 0 {
+            // Le chiffre centré sur sa taille réelle (pas sur la hauteur de la police), en gras :
+            // dessiné deux fois, décalé d'un demi-pixel (pas de police grasse dans l'app).
+            let c = egui::pos2(text_center.x + galley.size().x / 2.0 + 13.0, text_center.y);
+            painter.circle_filled(c, 7.0, ORANGE);
+            let digits = painter.layout_no_wrap(count.min(99).to_string(), FontId::proportional(12.0), Color32::from_rgb(25, 16, 6));
+            let at = c - digits.size() / 2.0 + Vec2::new(-0.25, 0.0);
+            painter.galley(at, digits.clone(), Color32::from_rgb(25, 16, 6));
+            painter.galley(at + Vec2::new(0.5, 0.0), digits, Color32::from_rgb(25, 16, 6));
+        }
         if resp.clicked() {
             picked = Some(*tab);
         }
@@ -1702,6 +1730,45 @@ pub fn amount_with_unit(ui: &mut egui::Ui, id: &str, value: &mut f64, unit: &mut
     ui.painter().rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
     ui.painter().vline(split + 0.5, rect.y_range(), stroke);
     changed
+}
+
+/// Lien à copier, sur toute la largeur : le texte coupé par « … » (en entier au survol s'il est
+/// coupé, un clic l'ouvre) et l'icône de copie collée à droite, dans le même cadre (comme `amount_with_unit`).
+/// L'icône devient « ✔ » un instant après la copie.
+pub fn copy_field(ui: &mut egui::Ui, id: &str, url: &str) {
+    let id = ui.id().with(id);
+    let h = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+    let button = egui::Rect::from_min_max(egui::pos2(rect.max.x - h - 6.0, rect.min.y), rect.max);
+    let text = egui::Rect::from_min_max(rect.min, egui::pos2(button.min.x, rect.max.y)).shrink2(Vec2::new(8.0, 0.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    // Coupé, le texte entier s'affiche déjà au survol (egui).
+    let link = child.add(egui::Label::new(RichText::new(url).color(Color32::from_gray(200))).truncate().sense(Sense::click()));
+    if link.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if link.clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    }
+    let resp = ui.interact(button, id, Sense::click()).on_hover_text(tr!("Copier le lien"));
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter().rect_filled(button.shrink(1.0), 2.0, GOLD_DIM.gamma_multiply(0.25));
+    }
+    let now = ui.input(|i| i.time);
+    if resp.clicked() {
+        ui.ctx().copy_text(url.to_string());
+        ui.data_mut(|d| d.insert_temp(id, now));
+    }
+    let copied = ui.data(|d| d.get_temp::<f64>(id)).is_some_and(|t| now - t < 1.5);
+    if copied {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+    }
+    let icon = if copied { "✔" } else { "🗐" };
+    ui.painter().text(button.center(), egui::Align2::CENTER_CENTER, icon, egui::TextStyle::Button.resolve(ui.style()), if resp.hovered() || copied { GOLD } else { GOLD_DIM });
+    let stroke = Stroke::new(1.0_f32, GOLD_DIM);
+    ui.painter().rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
+    ui.painter().vline(button.min.x + 0.5, rect.y_range(), stroke);
 }
 
 pub fn keys(ui: &mut egui::Ui, keys: &[&str]) {

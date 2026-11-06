@@ -136,11 +136,13 @@ impl BuildStore {
     pub fn add(&mut self, files: Vec<BuildFile>, source: &str) -> Res<BuildMeta> {
         // On ne garde que les fichiers qui sont bien des étapes de build lisibles.
         let site = site_name(&files);
+        let updated = site_updated(&files);
         let (steps, extras) = read_steps(files)?;
         let name = site.unwrap_or_else(|| guide::split_name(&steps[0].1.name).1);
         let id = format!("{}-{}", slug(&name), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
         let dir = self.dir.join(&id);
         write_steps(&dir, &steps, extras)?;
+        write_updated(&dir, updated.as_deref());
         let meta = BuildMeta { id: id.clone(), name, source: source.to_string() };
         self.index.builds.push(meta.clone());
         self.set_active(&id);
@@ -151,6 +153,7 @@ impl BuildStore {
     /// choix d'attributs, sont gardés.
     pub fn update(&mut self, id: &str, files: Vec<BuildFile>, source: &str) -> Res<BuildMeta> {
         let site = site_name(&files);
+        let updated = site_updated(&files);
         let (steps, extras) = read_steps(files)?;
         let dir = self.dir.join(id);
         for f in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
@@ -160,6 +163,7 @@ impl BuildStore {
             }
         }
         write_steps(&dir, &steps, extras)?;
+        write_updated(&dir, updated.as_deref());
         let name = site.unwrap_or_else(|| guide::split_name(&steps[0].1.name).1);
         let meta = self.index.builds.iter_mut().find(|b| b.id == id).ok_or("build inconnu")?;
         meta.name = name;
@@ -167,6 +171,110 @@ impl BuildStore {
         let meta = meta.clone();
         self.save();
         Ok(meta)
+    }
+}
+
+/// Date de la version du site gardée avec le build (retirée si le site n'en donne pas).
+fn write_updated(dir: &Path, updated: Option<&str>) {
+    let path = dir.join(BUILD_UPDATED);
+    match updated {
+        Some(at) => {
+            let _ = std::fs::write(path, at);
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl BuildStore {
+    /// Date de la version du site qu'on a de ce build (secondes Unix), si le site la donne.
+    pub fn site_version(&self, id: &str) -> Option<i64> {
+        std::fs::read_to_string(self.dir_of(id).join(BUILD_UPDATED)).ok().and_then(|s| iso_secs(&s))
+    }
+
+    /// Version qu'on a de ce build, pour la comparer à celle du site : sa date sur le site, ou
+    /// à défaut (build importé avant que l'app la garde) celle de son import.
+    fn local_version(&self, id: &str) -> Option<i64> {
+        self.site_version(id).or_else(|| {
+            let modified = std::fs::metadata(self.files(id).first()?).ok()?.modified().ok()?;
+            Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
+        })
+    }
+}
+
+/// Les builds Mobalytics sont regardés toutes les 30 minutes : une version plus récente sur le
+/// site est signalée (bouton dans la barre du haut, gestionnaire de builds).
+const WATCH_EVERY: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Default)]
+pub struct UpdateWatch {
+    chan: Option<(std::sync::mpsc::Sender<Vec<(String, i64)>>, std::sync::mpsc::Receiver<Vec<(String, i64)>>)>,
+    busy: bool,
+    last: Option<std::time::Instant>,
+    /// Builds dont le site a une version plus récente : identifiant → date de cette version.
+    pub newer: std::collections::HashMap<String, i64>,
+}
+
+impl UpdateWatch {
+    /// À appeler à chaque image : résultats reçus, et nouveau regard quand c'est l'heure.
+    pub fn poll(&mut self, store: &BuildStore, enabled: bool, ctx: &eframe::egui::Context) {
+        // Un envoi par regard (vide si rien n'a répondu) : sa réception le termine.
+        let batches: Vec<Vec<(String, i64)>> = self.chan.as_ref().map(|(_, rx)| rx.try_iter().collect()).unwrap_or_default();
+        if !batches.is_empty() {
+            self.busy = false;
+        }
+        for (id, remote) in batches.into_iter().flatten() {
+            // Une minute de marge : l'heure du site et celle du disque peuvent différer un peu.
+            match store.local_version(&id) {
+                Some(local) if remote > local + 60 => {
+                    self.newer.insert(id, remote);
+                }
+                _ => {
+                    self.newer.remove(&id);
+                }
+            }
+        }
+        if !enabled {
+            self.newer.clear();
+            return;
+        }
+        if let Some(t) = self.last.filter(|_| !self.busy) {
+            if let Some(left) = WATCH_EVERY.checked_sub(t.elapsed()) {
+                ctx.request_repaint_after(left);
+                return;
+            }
+        }
+        if self.busy {
+            return;
+        }
+        let builds: Vec<(String, String)> = store.list().iter().filter(|b| b.source.contains("mobalytics.gg")).map(|b| (b.id.clone(), b.source.clone())).collect();
+        self.last = Some(std::time::Instant::now());
+        if builds.is_empty() {
+            return;
+        }
+        self.busy = true;
+        let tx = self.chan.get_or_insert_with(std::sync::mpsc::channel).0.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            for (i, (id, url)) in builds.into_iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+                match mobalytics_updated(&url) {
+                    Ok(at) => out.push((id, at)),
+                    Err(e) => crate::log_warn!("version du build {id} sur Mobalytics : {e}"),
+                }
+            }
+            let _ = tx.send(out);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Build mis à jour : plus rien à signaler pour lui.
+    pub fn forget(&mut self, id: &str) {
+        self.newer.remove(id);
     }
 }
 
@@ -309,6 +417,30 @@ pub fn load_quest_choices(dir: &Path) -> Vec<QuestChoice> {
 }
 /// Nom complet du build quand le site le donne (celui des .build est coupé à 40 caractères).
 const BUILD_NAME: &str = "build-name.txt";
+/// Date de la version du build sur son site (« 2026-09-29T23:25:59Z », Mobalytics) : gardée
+/// pour savoir quand il y en a une plus récente.
+const BUILD_UPDATED: &str = "updated-at.txt";
+
+/// Date de la version donnée par le site parmi les fichiers d'un import.
+fn site_updated(files: &[BuildFile]) -> Option<String> {
+    files.iter().find(|f| f.name == BUILD_UPDATED).map(|f| String::from_utf8_lossy(&f.data).trim().to_string())
+}
+
+/// Date ISO 8601 en UTC (« 2026-09-29T23:25:59Z », fractions de seconde ignorées) en secondes Unix.
+pub fn iso_secs(s: &str) -> Option<i64> {
+    let (date, time) = s.trim().trim_end_matches('Z').split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let mut t = time.split(['.', '+']).next()?.split(':').map(|p| p.parse::<i64>().ok());
+    let (h, min, sec) = (t.next()??, t.next()??, t.next().flatten().unwrap_or(0));
+    // Jours depuis 1970 (calendrier grégorien).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400 + h * 3600 + min * 60 + sec)
+}
 
 const MOBALYTICS_API: &str = "https://mobalytics.gg/api/poe-2/v1/graphql/query";
 /// Lien public d'un build Mobalytics, ou lien sur le profil de son auteur.
@@ -319,6 +451,7 @@ static MOBA_PROFILE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"mobalytics\
 /// chaque pièce (sets d'armes compris) et set d'armes de chaque sort.
 const MOBA_DOC: &str = "error data {
     id
+    updatedAt
     data { name }
     content: contentV2 { id
         ... on NgfDocumentCmWidgetContentVariantsV1 { data { childrenVariants { id title description { value } } } }
@@ -352,15 +485,29 @@ fn mobalytics_query(query: &str, variables: serde_json::Value) -> Res<serde_json
         .map_err(|e| e.to_string())
 }
 
+/// Où chercher le document d'un lien Mobalytics : champ, type de l'entrée et entrée.
+fn mobalytics_input(page_url: &str) -> Res<(&'static str, &'static str, serde_json::Value)> {
+    if let Some(c) = MOBA_PROFILE.captures(page_url) {
+        Ok(("userGeneratedDocumentBySlugifiedName", "NgfUserGeneratedDocumentInputBySlugifiedName", serde_json::json!({ "authorProfileName": &c[1], "slugifiedName": &c[2] })))
+    } else if let Some(c) = MOBA_PUBLIC.captures(page_url) {
+        Ok(("userGeneratedDocumentBySlug", "Poe2UserGeneratedDocumentInputBySlug", serde_json::json!({ "slug": &c[1], "type": "builds", "widgetsOverride": [] })))
+    } else {
+        Err(tr!("lien Mobalytics non reconnu (attendu : mobalytics.gg/poe-2/builds/… ou …/profile/<auteur>/builds/…)").into())
+    }
+}
+
+/// Date de la dernière version d'un build Mobalytics (petite requête : la date seule), en
+/// secondes Unix.
+pub fn mobalytics_updated(page_url: &str) -> Res<i64> {
+    let (field, input_type, input) = mobalytics_input(page_url)?;
+    let query = format!("query Updated($input: {input_type}!) {{ game: poe2 {{ documents {{ {field}(input: $input) {{ error data {{ updatedAt }} }} }} }} }}");
+    let resp = mobalytics_query(&query, serde_json::json!({ "input": input }))?;
+    resp["data"]["game"]["documents"][field]["data"]["updatedAt"].as_str().and_then(iso_secs).ok_or_else(|| tr!("build introuvable sur Mobalytics (lien ou format changé ?)").to_string())
+}
+
 /// Document Mobalytics d'un build (identifiant, variantes, runes), et le champ qui l'a donné.
 fn mobalytics_document(page_url: &str) -> Res<(serde_json::Value, &'static str)> {
-    let (field, input_type, input) = if let Some(c) = MOBA_PROFILE.captures(page_url) {
-        ("userGeneratedDocumentBySlugifiedName", "NgfUserGeneratedDocumentInputBySlugifiedName", serde_json::json!({ "authorProfileName": &c[1], "slugifiedName": &c[2] }))
-    } else if let Some(c) = MOBA_PUBLIC.captures(page_url) {
-        ("userGeneratedDocumentBySlug", "Poe2UserGeneratedDocumentInputBySlug", serde_json::json!({ "slug": &c[1], "type": "builds", "widgetsOverride": [] }))
-    } else {
-        return Err(tr!("lien Mobalytics non reconnu (attendu : mobalytics.gg/poe-2/builds/… ou …/profile/<auteur>/builds/…)").into());
-    };
+    let (field, input_type, input) = mobalytics_input(page_url)?;
     let query = format!("query Build($input: {input_type}!) {{ game: poe2 {{ documents {{ {field}(input: $input) {{ {MOBA_DOC} }} }} }} }} {MOBA_AFFIXES}");
     let resp = mobalytics_query(&query, serde_json::json!({ "input": input }))?;
     if resp["data"]["game"]["documents"][field]["data"]["id"].as_str().is_none() {
@@ -429,6 +576,9 @@ fn fetch_mobalytics(page_url: &str) -> Res<Vec<BuildFile>> {
     }
     if let Some(name) = doc["data"]["name"].as_str().filter(|n| !n.is_empty()) {
         files.push(BuildFile { name: BUILD_NAME.into(), data: name.as_bytes().to_vec() });
+    }
+    if let Some(at) = doc["updatedAt"].as_str().filter(|a| iso_secs(a).is_some()) {
+        files.push(BuildFile { name: BUILD_UPDATED.into(), data: at.as_bytes().to_vec() });
     }
     Ok(files)
 }
@@ -934,6 +1084,14 @@ mod tests {
         assert_eq!(steps[0].name, "Act 1");
         assert_eq!(steps[0].items["weapon1"], ["Iron Rune", "Desert Rune"]);
         assert!(!steps[0].items.contains_key("boots"));
+    }
+
+    #[test]
+    fn iso_dates() {
+        assert_eq!(iso_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(iso_secs("2026-09-29T23:25:59Z"), Some(1_790_724_359));
+        assert_eq!(iso_secs("2024-02-29T12:00:00.123Z"), Some(1_709_208_000));
+        assert_eq!(iso_secs("pas une date"), None);
     }
 
     #[test]

@@ -40,6 +40,7 @@ mod route;
 mod rules;
 mod screen;
 mod share;
+mod shop;
 mod stats;
 mod statdesc;
 mod trade;
@@ -108,6 +109,19 @@ struct Config {
     screen_watch: bool,
     /// Erreurs de l'app et boss lus à l'écran envoyés au serveur de poe2-tracker.
     share_data: bool,
+    /// Builds Mobalytics regardés toutes les 30 minutes : une version plus récente est signalée.
+    build_updates: bool,
+    /// Boutique (annonces du compte sur le site de trade) relue toute seule, toutes les
+    /// `shop_every` minutes ; sinon seulement avec « Actualiser ».
+    shop_auto: bool,
+    shop_every: u32,
+    /// Objets de la boutique marqués « vendu » envoyés au serveur (prix, temps en vente), pour
+    /// les estimations.
+    share_sales: bool,
+    /// Compte Path of Exile du joueur (« Pseudo#1234 »), demandé au lancement s'il manque.
+    account: String,
+    /// Compte confirmé par le serveur pour le jeton actuel (vidé quand le jeton change).
+    account_sent: String,
 }
 
 impl Default for Config {
@@ -126,6 +140,12 @@ impl Default for Config {
             profile_ids: BTreeMap::new(),
             screen_watch: true,
             share_data: false,
+            build_updates: true,
+            shop_auto: true,
+            shop_every: 15,
+            share_sales: true,
+            account: String::new(),
+            account_sent: String::new(),
         }
     }
 }
@@ -279,6 +299,23 @@ struct App {
     mapwatch: Option<mapwatch::Watch>,
     /// Erreurs et boss des maps partagés avec le serveur (réglage « Envoyer les erreurs »).
     share: share::Share,
+    /// Nouvelles versions des builds Mobalytics, regardées toutes les 30 minutes.
+    build_watch: builds::UpdateWatch,
+    /// Boutique du compte (annonces sur le site de trade), lecture en cours, dernière demande
+    /// et dernière erreur.
+    shop: Option<shop::Shop>,
+    shop_rx: Option<Receiver<trade::ShopResult>>,
+    shop_asked: Option<Instant>,
+    shop_error: Option<String>,
+    /// Tri de la boutique (colonne, décroissant), vue affichée et filtre de l'historique.
+    shop_sort: (ShopSort, bool),
+    shop_view: ShopView,
+    shop_filter: Option<shop::Status>,
+    /// Recherche de l'historique, et annonce dont la fenêtre « vendu / retiré » est ouverte.
+    shop_search: String,
+    shop_edit: Option<String>,
+    /// Texte de l'objet ouvert au diagnostic depuis la boutique (son fil d'Ariane y ramène).
+    diag_from_shop: Option<String>,
     /// De combien la colonne des annonces lues est étirée par-dessus celle du calcul (glissé à la
     /// main sur la limite entre les deux).
     estimate_stretch: f32,
@@ -316,6 +353,8 @@ struct App {
     /// Ligue utilisée pour les prix (celle du personnage).
     league: String,
     welcome: Welcome,
+    /// Compte tapé dans la fenêtre qui le demande (compte encore inconnu).
+    account_input: String,
     /// Fenêtre des réglages ouverte : ses valeurs en cours de modification.
     settings: Option<SettingsDraft>,
     /// Fenêtre d'export du personnage ouverte.
@@ -339,9 +378,43 @@ struct SettingsDraft {
     public_profile: bool,
     screen_watch: bool,
     share_data: bool,
+    build_updates: bool,
+    shop_auto: bool,
+    shop_every: u32,
+    share_sales: bool,
+    account: String,
     lang: i18n::Lang,
     /// Choix du dossier du jeu en cours (fenêtre du système).
     picking: Option<Receiver<Option<PathBuf>>>,
+    /// Catégorie affichée.
+    tab: SettingsTab,
+}
+
+/// Catégories des réglages, dans l'ordre de la colonne de gauche.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    General,
+    Prices,
+    Profile,
+    Screen,
+    Improve,
+    Experimental,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 6] = [SettingsTab::General, SettingsTab::Prices, SettingsTab::Profile, SettingsTab::Screen, SettingsTab::Improve, SettingsTab::Experimental];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::General => tr!("Général"),
+            SettingsTab::Prices => tr!("Diagnostic et prix"),
+            SettingsTab::Profile => tr!("Compte et profil"),
+            SettingsTab::Screen => tr!("Lecture de l'écran"),
+            SettingsTab::Improve => tr!("Améliorer poe2-tracker"),
+            SettingsTab::Experimental => tr!("Expérimental"),
+        }
+    }
 }
 
 impl SettingsDraft {
@@ -358,8 +431,14 @@ impl SettingsDraft {
             public_profile: stored.public_profile,
             screen_watch: stored.screen_watch,
             share_data: stored.share_data,
+            build_updates: stored.build_updates,
+            shop_auto: stored.shop_auto,
+            shop_every: stored.shop_every,
+            share_sales: stored.share_sales,
+            account: stored.account.clone(),
             lang: i18n::base(),
             picking: None,
+            tab: SettingsTab::default(),
         }
     }
 }
@@ -489,6 +568,104 @@ fn date_text(t: i64) -> String {
     } else {
         format!("{day} {} {time}", MONTHS[month as usize - 1])
     }
+}
+
+/// Jour seul d'une date en secondes Unix, à l'heure locale (comme sur le site du build) :
+/// « 30 sept. 2026 », « Sep 30, 2026 ».
+fn date_day(t: i64) -> String {
+    use chrono::Datelike;
+    const MONTHS: [&str; 12] = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+    const MONTHS_EN: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let Some(d) = chrono::DateTime::from_timestamp(t, 0).map(|d| d.with_timezone(&chrono::Local)) else { return String::new() };
+    let (day, month, year) = (d.day(), d.month0() as usize, d.year());
+    if i18n::english() {
+        format!("{} {day}, {year}", MONTHS_EN[month])
+    } else {
+        format!("{day} {} {year}", MONTHS[month])
+    }
+}
+
+/// Largeurs des colonnes « depuis quand » et « prix » de la boutique (le nom prend le reste).
+const SHOP_SINCE_W: f32 = 110.0;
+const SHOP_PRICE_W: f32 = 84.0;
+/// Colonne des boutons « Vendu » / « Retiré » (vue « à classer »).
+const SHOP_ACTIONS_W: f32 = 164.0;
+
+/// Largeurs des colonnes de la boutique (objet, depuis quand, prix, boutons), les mêmes pour les
+/// titres et les lignes. Avec les boutons, « depuis » et « prix » se resserrent.
+fn shop_widths(avail: f32, gap: f32, actions: bool) -> (f32, f32, f32, f32) {
+    let (since, price, buttons) = if actions { (92.0, 76.0, SHOP_ACTIONS_W) } else { (SHOP_SINCE_W, SHOP_PRICE_W, 0.0) };
+    let gaps = if actions { 3.0 } else { 2.0 } * gap;
+    ((avail - since - price - buttons - gaps).max(90.0), since, price, buttons)
+}
+
+/// Vue de l'onglet Boutique, choisie par les blocs de la carte du haut.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShopView {
+    Listed,
+    ToSort,
+    History,
+}
+
+/// Tri de la boutique : colonne, et du plus grand au plus petit (`true`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShopSort {
+    Since,
+    Price,
+}
+
+/// Titres des colonnes de la boutique, au-dessus des lignes ; « depuis » et « prix » trient au
+/// clic (la colonne du tri en cours porte sa flèche). Rend la colonne cliquée.
+fn shop_columns(ui: &mut egui::Ui, since: &str, sort: (ShopSort, bool), actions: bool) -> Option<ShopSort> {
+    let style = |t: &str, on: bool| RichText::new(t).color(if on { ui::GOLD } else { ui::GOLD_DIM }).size(11.5).strong();
+    let mut clicked = None;
+    let mut sortable = |ui: &mut egui::Ui, text: &str, col: ShopSort| {
+        let on = sort.0 == col;
+        let arrow = if !on { "" } else if sort.1 { " ▼" } else { " ▲" };
+        let r = ui.add(egui::Label::new(style(&format!("{text}{arrow}"), on)).sense(egui::Sense::click()));
+        if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr!("Trier par cette colonne (clic de nouveau : inverser)")).clicked() {
+            clicked = Some(col);
+        }
+    };
+    ui.horizontal(|ui| {
+        let (name_w, since_w, price_w, _) = shop_widths(ui.available_width(), ui.spacing().item_spacing.x, actions);
+        let left = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(Vec2::new(name_w, 16.0), left, |ui| {
+            ui.set_width(name_w);
+            ui.label(style(tr!("OBJET"), false));
+        });
+        // Calée à droite : la durée se lit avec le prix.
+        ui.allocate_ui_with_layout(Vec2::new(since_w, 16.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.set_width(since_w);
+            sortable(ui, since, ShopSort::Since);
+        });
+        ui.allocate_ui_with_layout(Vec2::new(price_w, 16.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.set_width(price_w);
+            sortable(ui, tr!("PRIX"), ShopSort::Price);
+        });
+    });
+    clicked
+}
+
+/// Âge arrondi pour la boutique : « 12 min », « 5 h », « 3 j ».
+fn age_text(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 3600 => tr!("{n} min", n = (s / 60).max(1)),
+        s if s < 48 * 3600 => tr!("{n} h", n = s / 3600),
+        s => tr!("{n} j", n = s / 86_400),
+    }
+}
+
+/// Prix d'une annonce dans sa devise, abrégée comme en jeu : « 70 ex », « 1 div », « 3 chaos ».
+fn price_text(amount: f64, currency: &str) -> String {
+    let unit = match currency {
+        "exalted" => "ex",
+        "divine" => "div",
+        "chaos" => "chaos",
+        c => c,
+    };
+    let n = if (amount - amount.round()).abs() < 0.05 { format!("{}", amount.round()) } else { i18n::decimal(format!("{amount:.1}")) };
+    format!("{n} {unit}")
 }
 
 /// Chronomètre : « 4:07 », « 1:02:45 ».
@@ -703,6 +880,7 @@ impl App {
             side_tab: match std::env::var("POE2_TRACKER_SIDE").as_deref() {
                 Ok("market") => views::SideTab::Market,
                 Ok("maps") => views::SideTab::Maps,
+                Ok("shop") => views::SideTab::Shop,
                 Ok("bosses") => views::SideTab::Bosses,
                 _ => views::SideTab::Diagnostic,
             },
@@ -724,6 +902,23 @@ impl App {
             profile_sync: profile::Sync::default(),
             mapwatch: stored.screen_watch.then(|| mapwatch::Watch::start(dirs.data_dir().join("models"), cc.egui_ctx.clone())),
             share: share::Share::default(),
+            build_watch: builds::UpdateWatch::default(),
+            shop: None,
+            shop_rx: None,
+            shop_asked: None,
+            shop_error: None,
+            // Les plus anciennes d'abord : celles qui ne partent pas.
+            shop_sort: (ShopSort::Since, true),
+            // Développement : la vue « à classer » d'office (POE2_TRACKER_SHOP=tosort, ou history).
+            shop_view: match std::env::var("POE2_TRACKER_SHOP").as_deref() {
+                Ok("tosort") => ShopView::ToSort,
+                Ok("history") => ShopView::History,
+                _ => ShopView::Listed,
+            },
+            shop_filter: None,
+            shop_search: String::new(),
+            shop_edit: None,
+            diag_from_shop: None,
             estimate_stretch: 0.0,
             tree: views::TreeView::default(),
             passive_icons: passive_icons::PassiveIcons::new(&cc.egui_ctx, dirs.cache_dir().to_path_buf(), config.game_dir.clone()),
@@ -733,13 +928,19 @@ impl App {
                 path: config.game_dir.display().to_string(),
                 ..Default::default()
             },
+            account_input: String::new(),
             updater: updater::Updater::start(&cc.egui_ctx, config.auto_update),
             update_restarted: false,
-            // Développement : réglages ouverts d'office (POE2_TRACKER_SETTINGS=1).
+            // Développement : réglages ouverts d'office (POE2_TRACKER_SETTINGS=1, ou le numéro de
+            // la catégorie : 3 pour « Compte et profil »).
             export_open: std::env::var_os("POE2_TRACKER_EXPORT").is_some(),
-            settings: std::env::var_os("POE2_TRACKER_SETTINGS")
-                .is_some()
-                .then(|| SettingsDraft::new(&stored, &config)),
+            settings: std::env::var("POE2_TRACKER_SETTINGS").ok().map(|n| {
+                let mut draft = SettingsDraft::new(&stored, &config);
+                if let Some(tab) = n.parse::<usize>().ok().and_then(|n| SettingsTab::ALL.get(n.wrapping_sub(1))) {
+                    draft.tab = *tab;
+                }
+                draft
+            }),
             changelog: (!news.is_empty()).then_some(news),
             dirs,
             stored,
@@ -883,6 +1084,35 @@ impl App {
             }
             self.stored.welcomed = true;
             self.stored.save(&self.dirs);
+        }
+    }
+
+    /// Compte Path of Exile encore inconnu : demandé, sans pouvoir passer (après l'accueil).
+    fn account_window(&mut self, ctx: &egui::Context) {
+        if !self.stored.account.is_empty() || self.welcome.open {
+            return;
+        }
+        let input = self.account_input.trim().to_string();
+        let valid = poe2_shared::valid_account(&input);
+        let mut done = false;
+        ui::modal(ctx, "account", tr!("Ton compte Path of Exile"), false, 460.0, |ui| {
+            ui.label(tr!("Colle le nom de ton compte Path of Exile avec son numéro, tel qu'affiché sur pathofexile.com : par exemple Pseudo#1234."));
+            ui.add_space(8.0);
+            let edit = ui.add(egui::TextEdit::singleline(&mut self.account_input).desired_width(260.0).hint_text("Pseudo#1234"));
+            if !input.is_empty() && !valid {
+                ui.label(RichText::new(tr!("Format attendu : le pseudo, « # » puis 4 chiffres")).color(Color32::from_rgb(230, 110, 90)));
+            }
+            ui.add_space(10.0);
+            ui.separator();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let ok = ui.add_enabled(valid, egui::Button::new(RichText::new(tr!("Valider")).color(ui::GOLD).strong())).clicked();
+                done = valid && (ok || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))));
+            });
+        });
+        if done {
+            self.stored.account = input;
+            self.stored.save(&self.dirs);
+            self.profile_sync.force();
         }
     }
 
@@ -1985,6 +2215,19 @@ impl App {
         }
     }
 
+    /// Build retéléchargé depuis sa page (gestionnaire de builds, ou nouvelle version signalée) ;
+    /// le résultat est repris par `build_manager`.
+    fn start_build_update(&mut self, ctx: &egui::Context, id: String, url: String) {
+        let (tx, rx) = channel();
+        let (ctx, page) = (ctx.clone(), url.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(builds::fetch_url(&page));
+            ctx.request_repaint();
+        });
+        self.add_build.link_pending = Some((id, url, rx));
+        self.add_build.message = None;
+    }
+
     fn import_files(&mut self, files: Vec<builds::BuildFile>, source: &str) {
         match self.builds.add(files, source) {
             Ok(meta) => {
@@ -2111,6 +2354,31 @@ impl App {
         let mut chosen: Option<String> = None;
         // Cadre de la liste des builds : le bouton de lien prend exactement sa hauteur.
         let mut combo_rect: Option<egui::Rect> = None;
+        // Nouvelle version du build actif sur son site : un bouton vert à la place de la liste,
+        // jusqu'à la mise à jour.
+        let active = self.builds.active().map(|b| (b.id.clone(), b.source.clone()));
+        let newer = active.as_ref().and_then(|(id, _)| self.build_watch.newer.get(id).copied());
+        let updating = active.as_ref().is_some_and(|(id, _)| self.add_build.link_pending.as_ref().is_some_and(|(p, _, _)| p == id));
+        let mut update_build = false;
+        if newer.is_some() || updating {
+            let mine = active.as_ref().and_then(|(id, _)| self.builds.site_version(id));
+            in_zone(ui, 1, &mut |ui| {
+                if updating {
+                    ui.spinner();
+                    ui.label(RichText::new(tr!("mise à jour du build…")).color(Color32::GRAY));
+                    return;
+                }
+                let site = newer.map(date_day).unwrap_or_default();
+                let text = RichText::new(tr!("⬆  Nouvelle version du build")).color(Color32::from_rgb(120, 200, 120));
+                let hint = match mine {
+                    Some(m) => tr!("Version du {date} sur le site (la tienne : {mine}) : clic pour la télécharger", date = site, mine = date_day(m)),
+                    None => tr!("Version du {date} sur le site : clic pour la télécharger", date = site),
+                };
+                let resp = ui.add_sized([zone(1), ui.spacing().interact_size.y], egui::Button::new(text).truncate()).on_hover_text(hint);
+                combo_rect = Some(resp.rect);
+                update_build = resp.clicked();
+            });
+        } else {
         in_zone(ui, 1, &mut |ui| {
             let combo = egui::ComboBox::from_id_salt("build_select").width(width(1)).truncate().selected_text(selected.clone()).show_ui(ui, |ui| {
             for b in self.builds.list() {
@@ -2124,6 +2392,12 @@ impl App {
         .on_hover_text(current.as_deref().unwrap_or(tr!("aucun build")));
             combo_rect = Some(combo.rect);
         });
+        }
+        if update_build && self.add_build.link_pending.is_none() {
+            if let Some((id, url)) = active.clone() {
+                self.start_build_update(ui.ctx(), id, url);
+            }
+        }
 
         let mut step_pick: Option<String> = None;
         if let Some(shown_label) = &shown_step {
@@ -2332,12 +2606,24 @@ impl App {
     fn watch_maps(&mut self) {
         for e in self.share.poll() {
             match e {
-                share::Event::Token(t) => {
-                    self.stored.server_token = t;
-                    self.stored.save(&self.dirs);
+                share::Event::Token(t) => self.set_server_token(t),
+                share::Event::Account { token, account } => {
+                    if token == self.stored.server_token {
+                        self.stored.account_sent = account;
+                        self.stored.save(&self.dirs);
+                    }
+                }
+                share::Event::Sale { listing, kept } => {
+                    if let Some(s) = &mut self.shop {
+                        s.set_reported(&listing, kept);
+                    }
                 }
                 share::Event::Bosses(_) => {}
             }
+        }
+        // Le compte part au serveur (une fois par jeton, et à chaque changement).
+        if poe2_shared::valid_account(&self.stored.account) && self.stored.account_sent != self.stored.account {
+            self.share.send_account(self.stored.server_token.clone(), self.stored.account.clone());
         }
         if self.stored.share_data {
             self.share.report(self.stored.server_token.clone(), self.character.clone());
@@ -2372,13 +2658,86 @@ impl App {
     }
 
     /// Profil public : résultats des envois, puis nouvel envoi si le personnage a changé.
+    /// Boutique : ouverte pour le compte et la ligue du personnage, résultat d'une lecture repris,
+    /// et nouvelle lecture quand le délai est passé (actualisation automatique).
+    fn sync_shop(&mut self, ctx: &egui::Context) {
+        let account = self.stored.account.clone();
+        if !poe2_shared::valid_account(&account) || self.league.is_empty() {
+            self.shop = None;
+            return;
+        }
+        trade::set_own_account(&account);
+        if self.shop.as_ref().is_none_or(|s| s.account != account || s.league != self.league) {
+            self.shop = Some(shop::Shop::open(self.dirs.data_dir(), &account, &self.league));
+            self.shop_rx = None;
+            self.shop_asked = None;
+            self.shop_error = None;
+        }
+        if let Some(rx) = &self.shop_rx {
+            match rx.try_recv() {
+                Ok(trade::ShopResult::Done { seen, complete }) => {
+                    let gone = self.shop.as_mut().map(|s| s.apply(seen, complete, shop::now())).unwrap_or_default();
+                    // Annonces parties depuis la lecture d'avant : dans le fil, à classer.
+                    if !gone.is_empty() {
+                        let head = trn!(gone.len(), "{n} annonce n'est plus en vente : vendue ou retirée ? (onglet Boutique)", "{n} annonces ne sont plus en vente : vendues ou retirées ? (onglet Boutique)");
+                        self.feed.push_front(coach::FeedLine { kind: coach::FeedKind::Shop, head, details: gone });
+                        self.feed.truncate(FEED_MAX);
+                    }
+                    self.shop_error = None;
+                    self.shop_rx = None;
+                }
+                Ok(trade::ShopResult::Failed(e)) => {
+                    crate::log_warn!("boutique : lecture impossible : {e}");
+                    self.shop_error = Some(e);
+                    self.shop_rx = None;
+                }
+                // Fil de trade relancé (changement de ligue) : la lecture est perdue.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.shop_rx = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        // Ventes marquées (ou démarquées) : au serveur, une à la fois.
+        if self.stored.share_sales {
+            if let Some((listing, sale)) = self.shop.as_ref().and_then(|s| s.sale_to_sync()) {
+                self.share.send_sale(self.stored.server_token.clone(), listing, sale);
+            }
+        }
+        if !self.stored.shop_auto || self.shop_rx.is_some() {
+            return;
+        }
+        // Dû quand la dernière lecture (gardée sur le disque) et la dernière demande (un échec
+        // compte aussi) sont plus vieilles que le délai.
+        let every = self.stored.shop_every.max(5) as i64 * 60;
+        let since_read = self.shop.as_ref().and_then(|s| s.refreshed).map_or(i64::MAX, |t| shop::now() - t);
+        let since_ask = self.shop_asked.map_or(i64::MAX, |t| t.elapsed().as_secs() as i64);
+        let left = every - since_read.min(since_ask);
+        if left <= 0 {
+            self.refresh_shop();
+        } else {
+            ctx.request_repaint_after(Duration::from_secs(left as u64));
+        }
+    }
+
+    fn refresh_shop(&mut self) {
+        if self.shop_rx.is_none() && poe2_shared::valid_account(&self.stored.account) {
+            self.shop_rx = Some(self.trade.shop(&self.stored.account));
+            self.shop_asked = Some(Instant::now());
+        }
+    }
+
+    /// Nouveau jeton de l'installation (vide : refusé, à redemander) ; le compte repartira avec.
+    fn set_server_token(&mut self, token: String) {
+        if token != self.stored.server_token {
+            self.stored.server_token = token;
+            self.stored.account_sent.clear();
+            self.stored.save(&self.dirs);
+        }
+    }
+
     fn sync_profile(&mut self) {
         for e in self.profile_sync.poll() {
             match e {
-                profile::Event::Token(t) => {
-                    self.stored.server_token = t;
-                    self.stored.save(&self.dirs);
-                }
+                profile::Event::Token(t) => self.set_server_token(t),
                 profile::Event::Saved { character, id } if self.stored.public_profile => {
                     if self.stored.profile_ids.get(&character) != Some(&id) {
                         self.stored.profile_ids.insert(character, id);
@@ -2611,7 +2970,13 @@ impl App {
     /// Réglages de l'application : appliqués et enregistrés par « Enregistrer ».
     fn settings_window(&mut self, ctx: &egui::Context) {
         // Lien du profil public du personnage suivi, s'il a déjà été envoyé.
-        let public_link = self.character.as_ref().filter(|_| self.stored.public_profile).and_then(|c| self.stored.profile_ids.get(c)).map(|id| profile::public_url(id));
+        // Par compte une fois que le serveur le connaît, sinon par identifiant.
+        let account = Some(&self.stored.account).filter(|a| !a.is_empty() && self.stored.account_sent == **a);
+        let public_link = self
+            .character
+            .as_ref()
+            .filter(|_| self.stored.public_profile)
+            .and_then(|c| self.stored.profile_ids.get(c).map(|id| account.map_or_else(|| profile::public_url(id), |a| profile::account_url(a, c))));
         let sync_status = self.profile_sync.status.clone().filter(|_| self.stored.public_profile || self.stored.profile_ids.is_empty());
         let Some(draft) = &mut self.settings else {
             return;
@@ -2623,25 +2988,83 @@ impl App {
             }
         }
         let (mut save, mut cancel) = (false, false);
-        let (_, closed) = ui::modal(ctx, "settings", tr!("Réglages"), true, 620.0, |ui| {
+        let (_, closed) = ui::modal(ctx, "settings", tr!("Réglages"), true, 940.0, |ui| {
+            // À gauche les catégories, à droite les réglages de celle choisie seulement.
+            // Hauteur fixe : sans elle, le trait entre les colonnes prend tout l'écran.
+            const HEIGHT: f32 = 460.0;
+            ui.horizontal_top(|ui| {
+            ui.set_height(HEIGHT);
+            ui.set_max_height(HEIGHT);
+            ui.vertical(|ui| {
+                ui.set_width(190.0);
+                for tab in SettingsTab::ALL {
+                    let selected = draft.tab == tab;
+                    // Texte aligné à gauche : dessiné à la main (un bouton le centre).
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(190.0, 30.0), egui::Sense::click());
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let fill = if selected {
+                        ui::GOLD_DIM.gamma_multiply(0.25)
+                    } else if resp.hovered() {
+                        Color32::from_white_alpha(8)
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let stroke = if selected { egui::Stroke::new(1.0_f32, ui::GOLD_DIM) } else { egui::Stroke::NONE };
+                    ui.painter().rect(rect, 4.0, fill, stroke, egui::StrokeKind::Inside);
+                    let color = if selected { ui::GOLD } else if resp.hovered() { Color32::from_gray(230) } else { Color32::from_gray(190) };
+                    ui.painter().text(rect.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, tab.label(), egui::FontId::proportional(15.0), color);
+                    if resp.clicked() {
+                        draft.tab = tab;
+                    }
+                }
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+            // Textes et réglages un peu plus grands que dans le reste de l'app.
+            for (style, size) in [(egui::TextStyle::Body, 15.0), (egui::TextStyle::Button, 15.0), (egui::TextStyle::Small, 13.0)] {
+                ui.style_mut().text_styles.insert(style, egui::FontId::proportional(size));
+            }
+            ui.label(RichText::new(draft.tab.label()).color(ui::GOLD).size(18.0).strong());
+            // Trait doré sous le titre, comme sous les titres de section.
+            ui.add_space(6.0);
+            let line = ui.available_rect_before_wrap();
+            ui.painter().hline(line.x_range(), line.top(), egui::Stroke::new(1.0_f32, ui::GOLD_DIM.gamma_multiply(0.6)));
+            ui.add_space(10.0);
+            let tab = draft.tab;
+            egui::ScrollArea::vertical().id_salt("settings_tab").auto_shrink([false, false]).show(ui, |ui| {
             // Tableau : intitulé (et son explication en petit) à gauche, réglage à droite.
             let label = |ui: &mut egui::Ui, title: &str, hint: &str| {
                 ui.vertical(|ui| {
-                    ui.set_width(250.0);
+                    ui.set_width(300.0);
                     ui.label(RichText::new(title).color(Color32::from_gray(225)));
                     if !hint.is_empty() {
-                        ui.label(RichText::new(hint).color(Color32::GRAY).small());
+                        ui.label(RichText::new(hint).color(Color32::from_gray(150)).small());
                     }
                 });
             };
+            // Sous-catégorie : de l'air au-dessus.
             let section = |ui: &mut egui::Ui, title: &str| {
-                ui.label(RichText::new(title).color(ui::GOLD).strong());
+                ui.vertical(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(title).color(ui::GOLD).strong());
+                });
                 ui.end_row();
+            };
+            // Oui / non en liste, comme les autres choix (plus net qu'une case à cocher).
+            let on_off = |ui: &mut egui::Ui, id: &str, value: &mut bool, on: &str, off: &str| {
+                egui::ComboBox::from_id_salt(id)
+                    .width(ui.available_width())
+                    .selected_text(RichText::new(if *value { on } else { off }).color(ui::GOLD))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(value, true, on);
+                        ui.selectable_value(value, false, off);
+                    });
             };
             egui::Grid::new("settings_grid")
                 .num_columns(2)
                 .spacing([16.0, 10.0])
-                .show(ui, |ui| {
+                .show(ui, |ui| match tab {
+                    SettingsTab::General => {
                     section(ui, tr!("Interface"));
                     label(ui, tr!("Langue"), tr!("textes de l'app et du jeu ; Alt maintenu : l'autre langue"));
                     egui::ComboBox::from_id_salt("lang")
@@ -2673,7 +3096,7 @@ impl App {
                     let button =
                         egui::Button::new(RichText::new(format!("🗁  {shown}")).color(ui::GOLD))
                             .truncate()
-                            .min_size(Vec2::new(320.0, 0.0));
+                            .min_size(Vec2::new(ui.available_width(), 0.0));
                     let resp = ui
                         .add_enabled(draft.picking.is_none(), button)
                         .on_hover_text(if dir.is_empty() {
@@ -2696,6 +3119,20 @@ impl App {
                     }
                     ui.end_row();
 
+                    section(ui, tr!("Mises à jour"));
+                    label(
+                        ui,
+                        tr!("Recherche automatique"),
+                        tr!("sur GitHub, au lancement puis toutes les 5 minutes"),
+                    );
+                    on_off(ui, "auto_update", &mut draft.auto_update, tr!("activée"), tr!("désactivée"));
+                    ui.end_row();
+                    label(ui, tr!("Nouvelles versions des builds"), tr!("builds Mobalytics : leur page est regardée toutes les 30 minutes, une version plus récente est proposée en haut de l'app"));
+                    on_off(ui, "build_updates", &mut draft.build_updates, tr!("activée"), tr!("désactivée"));
+                    ui.end_row();
+                    }
+
+                    SettingsTab::Prices => {
                     section(ui, tr!("Diagnostic (Ctrl+C)"));
                     label(ui, tr!("Affichage"), tr!("ce que fait Ctrl+C sur un objet en jeu"));
                     egui::ComboBox::from_id_salt("open_on_copy")
@@ -2728,7 +3165,7 @@ impl App {
                         tr!("Estimation sur le trade"),
                         tr!("recherche d'annonces comparables sur pathofexile.com"),
                     );
-                    ui.checkbox(&mut draft.trade_prices, tr!("activée"));
+                    on_off(ui, "trade_prices", &mut draft.trade_prices, tr!("activée"), tr!("désactivée"));
                     ui.end_row();
                     label(
                         ui,
@@ -2771,31 +3208,45 @@ impl App {
                     });
                     ui.end_row();
 
-                    section(ui, tr!("Mises à jour"));
-                    label(
-                        ui,
-                        tr!("Recherche automatique"),
-                        tr!("sur GitHub, au lancement puis toutes les 5 minutes"),
-                    );
-                    ui.checkbox(&mut draft.auto_update, tr!("activée"));
+                    section(ui, tr!("Boutique"));
+                    label(ui, tr!("Actualisation"), tr!("tes annonces relues sur le site de trade : toute seule, ou seulement avec le bouton « Actualiser » de l'onglet Boutique"));
+                    on_off(ui, "shop_auto", &mut draft.shop_auto, tr!("automatique"), tr!("manuelle"));
                     ui.end_row();
+                    if draft.shop_auto {
+                        label(ui, tr!("Délai"), tr!("entre deux lectures, quand l'app est ouverte"));
+                        egui::ComboBox::from_id_salt("shop_every")
+                            .width(ui.available_width())
+                            .selected_text(RichText::new(tr!("toutes les {n} minutes", n = draft.shop_every)).color(ui::GOLD))
+                            .show_ui(ui, |ui| {
+                                for n in [5, 10, 15, 30, 60] {
+                                    ui.selectable_value(&mut draft.shop_every, n, tr!("toutes les {n} minutes", n));
+                                }
+                            });
+                        ui.end_row();
+                    }
+                    }
 
+                    SettingsTab::Profile => {
+                    section(ui, tr!("Compte"));
+                    label(ui, tr!("Compte Path of Exile"), tr!("Pseudo#1234 : tes profils publics se lisent par ce compte"));
+                    ui.vertical(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut draft.account).desired_width(ui.available_width()).hint_text("Pseudo#1234"));
+                        if !poe2_shared::valid_account(draft.account.trim()) {
+                            ui.label(RichText::new(tr!("format : pseudo#1234")).color(Color32::from_rgb(230, 120, 100)));
+                        }
+                    });
+                    ui.end_row();
                     section(ui, tr!("Profil public"));
                     label(
                         ui,
                         tr!("Profil public"),
-                        tr!("ton personnage (le contenu de l'export) envoyé au serveur de poe2-tracker quand il change, lisible par qui a le lien ; décoché : retiré du serveur"),
+                        tr!("ton personnage (le contenu de l'export) envoyé au serveur de poe2-tracker quand il change, lisible par qui a le lien ; désactivé : retiré du serveur"),
                     );
-                    ui.checkbox(&mut draft.public_profile, tr!("activé"));
+                    on_off(ui, "public_profile", &mut draft.public_profile, tr!("activé"), tr!("désactivé"));
                     ui.end_row();
                     if let Some(url) = public_link.as_ref() {
                         label(ui, tr!("Lien public"), tr!("à donner à une IA ou à un ami : l'export en Markdown, toujours à jour"));
-                        ui.horizontal(|ui| {
-                            ui.hyperlink_to(RichText::new(url).small(), url);
-                            if ui.small_button(tr!("Copier")).clicked() {
-                                ui.ctx().copy_text(url.clone());
-                            }
-                        });
+                        ui::copy_field(ui, "public_link", url);
                         ui.end_row();
                     }
                     if let Some((text, error)) = &sync_status {
@@ -2803,39 +3254,53 @@ impl App {
                         ui.label(RichText::new(text).color(if *error { Color32::from_rgb(230, 120, 100) } else { Color32::GRAY }));
                         ui.end_row();
                     }
+                    }
 
-                    section(ui, tr!("Lecture de l'écran"));
+                    SettingsTab::Screen => {
+                    section(ui, tr!("Maps"));
                     label(
                         ui,
                         tr!("Fin de map et boss"),
-                        tr!("dans une map, le panneau des objectifs en haut à droite du jeu est lu une fois par seconde : heure de fin de la map et nom de son boss"),
+                        tr!("dans une map ou un logbook, le panneau des objectifs en haut à droite du jeu est lu toutes les 3 secondes : heure de fin de la map et nom de son boss"),
                     );
-                    ui.checkbox(&mut draft.screen_watch, tr!("activée"));
+                    on_off(ui, "screen_watch", &mut draft.screen_watch, tr!("activée"), tr!("désactivée"));
                     ui.end_row();
+                    }
 
-                    section(ui, tr!("Améliorer poe2-tracker"));
+                    SettingsTab::Improve => {
+                    section(ui, tr!("Partage"));
                     label(
                         ui,
                         tr!("Envoyer les erreurs"),
                         tr!("les erreurs de l'app (avec la fin de son journal) et les boss lus à l'écran, envoyés au serveur de poe2-tracker pour corriger les problèmes et partager les boss des maps"),
                     );
-                    ui.checkbox(&mut draft.share_data, tr!("activé"));
+                    on_off(ui, "share_data", &mut draft.share_data, tr!("activé"), tr!("désactivé"));
                     ui.end_row();
+                    label(ui, tr!("Partager mes ventes"), tr!("les objets de ta boutique que tu marques « vendu » (objet, dernier prix, temps en vente), envoyés au serveur de poe2-tracker pour améliorer les estimations"));
+                    on_off(ui, "share_sales", &mut draft.share_sales, tr!("activé"), tr!("désactivé"));
+                    ui.end_row();
+                    section(ui, tr!("Journal"));
                     label(ui, tr!("Journal de l'app"), tr!("ce que fait l'app et ses erreurs, utile pour signaler un problème"));
-                    if ui.small_button(tr!("Ouvrir le journal")).clicked() {
+                    if ui::action_button(ui, tr!("Ouvrir le journal")).clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{}", applog::path(self.dirs.data_dir()).display())));
                     }
                     ui.end_row();
+                    }
 
-                    section(ui, tr!("Expérimental"));
+                    SettingsTab::Experimental => {
+                    section(ui, tr!("Onglets"));
                     label(
                         ui,
                         tr!("Onglet Boss"),
                         tr!("boss d'endgame affrontés : passages, morts, temps (expérimental)"),
                     );
-                    ui.checkbox(&mut draft.boss_tab, tr!("afficher l'onglet"));
+                    on_off(ui, "boss_tab", &mut draft.boss_tab, tr!("affiché"), tr!("masqué"));
                     ui.end_row();
+                    }
                 });
+            });
+            });
+            });
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2863,6 +3328,16 @@ impl App {
                 self.mapwatch = draft.screen_watch.then(|| mapwatch::Watch::start(self.dirs.data_dir().join("models"), ctx.clone()));
             }
             self.stored.share_data = draft.share_data;
+            self.stored.build_updates = draft.build_updates;
+            self.stored.shop_auto = draft.shop_auto;
+            self.stored.shop_every = draft.shop_every;
+            self.stored.share_sales = draft.share_sales;
+            // Un compte mal formé n'est pas pris : l'ancien reste.
+            let account = draft.account.trim();
+            if poe2_shared::valid_account(account) && account != self.stored.account {
+                self.stored.account = account.to_string();
+                self.share.retry_account();
+            }
             if draft.public_profile != self.stored.public_profile {
                 self.stored.public_profile = draft.public_profile;
                 if draft.public_profile {
@@ -3042,7 +3517,10 @@ impl App {
                                 c.reload_steps(&files);
                             }
                         }
-                        (true, tr!("« {name} » mis à jour", name = meta.name))
+                        self.build_watch.forget(&id);
+                        let msg = tr!("« {name} » mis à jour", name = meta.name);
+                        self.say(msg.clone());
+                        (true, msg)
                     }
                     Err(e) => (false, e),
                 });
@@ -3098,6 +3576,19 @@ impl App {
                                         ui.hyperlink_to(RichText::new(short_source(&b.source)).small(), &b.source).on_hover_text(&b.source);
                                     } else {
                                         ui.label(RichText::new(tr!("{source} · sans lien", source = b.source)).color(Color32::GRAY).small());
+                                    }
+                                    // Version qu'on a (date du site) et, s'il y en a une, la plus récente.
+                                    let mine = self.builds.site_version(&b.id);
+                                    let newer = self.build_watch.newer.get(&b.id).copied();
+                                    if mine.is_some() || newer.is_some() {
+                                        ui.horizontal(|ui| {
+                                            if let Some(m) = mine {
+                                                ui.label(RichText::new(tr!("version du {date}", date = date_day(m))).color(Color32::GRAY).small());
+                                            }
+                                            if let Some(n) = newer {
+                                                ui.label(RichText::new(tr!("· nouvelle version du {date} sur le site", date = date_day(n))).color(Color32::from_rgb(120, 200, 120)).small());
+                                            }
+                                        });
                                     }
                                     let busy = self.add_build.link_pending.as_ref().is_some_and(|(id, _, _)| *id == b.id);
                                     if busy {
@@ -3182,14 +3673,7 @@ impl App {
                 }
             });
         if let Some((id, url)) = link {
-            let (tx, rx) = channel();
-            let (ctx, page) = (ctx.clone(), url.clone());
-            std::thread::spawn(move || {
-                let _ = tx.send(builds::fetch_url(&page));
-                ctx.request_repaint();
-            });
-            self.add_build.link_pending = Some((id, url, rx));
-            self.add_build.message = None;
+            self.start_build_update(ctx, id, url);
         }
         if let Some((id, by)) = shift {
             self.builds.shift(&id, by);
@@ -3947,6 +4431,7 @@ impl App {
                     Whisper => Color32::from_rgb(110, 160, 240),
                     Character => Color32::from_rgb(230, 190, 90),
                     Reward => Color32::from_rgb(120, 200, 120),
+                    Shop => ui::ORANGE,
                     Session => Color32::GRAY,
                 };
                 ui.label(RichText::new(&f.head).color(color).strong());
@@ -5479,6 +5964,429 @@ impl App {
         })
     }
 
+    /// Onglet Boutique : les annonces du compte sur le site de trade. Une carte en haut, fixe :
+    /// ses trois blocs (en vente, à classer, vendus) sont aussi les vues de la liste dessous.
+    fn shop_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let dim = Color32::GRAY;
+        let busy = self.shop_rx.is_some();
+        if busy {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+        let now = shop::now();
+        let pick = |f: fn(&shop::Shop) -> Vec<&shop::Entry>| self.shop.as_ref().map(|s| f(s).into_iter().cloned().collect::<Vec<shop::Entry>>()).unwrap_or_default();
+        let (listed, to_sort, history) = (pick(shop::Shop::listed), pick(shop::Shop::to_sort), pick(shop::Shop::history));
+        // Copiés : les lignes ont besoin de `self` en écriture (icônes).
+        let info = self.shop.as_ref().map(|s| (s.account.clone(), s.league.clone(), s.refreshed, s.incomplete));
+        let error = self.shop_error.clone();
+        // Montants en exalts, aux cours de poe.ninja (les devises sans cours ne comptent pas).
+        let (asked, sold_total, sold_avg, sold) = {
+            let data = self.prices.data.lock().unwrap();
+            let ex = |e: &shop::Entry| e.price().and_then(|p| data.as_ref()?.listing_to_ex(p.amount, &p.currency));
+            let asked: f64 = listed.iter().filter_map(ex).sum();
+            let sold: Vec<&shop::Entry> = history.iter().filter(|e| e.status == shop::Status::Sold).collect();
+            let total: f64 = sold.iter().filter_map(|e| ex(e)).sum();
+            let times: Vec<i64> = sold.iter().filter_map(|e| e.listed_for(now)).collect();
+            let avg = (!times.is_empty()).then(|| times.iter().sum::<i64>() / times.len() as i64);
+            (asked, total, avg, sold.len())
+        };
+        let (asked, sold_total) = (self.fmt_price(asked), self.fmt_price(sold_total));
+        let view = self.shop_view;
+        let filter = self.shop_filter;
+        let mut rows = match view {
+            ShopView::Listed => listed.clone(),
+            ShopView::ToSort => to_sort.clone(),
+            ShopView::History => {
+                let needle = self.shop_search.trim().to_lowercase();
+                let found = |e: &&shop::Entry| needle.is_empty() || e.listing.name.to_lowercase().contains(&needle) || e.listing.base.to_lowercase().contains(&needle);
+                history.iter().filter(|e| filter.is_none_or(|f| e.status == f)).filter(found).cloned().collect()
+            }
+        };
+        // Tri choisi : par durée en vente ou par prix (en exalts ; sans cours, à la fin).
+        let sort = self.shop_sort;
+        {
+            let data = self.prices.data.lock().unwrap();
+            let ex = |e: &shop::Entry| e.price().and_then(|p| data.as_ref()?.listing_to_ex(p.amount, &p.currency));
+            rows.sort_by(|a, b| {
+                let o = match sort.0 {
+                    ShopSort::Since => a.listed_for(now).unwrap_or(-1).cmp(&b.listed_for(now).unwrap_or(-1)),
+                    ShopSort::Price => ex(a).unwrap_or(-1.0).total_cmp(&ex(b).unwrap_or(-1.0)),
+                };
+                if sort.1 { o.reverse() } else { o }
+            });
+        }
+        let mut sort_by: Option<ShopSort> = None;
+        let mut refresh = false;
+        let mut open: Option<Item> = None;
+        let mut status: Option<(String, shop::Status)> = None;
+        let mut pick_view: Option<ShopView> = None;
+        let mut pick_filter: Option<Option<shop::Status>> = None;
+        let mut edit: Option<String> = None;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            let margin = egui::Margin { left: 0, right: 8, top: 0, bottom: 0 };
+            egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                ui::section_header(ui, tr!("BOUTIQUE"), None, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let Some((_, _, refreshed, _)) = &info else { return };
+                        if busy {
+                            if let Some(left) = trade::wait_left() {
+                                ui.label(RichText::new(format!("{} s", left.as_secs() + 1)).color(ui::GOLD));
+                            }
+                            ui.add(egui::Spinner::new().size(16.0).color(ui::GOLD)).on_hover_text(tr!("lecture des annonces…"));
+                        } else {
+                            refresh = ui::action_button(ui, tr!("⟳  Actualiser")).on_hover_text(tr!("Relire tes annonces sur le site de trade")).clicked();
+                        }
+                        if let Some(t) = refreshed {
+                            ui.label(RichText::new(tr!("lu il y a {age}", age = age_text(now - t))).color(dim).small());
+                        }
+                    });
+                });
+            });
+            let Some((account, league, refreshed, incomplete)) = info else {
+                ui.add_space(8.0);
+                ui.label(RichText::new(tr!("Ton compte Path of Exile (Réglages, Compte et profil) et ta ligue sont nécessaires pour lire tes annonces.")).color(dim));
+                return;
+            };
+            // Carte fixe : le compte, puis trois blocs qui choisissent la vue.
+            egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                egui::Frame::new()
+                    .fill(ui::CARD_FILL)
+                    .stroke(egui::Stroke::new(1.0_f32, ui::GOLD_DIM))
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new(tr!("{account} · {league}", account, league)).color(ui::GOLD).strong());
+                        ui.add_space(4.0);
+                        let waiting = !to_sort.is_empty();
+                        let blocks = [
+                            (ShopView::Listed, tr!("EN VENTE").to_string(), trn!(listed.len(), "{n} objet", "{n} objets"), Color32::from_gray(225), tr!("{price} demandés", price = asked)),
+                            (ShopView::ToSort, tr!("À CLASSER").to_string(), to_sort.len().to_string(), if waiting { ui::ORANGE } else { dim }, if waiting { tr!("vendu ou retiré ?").to_string() } else { tr!("rien à classer").to_string() }),
+                            (ShopView::History, tr!("VENDUS").to_string(), trn!(sold, "{n} objet", "{n} objets"), ui::GREEN, match sold_avg {
+                                Some(avg) => tr!("{price} · {time} en moyenne", price = sold_total, time = age_text(avg)),
+                                None => tr!("sur toute la ligue").to_string(),
+                            }),
+                        ];
+                        let gap = 6.0;
+                        let w = (ui.available_width() - 2.0 * gap) / 3.0;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            for (v, title, value, color, sub) in blocks {
+                                let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 58.0), egui::Sense::click());
+                                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let on = v == view;
+                                let p = ui.painter();
+                                let fill = if on { ui::GOLD.gamma_multiply(0.10) } else if resp.hovered() { Color32::from_white_alpha(6) } else { Color32::TRANSPARENT };
+                                p.rect(r, 3.0, fill, egui::Stroke::new(1.0_f32, if on { ui::GOLD_DIM } else { Color32::from_rgb(45, 40, 34) }), egui::StrokeKind::Inside);
+                                let x = r.left() + 10.0;
+                                p.text(egui::pos2(x, r.top() + 7.0), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(11.5), if on { ui::GOLD } else { ui::GOLD_DIM });
+                                p.text(egui::pos2(x, r.top() + 22.0), egui::Align2::LEFT_TOP, value, egui::FontId::proportional(16.0), color);
+                                let sub = p.layout(sub, egui::FontId::proportional(11.5), dim, r.width() - 20.0);
+                                p.galley(egui::pos2(x, r.top() + 41.0), sub, dim);
+                                if resp.clicked() {
+                                    pick_view = Some(v);
+                                }
+                            }
+                        });
+                    });
+                if let Some(e) = &error {
+                    ui.label(RichText::new(tr!("Dernière lecture impossible : {e}", e)).color(Color32::from_rgb(230, 120, 100)).small());
+                }
+                if incomplete {
+                    ui.label(RichText::new(tr!("Trop d'annonces pour les recherches du site : certaines manquent, et aucune n'est marquée « plus en vente ».")).color(Color32::from_rgb(220, 170, 90)).small());
+                }
+                // Historique : tout, ou seulement les vendus, ou les retirés.
+                // La liste et la recherche, comme dans l'onglet Marché.
+                if view == ShopView::History {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui::gold_widgets(ui);
+                        let label = |f: Option<shop::Status>| match f {
+                            Some(shop::Status::Sold) => tr!("Vendus"),
+                            Some(shop::Status::Withdrawn) => tr!("Retirés"),
+                            _ => tr!("Vendus et retirés"),
+                        };
+                        egui::ComboBox::from_id_salt("shop_filter").selected_text(RichText::new(label(filter)).color(ui::GOLD)).show_ui(ui, |ui| {
+                            for f in [None, Some(shop::Status::Sold), Some(shop::Status::Withdrawn)] {
+                                if ui.selectable_label(filter == f, label(f)).clicked() {
+                                    pick_filter = Some(f);
+                                }
+                            }
+                        });
+                        ui.add(
+                            // À la hauteur de la liste voisine.
+                            egui::TextEdit::singleline(&mut self.shop_search)
+                                .hint_text(tr!("rechercher"))
+                                .desired_width(ui.available_width())
+                                .min_size(Vec2::new(0.0, ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y))
+                                .vertical_align(egui::Align::Center),
+                        );
+                    });
+                }
+                ui.add_space(4.0);
+            });
+            let scroll = egui::ScrollArea::vertical().id_salt(("shop_scroll", view as u8)).auto_shrink([false, false]).show(ui, |ui| {
+                egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                    let empty = match view {
+                        _ if refreshed.is_none() && !busy => Some(tr!("Pas encore lu : « Actualiser » pour voir tes annonces.")),
+                        ShopView::Listed => Some(tr!("Rien en vente sur ce compte dans cette ligue.")),
+                        ShopView::ToSort => Some(tr!("Rien à classer : les annonces qui disparaissent de la boutique arrivent ici.")),
+                        ShopView::History => Some(tr!("Rien de classé pour l'instant.")),
+                    };
+                    if rows.is_empty() {
+                        if let Some(m) = empty {
+                            ui.add_space(6.0);
+                            ui.label(RichText::new(m).color(dim));
+                        }
+                        return;
+                    }
+                    let since = if view == ShopView::Listed { tr!("EN VENTE DEPUIS") } else { tr!("RESTÉ EN VENTE") };
+                    sort_by = shop_columns(ui, since, sort, view == ShopView::ToSort);
+                    for (i, e) in rows.iter().enumerate() {
+                        self.shop_row(ui, e, i, now, view, &mut open, &mut status, &mut edit);
+                    }
+                });
+            });
+            ui::fade_scroll(ui, &scroll, true);
+        });
+        if refresh {
+            self.refresh_shop();
+        }
+        if let Some(v) = pick_view {
+            self.shop_view = v;
+        }
+        if let Some(f) = pick_filter {
+            self.shop_filter = f;
+        }
+        if edit.is_some() {
+            self.shop_edit = edit;
+        }
+        // Même colonne : ordre inversé ; autre colonne : du plus grand au plus petit.
+        if let Some(col) = sort_by {
+            self.shop_sort = if self.shop_sort.0 == col { (col, !self.shop_sort.1) } else { (col, true) };
+        }
+        if let Some((id, s)) = status {
+            if let Some(shop) = &mut self.shop {
+                shop.set_status(&id, s);
+            }
+        }
+        // Clic sur une annonce en vente : son diagnostic (sans l'ajouter à l'historique du
+        // diagnostic) ; « Retour » ramène à la boutique.
+        if let Some(it) = open {
+            self.side_tab = views::SideTab::Diagnostic;
+            self.estimate_open = None;
+            self.diag_from_shop = Some(it.raw.clone());
+            self.diagnosed = Some(it);
+        }
+    }
+
+    /// Fenêtre d'une annonce de l'historique : son état (vendue, retirée), à changer, ou à remettre
+    /// parmi celles à classer.
+    fn shop_status_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.shop_edit.clone() else { return };
+        let Some(e) = self.shop.as_ref().and_then(|s| s.entries.iter().find(|e| e.id == id)).cloned() else {
+            self.shop_edit = None;
+            return;
+        };
+        let now = shop::now();
+        let mut pick: Option<shop::Status> = None;
+        let mut close = false;
+        let name = if e.listing.name.is_empty() { e.listing.base.clone() } else { e.listing.name.clone() };
+        let rarity = e.item().map_or(item::Rarity::Rare, |it| it.rarity);
+        let (_, closed) = ui::modal(ctx, "shop_status", tr!("Vendu ou retiré ?"), true, 420.0, |ui| {
+            ui.label(RichText::new(gametext::name(&name).as_ref()).color(ui::rarity_color(rarity)).size(16.0).strong());
+            let mut facts = Vec::new();
+            if let Some(p) = e.price() {
+                facts.push(tr!("dernier prix {price}", price = price_text(p.amount, &p.currency)));
+            }
+            if let Some(d) = e.listed_for(now) {
+                facts.push(tr!("resté en vente {time}", time = age_text(d)));
+            }
+            if let Some(t) = e.gone_at {
+                facts.push(tr!("partie le {date}", date = date_day(t)));
+            }
+            ui.label(RichText::new(facts.join(" · ")).color(Color32::GRAY));
+            ui.add_space(12.0);
+            // Les deux états, en grands boutons ; celui en cours encadré.
+            ui.horizontal(|ui| {
+                let w = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                for (s, text, color) in [(shop::Status::Sold, tr!("✔  Vendu"), ui::GREEN), (shop::Status::Withdrawn, tr!("✕  Retiré"), Color32::from_gray(170))] {
+                    let on = e.status == s;
+                    let b = egui::Button::new(RichText::new(text).color(color).size(15.0).strong())
+                        .fill(color.gamma_multiply(if on { 0.28 } else { 0.10 }))
+                        .stroke(egui::Stroke::new(if on { 2.0_f32 } else { 1.0 }, color.gamma_multiply(if on { 1.0 } else { 0.5 })))
+                        .min_size(Vec2::new(w, 36.0));
+                    if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        pick = Some(s);
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui::text_button(ui, tr!("Remettre parmi les annonces à classer")).clicked() {
+                    pick = Some(shop::Status::Gone);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui::action_button(ui, tr!("Fermer")).clicked();
+                });
+            });
+        });
+        if let Some(s) = pick {
+            if let Some(shop) = &mut self.shop {
+                shop.set_status(&id, s);
+            }
+            close = true;
+        }
+        if close || closed {
+            self.shop_edit = None;
+        }
+    }
+
+    /// Une annonce de la boutique : l'objet (icône, nom, type), depuis quand il est en vente, son
+    /// prix sur toute la hauteur (vendue : en vert ; retirée : « retiré »), et à classer, les
+    /// boutons « Vendu » et « Retiré ». Au survol, sa fiche comme celle d'une pièce équipée ; clic
+    /// sur le nom : son diagnostic, ou dans l'historique, sur la ligne : la fenêtre de son état.
+    #[allow(clippy::too_many_arguments)]
+    fn shop_row(&mut self, ui: &mut egui::Ui, e: &shop::Entry, i: usize, now: i64, view: ShopView, open: &mut Option<Item>, status: &mut Option<(String, shop::Status)>, edit: &mut Option<String>) {
+        let it = e.item();
+        let history = view == ShopView::History;
+        if i > 0 {
+            ui.add_space(-ui.spacing().item_spacing.y);
+        }
+        let band_painter = ui.painter().with_clip_rect(ui.clip_rect().expand2(Vec2::new(8.0, 0.0)));
+        let stripe = band_painter.add(egui::Shape::Noop);
+        let listed = view == ShopView::Listed;
+        // Retirée : la ligne plus sombre.
+        let fade = if e.status == shop::Status::Withdrawn { 0.55 } else { 1.0 };
+        let dim = Color32::GRAY.gamma_multiply(fade);
+        let height = 46.0;
+        let row = ui.horizontal(|ui| {
+            ui.set_min_height(height);
+            ui.set_min_width(ui.available_width());
+            let (name_w, since_w, price_w, actions_w) = shop_widths(ui.available_width(), ui.spacing().item_spacing.x, view == ShopView::ToSort);
+            let center = egui::Layout::left_to_right(egui::Align::Center);
+            // Colonne 1 : l'objet.
+            ui.allocate_ui_with_layout(Vec2::new(name_w, height), center, |ui| {
+                ui.set_width(name_w);
+                match it.as_ref().and_then(|it| self.assets.texture(it)) {
+                    Some(tex) => {
+                        let size = tex.size_vec2();
+                        let scale = (32.0 / size.y).min(32.0 / size.x);
+                        ui.add_sized([34.0, 34.0], egui::Image::new((tex.id(), size * scale)).tint(Color32::WHITE.gamma_multiply(fade)));
+                    }
+                    None => {
+                        ui.add_space(38.0);
+                    }
+                }
+                let rarity = it.as_ref().map_or(item::Rarity::Rare, |it| it.rarity);
+                let name = if e.listing.name.is_empty() { e.listing.base.clone() } else { e.listing.name.clone() };
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    // Centré sur la hauteur de la ligne : nom et type.
+                    let (body, small) = (ui.text_style_height(&egui::TextStyle::Body), ui.text_style_height(&egui::TextStyle::Small));
+                    ui.add_space(((height - body - 1.0 - small) / 2.0).max(0.0));
+                    // Historique : toute la ligne s'ouvre (changer son état), pas le diagnostic.
+                    let text = RichText::new(gametext::name(&name).as_ref()).color(ui::rarity_color(rarity).gamma_multiply(fade));
+                    // Seules les annonces en vente ouvrent leur diagnostic.
+                    if view != ShopView::Listed {
+                        ui.add(egui::Label::new(text).truncate().selectable(false));
+                    } else {
+                        let resp = ui.add(egui::Label::new(text).truncate().sense(egui::Sense::click()));
+                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            *open = it.clone();
+                        }
+                    }
+                    let kind = it.as_ref().map(kind_label).unwrap_or_default();
+                    ui.add(egui::Label::new(RichText::new(kind).color(dim).small()).truncate().selectable(false));
+                });
+            });
+            // Colonne 2 : depuis quand (disparue : combien de temps, et quand elle est partie).
+            ui.allocate_ui_with_layout(Vec2::new(since_w, height), center, |ui| {
+                ui.set_width(since_w);
+                // Calée à droite, contre le prix.
+                ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    let body = ui.text_style_height(&egui::TextStyle::Body);
+                    let lines = if listed { body } else { body + 1.0 + ui.text_style_height(&egui::TextStyle::Small) };
+                    ui.add_space(((height - lines) / 2.0).max(0.0));
+                    let since = e.listed_for(now).map(age_text).unwrap_or_else(|| "—".into());
+                    let r = ui.label(RichText::new(since).color(Color32::from_gray(225).gamma_multiply(fade)));
+                    if let Some(t) = e.listed_at {
+                        r.on_hover_text(tr!("Mise en vente le {date}", date = date_day(t)));
+                    }
+                    if let Some(t) = e.gone_at.filter(|_| !listed) {
+                        ui.label(RichText::new(tr!("partie il y a {age}", age = age_text(now - t))).color(dim).small());
+                    }
+                });
+            });
+            // Colonne 3 : le prix demandé, sur toute la hauteur, aligné à droite.
+            ui.allocate_ui_with_layout(Vec2::new(price_w, height), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.set_width(price_w);
+                // Retirée : à la place du prix, son état.
+                if e.status == shop::Status::Withdrawn {
+                    ui.label(RichText::new(tr!("retiré")).color(Color32::GRAY).size(15.0));
+                    return;
+                }
+                let Some(p) = e.price() else { return };
+                let first = e.prices.first().filter(|f| f.currency == p.currency && f.amount != p.amount);
+                let arrow = first.map(|f| if p.amount < f.amount { " ↓" } else { " ↑" }).unwrap_or("");
+                let color = if e.status == shop::Status::Sold { ui::GREEN } else { ui::GOLD.gamma_multiply(fade) };
+                let price = ui.label(RichText::new(format!("{}{arrow}", price_text(p.amount, &p.currency))).color(color).size(17.0).strong());
+                if e.prices.len() > 1 {
+                    let history: Vec<String> = e.prices.iter().map(|p| tr!("{date} : {price}", date = date_day(p.at), price = price_text(p.amount, &p.currency))).collect();
+                    price.on_hover_text(tr!("Prix demandés :\n{list}", list = history.join("\n")));
+                }
+            });
+            // À classer : vendue ou retirée, deux vrais boutons.
+            if actions_w > 0.0 {
+                ui.allocate_ui_with_layout(Vec2::new(actions_w, height), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.set_width(actions_w);
+                    let button = |ui: &mut egui::Ui, text: &str, color: Color32| {
+                        ui.add(egui::Button::new(RichText::new(text).color(color).strong()).fill(color.gamma_multiply(0.15)).stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.7))).min_size(Vec2::new(0.0, 26.0)))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    };
+                    if button(ui, tr!("✕  Retiré"), Color32::from_gray(170)).clicked() {
+                        *status = Some((e.id.clone(), shop::Status::Withdrawn));
+                    }
+                    if button(ui, tr!("✔  Vendu"), ui::GREEN).clicked() {
+                        *status = Some((e.id.clone(), shop::Status::Sold));
+                    }
+                });
+            }
+        });
+        let rect = row.response.rect;
+        if i % 2 == 1 {
+            // Fond alterné, comme l'historique du diagnostic.
+            band_painter.set(stripe, egui::Shape::rect_filled(rect.expand2(Vec2::new(8.0, 0.0)), 0.0, Color32::from_rgb(21, 20, 18)));
+        }
+        // Survol de la ligne : la fiche de l'objet, comme celle d'une pièce équipée (sans prendre
+        // les clics des boutons de la ligne). Historique : un clic ouvre la fenêtre de son état.
+        let sense = if history { egui::Sense::click() } else { egui::Sense::hover() };
+        let hover = ui.interact(rect, ui.id().with(("shop_row", &e.id)), sense);
+        if history && hover.clicked() {
+            *edit = Some(e.id.clone());
+        }
+        if history && hover.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if hover.hovered() {
+            let slot = it.as_ref().and_then(|it| gear::kind_of(&it.item_class)).map(|k| match k {
+                gear::Kind::Single(s) => s,
+                gear::Kind::TwoHanded => Slot::Weapon,
+                gear::Kind::Ring => Slot::RingLeft,
+                gear::Kind::Charm => Slot::Charm1,
+            });
+            if let (Some(it), Some(slot)) = (it.as_ref(), slot) {
+                let w = self.worn_view(slot, it, None);
+                hover.on_hover_ui(|ui| {
+                    egui::Frame::new().inner_margin(8).show(ui, |ui| {
+                        ui.set_width(ui::worn_width(ui, &w).max(300.0).min(520.0));
+                        ui::worn_column(ui, &w);
+                    });
+                });
+            }
+        }
+    }
+
     /// Onglet Marché : cours du marché d'échange d'après poe.ninja, par catégorie.
     /// Onglet Maps : chiffres de l'endgame du personnage, par tier, puis l'historique des maps.
     fn maps_panel(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
@@ -6803,6 +7711,8 @@ impl eframe::App for App {
         }
         // Après les copies : une pièce suivie part au serveur dans la même image.
         self.sync_profile();
+        self.build_watch.poll(&self.builds, self.stored.build_updates, ctx);
+        self.sync_shop(ctx);
         self.assets.poll(ctx);
         self.ui_art.poll(ctx);
         self.passive_icons.poll(ctx);
@@ -6950,6 +7860,8 @@ impl eframe::App for App {
         });
         self.sync_league(ctx);
         self.welcome_window(ctx);
+        self.account_window(ctx);
+        self.shop_status_window(ctx);
         self.changelog_window(ctx);
         self.settings_window(ctx);
         self.export_window(ctx);
@@ -6989,11 +7901,17 @@ impl eframe::App for App {
                 self.side_tab = views::SideTab::Maps;
             }
             let tabs: Vec<_> = views::SideTab::ALL.iter().filter(|t| self.stored.boss_tab || **t != views::SideTab::Bosses).map(|t| (*t, t.label())).collect();
-            if let Some(tab) = ui::tab_strip(ui, tabs_rect, &tabs, self.side_tab) {
+            // Pastille sur la boutique : les annonces disparues à classer.
+            let to_sort = self.shop.as_ref().map_or(0, |s| s.to_sort().len());
+            if let Some(tab) = ui::tab_strip_badged(ui, tabs_rect, &tabs, self.side_tab, |t| if t == views::SideTab::Shop { to_sort } else { 0 }) {
                 self.side_tab = tab;
             }
             if self.side_tab == views::SideTab::Market {
                 self.market_panel(ui, full);
+                return;
+            }
+            if self.side_tab == views::SideTab::Shop {
+                self.shop_panel(ui, full);
                 return;
             }
             if self.side_tab == views::SideTab::Maps {
@@ -7024,10 +7942,12 @@ impl eframe::App for App {
                     let mut back = false;
                     let mut goto: Option<usize> = None;
                     let depth = if diagnosed.is_none() { 0 } else if detail { 2 } else { 1 };
+                    // Objet ouvert depuis la boutique : le premier niveau est la boutique.
+                    let from_shop = diagnosed.as_ref().is_some_and(|d| self.diag_from_shop.as_deref() == Some(d.raw.as_str()));
                     egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }).show(ui, |ui| {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let crumbs = [tr!("HISTORIQUE"), tr!("DIAGNOSTIC"), tr!("ESTIMATION")];
+                            let crumbs = [if from_shop { tr!("BOUTIQUE") } else { tr!("HISTORIQUE") }, tr!("DIAGNOSTIC"), tr!("ESTIMATION")];
                             for (i, name) in crumbs.iter().enumerate().take(depth + 1) {
                                 if i > 0 {
                                     ui.label(RichText::new("›").color(ui::GOLD_DIM).size(14.0));
@@ -7046,7 +7966,7 @@ impl eframe::App for App {
                             }
                             if depth > 0 {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let hint = if depth == 2 { tr!("Revenir au diagnostic") } else { tr!("Revenir à l'historique") };
+                                    let hint = if depth == 2 { tr!("Revenir au diagnostic") } else if from_shop { tr!("Revenir à la boutique") } else { tr!("Revenir à l'historique") };
                                     back = ui::action_button(ui, tr!("⬅  Retour")).on_hover_text(hint).clicked();
                                 });
                             }
@@ -7063,6 +7983,11 @@ impl eframe::App for App {
                         Some(0) => {
                             self.estimate_open = None;
                             self.diagnosed = None;
+                            // Venu de la boutique : on y retourne.
+                            if from_shop {
+                                self.diag_from_shop = None;
+                                self.side_tab = views::SideTab::Shop;
+                            }
                         }
                         Some(1) => self.estimate_open = None,
                         _ => {}

@@ -4,17 +4,23 @@
 //! - `PUT /v1/me/profiles/{personnage}` (jeton) : envoie le profil public d'un personnage ;
 //!   son identifiant public en retour, stable pour ce personnage.
 //! - `DELETE /v1/me/profiles/{personnage}` (jeton) : profil retiré (profil public décoché).
-//! - `GET /v1/profiles/{id}` : le profil, en JSON ; `{id}.md` : l'export en Markdown.
+//! - `PUT /v1/me/account` (jeton) : compte Path of Exile de l'installation (« Pseudo#1234 »).
+//! - `GET /v1/profiles/{compte}/{personnage}` : le profil, en JSON ; `{personnage}.md` : l'export
+//!   en Markdown. Le « # » du compte s'écrit `%23` (`cxxi%232432`).
+//! - `GET /v1/profiles/{id}` (et `{id}.md`) : le même par identifiant, pour les liens d'avant
+//!   les comptes.
 //! - `GET /v1/map-bosses` : boss connus des maps (code → nom).
 //! - `PUT /v1/me/map-bosses/{code}` (jeton) : boss d'une map lu à l'écran.
 //! - `POST /v1/me/reports` (jeton) : rapport d'erreurs de l'app (les 50 derniers gardés).
+//! - `PUT /v1/me/sales/{annonce}` (jeton) : objet de la boutique marqué « vendu » par le joueur ;
+//!   `DELETE` : la vente retirée (le joueur s'était trompé).
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use poe2_shared::{ApiError, InstallCreated, MapBoss, MapBosses, PROFILE_FORMAT, Profile, ProfileSaved, PublicProfile, Report};
+use poe2_shared::{Account, ApiError, InstallCreated, MapBoss, MapBosses, PROFILE_FORMAT, Profile, ProfileSaved, PublicProfile, Report, Sale, valid_account, valid_listing_id};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::MySqlPool;
@@ -29,10 +35,13 @@ pub fn router(db: MySqlPool) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/v1/installs", post(create_install))
         .route("/v1/me/profiles/{character}", put(save_profile).delete(delete_profile))
+        .route("/v1/me/account", put(save_account))
         .route("/v1/profiles/{id}", get(public_profile))
+        .route("/v1/profiles/{account}/{character}", get(account_profile))
         .route("/v1/map-bosses", get(map_bosses))
         .route("/v1/me/map-bosses/{code}", put(save_map_boss))
         .route("/v1/me/reports", post(save_report))
+        .route("/v1/me/sales/{listing}", put(save_sale).delete(delete_sale))
         .layer(RequestBodyLimitLayer::new(MAX_BODY))
         .layer(TraceLayer::new_for_http())
         .with_state(db)
@@ -158,21 +167,57 @@ async fn delete_profile(State(db): State<MySqlPool>, headers: HeaderMap, Path(ch
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn public_profile(State(db): State<MySqlPool>, Path(id): Path<String>) -> Result<Response, Error> {
-    let (id, markdown) = match id.strip_suffix(".md") {
-        Some(id) => (id.to_string(), true),
-        None => (id, false),
-    };
-    if id.len() != 26 || !id.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) {
-        return Err(Error::NotFound);
+async fn save_account(State(db): State<MySqlPool>, headers: HeaderMap, Json(a): Json<Account>) -> Result<StatusCode, Error> {
+    let install = install_of(&db, &headers).await?;
+    if !valid_account(&a.account) {
+        return Err(Error::BadRequest("compte invalide (attendu : Pseudo#1234)".into()));
     }
-    let row: Option<(String, i64)> = sqlx::query_as("SELECT data, updated_at FROM profiles WHERE id = ?").bind(&id).fetch_optional(&db).await?;
-    let (data, updated_at) = row.ok_or(Error::NotFound)?;
+    sqlx::query("UPDATE installs SET account = ? WHERE id = ?").bind(&a.account).bind(install).execute(&db).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Fin `.md` d'un chemin : l'export en Markdown plutôt qu'en JSON.
+fn markdown_suffix(s: String) -> (String, bool) {
+    match s.strip_suffix(".md") {
+        Some(s) => (s.to_string(), true),
+        None => (s, false),
+    }
+}
+
+/// Ligne d'un profil (identifiant, compte, contenu, mise à jour), rendue en JSON ou en Markdown.
+fn profile_response(row: Option<(String, Option<String>, String, i64)>, markdown: bool) -> Result<Response, Error> {
+    let (id, account, data, updated_at) = row.ok_or(Error::NotFound)?;
     let profile: Profile = serde_json::from_str(&data).map_err(|e| Error::Db(sqlx::Error::Decode(Box::new(e))))?;
     if markdown {
         return Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], profile.markdown).into_response());
     }
-    Ok(Json(PublicProfile { id, updated_at, profile }).into_response())
+    Ok(Json(PublicProfile { id, account, updated_at, profile }).into_response())
+}
+
+async fn public_profile(State(db): State<MySqlPool>, Path(id): Path<String>) -> Result<Response, Error> {
+    let (id, markdown) = markdown_suffix(id);
+    if id.len() != 26 || !id.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) {
+        return Err(Error::NotFound);
+    }
+    let row = sqlx::query_as("SELECT p.id, i.account, p.data, p.updated_at FROM profiles p JOIN installs i ON i.id = p.install_id WHERE p.id = ?").bind(&id).fetch_optional(&db).await?;
+    profile_response(row, markdown)
+}
+
+/// Profil d'un personnage d'un compte ; envoyé depuis deux installations (deux PC), le plus récent.
+async fn account_profile(State(db): State<MySqlPool>, Path((account, character)): Path<(String, String)>) -> Result<Response, Error> {
+    let (character, markdown) = markdown_suffix(character);
+    if !valid_account(&account) || character.is_empty() || character.chars().count() > 64 {
+        return Err(Error::NotFound);
+    }
+    let row = sqlx::query_as(
+        "SELECT p.id, i.account, p.data, p.updated_at FROM profiles p JOIN installs i ON i.id = p.install_id \
+         WHERE i.account = ? AND p.character_name = ? ORDER BY p.updated_at DESC LIMIT 1",
+    )
+    .bind(&account)
+    .bind(&character)
+    .fetch_optional(&db)
+    .await?;
+    profile_response(row, markdown)
 }
 
 /// Boss de chaque map : le nom le plus signalé (à égalité, le plus récent).
@@ -230,6 +275,48 @@ async fn save_report(State(db): State<MySqlPool>, headers: HeaderMap, Json(r): J
     Ok(StatusCode::CREATED)
 }
 
+async fn save_sale(State(db): State<MySqlPool>, headers: HeaderMap, Path(listing): Path<String>, Json(s): Json<Sale>) -> Result<StatusCode, Error> {
+    let install = install_of(&db, &headers).await?;
+    let short = |v: &str, n: usize| !v.is_empty() && v.chars().count() <= n;
+    if !valid_listing_id(&listing)
+        || !short(&s.league, 64)
+        || !short(&s.item_class, 64)
+        || !short(&s.base, 120)
+        || !short(&s.currency, 40)
+        || !s.amount.is_finite()
+        || s.amount <= 0.0
+        || s.mods.len() + s.implicits.len() + s.properties.len() > 100
+    {
+        return Err(Error::BadRequest("vente invalide".into()));
+    }
+    let data = serde_json::to_string(&s).map_err(|e| Error::BadRequest(e.to_string()))?;
+    sqlx::query(
+        "INSERT INTO sales (install_id, listing_id, league, item_class, base, amount, currency, listed_at, gone_at, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE league = VALUES(league), item_class = VALUES(item_class), base = VALUES(base), amount = VALUES(amount), currency = VALUES(currency), \
+         listed_at = VALUES(listed_at), gone_at = VALUES(gone_at), data = VALUES(data)",
+    )
+    .bind(install)
+    .bind(&listing)
+    .bind(&s.league)
+    .bind(&s.item_class)
+    .bind(&s.base)
+    .bind(s.amount)
+    .bind(&s.currency)
+    .bind(s.listed_at)
+    .bind(s.gone_at)
+    .bind(&data)
+    .bind(now())
+    .execute(&db)
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_sale(State(db): State<MySqlPool>, headers: HeaderMap, Path(listing): Path<String>) -> Result<StatusCode, Error> {
+    let install = install_of(&db, &headers).await?;
+    sqlx::query("DELETE FROM sales WHERE install_id = ? AND listing_id = ?").bind(install).bind(&listing).execute(&db).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,7 +346,7 @@ mod tests {
     async fn profile_round_trip() {
         let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
         let db = MySqlPool::connect(&url).await.unwrap();
-        sqlx::query("DROP TABLE IF EXISTS reports, map_bosses, profiles, installs, _sqlx_migrations").execute(&db).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS sales, reports, map_bosses, profiles, installs, _sqlx_migrations").execute(&db).await.unwrap();
         sqlx::migrate!().run(&db).await.unwrap();
         let app = router(db);
 
@@ -293,6 +380,27 @@ mod tests {
         let (_, body) = call(&app, Request::get(format!("/v1/profiles/{id}.md")).body(Body::empty()).unwrap()).await;
         assert_eq!(body, "# Juliana v2");
 
+        // Par compte : introuvable tant que l'installation ne l'a pas donné.
+        let by_account = |path: &str| Request::get(path).body(Body::empty()).unwrap();
+        assert_eq!(call(&app, by_account("/v1/profiles/cxxi%232432/Juliana")).await.0, StatusCode::NOT_FOUND);
+        let account = |a: &str, token: &str| {
+            Request::put("/v1/me/account")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&Account { account: a.into() }).unwrap()))
+                .unwrap()
+        };
+        assert_eq!(call(&app, account("cxxi 2432", &token)).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call(&app, account("cxxi#2432", "faux")).await.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(call(&app, account("cxxi#2432", &token)).await.0, StatusCode::NO_CONTENT);
+        let (status, body) = call(&app, by_account("/v1/profiles/cxxi%232432/Juliana")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let p = serde_json::from_str::<PublicProfile>(&body).unwrap();
+        assert_eq!((p.id.as_str(), p.account.as_deref()), (id.as_str(), Some("cxxi#2432")));
+        assert_eq!(call(&app, by_account("/v1/profiles/CXXI%232432/Juliana.md")).await.1, "# Juliana v2");
+        assert_eq!(call(&app, by_account("/v1/profiles/cxxi%232432/Robin")).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&app, by_account("/v1/profiles/cxxi/Juliana")).await.0, StatusCode::NOT_FOUND);
+
         // Boss des maps : le plus signalé.
         let boss = |code: &str, name: &str, token: &str| {
             Request::put(format!("/v1/me/map-bosses/{code}"))
@@ -320,6 +428,20 @@ mod tests {
         let db = MySqlPool::connect(&url).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reports").fetch_one(&db).await.unwrap();
         assert_eq!(n, REPORTS_KEPT);
+
+        // Ventes : une par annonce, remplacée si renvoyée, retirée sur demande.
+        let listing = "9abdc6aab289bdbd81d3b7113ca7b9658eff04a13f2375a51b5c1f2613ee804e";
+        let sale = Sale { league: "Forbidden Rites".into(), item_class: "Spears".into(), rarity: "Unique".into(), name: "Atziri's Contempt".into(), base: "Pronged Spear".into(), amount: 70.0, currency: "exalted".into(), listed_at: Some(100), gone_at: 200, ..Default::default() };
+        let put_sale = |id: &str, s: &Sale| Request::put(format!("/v1/me/sales/{id}")).header(header::AUTHORIZATION, format!("Bearer {token}")).header(header::CONTENT_TYPE, "application/json").body(Body::from(serde_json::to_string(s).unwrap())).unwrap();
+        assert_eq!(call(&app, put_sale(listing, &sale)).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(call(&app, put_sale(listing, &Sale { amount: 60.0, ..sale.clone() })).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(call(&app, put_sale("pas-un-id", &sale)).await.0, StatusCode::BAD_REQUEST);
+        let amount: f64 = sqlx::query_scalar("SELECT amount FROM sales WHERE listing_id = ?").bind(listing).fetch_one(&db).await.unwrap();
+        assert_eq!(amount, 60.0);
+        let del = Request::delete(format!("/v1/me/sales/{listing}")).header(header::AUTHORIZATION, format!("Bearer {token}")).body(Body::empty()).unwrap();
+        assert_eq!(call(&app, del).await.0, StatusCode::NO_CONTENT);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sales").fetch_one(&db).await.unwrap();
+        assert_eq!(n, 0);
 
         let del = Request::delete("/v1/me/profiles/Juliana").header(header::AUTHORIZATION, format!("Bearer {token}")).body(Body::empty()).unwrap();
         assert_eq!(call(&app, del).await.0, StatusCode::NO_CONTENT);

@@ -109,17 +109,19 @@ pub enum Tab {
 pub enum SideTab {
     Diagnostic,
     Market,
+    Shop,
     Maps,
     Bosses,
 }
 
 impl SideTab {
-    pub const ALL: [SideTab; 4] = [SideTab::Diagnostic, SideTab::Market, SideTab::Maps, SideTab::Bosses];
+    pub const ALL: [SideTab; 5] = [SideTab::Diagnostic, SideTab::Shop, SideTab::Market, SideTab::Maps, SideTab::Bosses];
 
     pub fn label(self) -> &'static str {
         match self {
             SideTab::Diagnostic => tr!("Diagnostic"),
             SideTab::Market => tr!("Marché"),
+            SideTab::Shop => tr!("Boutique"),
             SideTab::Maps => tr!("Maps"),
             SideTab::Bosses => tr!("Boss"),
         }

@@ -392,6 +392,80 @@ pub struct Listing {
     /// Implicites (aussi dans `mods`).
     #[serde(default)]
     pub implicits: Vec<String>,
+    /// Compte du vendeur (« Pseudo#1234 »).
+    #[serde(default)]
+    pub account: String,
+}
+
+/// Annonce du site lue en `Listing` (`cat` : catégorie de l'objet estimé, pour la note).
+fn parse_listing(r: &Value, cat: &str, prices: Option<&crate::prices::PriceData>) -> Listing {
+    let price = &r["listing"]["price"];
+    let (amount, cur) = (price["amount"].as_f64(), price["currency"].as_str());
+    let ex = match (amount, cur, prices) {
+        (Some(amount), Some(cur), Some(d)) => d.listing_to_ex(amount, cur),
+        _ => None,
+    };
+    let item = &r["item"];
+    // Chaque mod est un objet { description, … } (ou un simple texte).
+    let mods: Vec<String> = ["enchantMods", "runeMods", "implicitMods", "fracturedMods", "explicitMods", "desecratedMods"]
+        .iter()
+        .flat_map(|k| item[*k].as_array().into_iter().flatten())
+        .filter_map(|m| m["description"].as_str().or(m.as_str()).map(clean_line))
+        .collect();
+    Listing {
+        name: item["name"].as_str().unwrap_or_default().to_string(),
+        base: item["typeLine"].as_str().unwrap_or_default().to_string(),
+        item_level: item["ilvl"].as_u64().unwrap_or(0) as u32,
+        amount: amount.unwrap_or(0.0),
+        currency: cur.unwrap_or_default().to_string(),
+        ex,
+        score: weights::score(cat, &mods),
+        kept: false,
+        age_hours: r["listing"]["indexed"].as_str().and_then(unix_time).map(|t| (now_secs() as i64 - t) as f64 / 3600.0),
+        rarity: item["rarity"].as_str().unwrap_or_default().to_string(),
+        icon: item["icon"].as_str().unwrap_or_default().to_string(),
+        defences: ["ar", "ev", "es"].map(|k| item["extended"][k].as_f64().unwrap_or(0.0)),
+        properties: properties(item),
+        implicits: item["implicitMods"].as_array().into_iter().flatten().filter_map(|m| m["description"].as_str().or(m.as_str()).map(clean_line)).collect(),
+        account: r["listing"]["account"]["name"].as_str().unwrap_or_default().to_string(),
+        mods,
+    }
+}
+
+/// Compte du joueur : ses propres annonces ne comptent pas dans une estimation (c'est son prix,
+/// pas celui du marché).
+static OWN_ACCOUNT: Mutex<String> = Mutex::new(String::new());
+
+pub fn set_own_account(account: &str) {
+    *OWN_ACCOUNT.lock().unwrap() = account.to_lowercase();
+}
+
+fn is_own(account: &str) -> bool {
+    let own = OWN_ACCOUNT.lock().unwrap();
+    !own.is_empty() && account.to_lowercase() == *own
+}
+
+/// Classe d'objet du texte en jeu (« Body Armours ») d'après celle d'une annonce (sa première
+/// propriété, « Body Armour »).
+pub fn class_of(trade: &str) -> String {
+    let class = match trade {
+        "Staff" => "Staves".into(),
+        "Quarterstaff" => "Quarterstaves".into(),
+        "Focus" => "Foci".into(),
+        "Boots" | "Gloves" => trade.into(),
+        c if c.ends_with('s') => c.into(),
+        c => format!("{c}s"),
+    };
+    // Base particulière d'un unique (« Ezomyte Boots », « Vaal Spears ») : la classe connue qui
+    // termine le nom.
+    if category(&class).is_some() {
+        return class;
+    }
+    const CLASSES: [&str; 31] = [
+        "Helmets", "Body Armours", "Gloves", "Boots", "Shields", "Foci", "Bucklers", "Quivers", "Amulets", "Rings", "Belts", "Staves", "Wands", "Sceptres", "Quarterstaves", "Crossbows",
+        "Bows", "Claws", "Daggers", "One Hand Swords", "One Hand Axes", "One Hand Maces", "Two Hand Swords", "Two Hand Axes", "Two Hand Maces", "Spears", "Flails", "Talismans", "Jewels", "Charms", "Flasks",
+    ];
+    CLASSES.iter().find(|c| class.ends_with(&format!(" {c}"))).map_or(class, |c| c.to_string())
 }
 
 /// Propriétés d'un objet du site de trade, écrites comme dans le texte copié en jeu : le nom
@@ -711,8 +785,36 @@ impl Estimate {
 
 type Shared = Arc<Mutex<HashMap<String, Estimate>>>;
 
+/// Travail du fil de trade : une estimation, ou la lecture de la boutique du joueur. Un seul fil
+/// pour les deux : les limites de débit du site sont les mêmes.
+enum Job {
+    Estimate(Item),
+    Shop { account: String, reply: Sender<ShopResult> },
+}
+
+/// Une annonce de la boutique du joueur.
+#[derive(Clone, Debug)]
+pub struct ShopSeen {
+    /// Identifiant de l'annonce sur le site (stable tant que l'objet reste en vente).
+    pub id: String,
+    /// Mise en vente (ou dernière mise à jour de l'annonce), en secondes Unix.
+    pub indexed: Option<i64>,
+    /// Classe de l'objet comme dans le texte en jeu (« Body Armours »).
+    pub class: String,
+    /// Onglet de la réserve où il est posé.
+    pub stash: String,
+    pub listing: Listing,
+}
+
+pub enum ShopResult {
+    /// `complete` : toutes les annonces du compte ont été lues (sinon, au-delà de ce que les
+    /// recherches du site rendent, des annonces peuvent manquer).
+    Done { seen: Vec<ShopSeen>, complete: bool },
+    Failed(String),
+}
+
 pub struct Trade {
-    tx: Sender<Item>,
+    tx: Sender<Job>,
     pub results: Shared,
     /// Estimations relancées alors qu'il y en avait déjà une : l'ancienne reste affichée jusqu'à
     /// la nouvelle (texte de l'objet -> étape en cours).
@@ -721,7 +823,7 @@ pub struct Trade {
 
 impl Trade {
     pub fn start(ctx: egui::Context, cache: PathBuf, league: String, prices: Prices) -> Trade {
-        let (tx, rx) = channel::<Item>();
+        let (tx, rx) = channel::<Job>();
         let saved = load_saved(&cache, &league).into_iter().map(|(raw, (_, e))| (raw, e)).collect();
         let results: Shared = Arc::new(Mutex::new(saved));
         let refreshing: Arc<Mutex<HashMap<String, String>>> = Arc::default();
@@ -736,7 +838,14 @@ impl Trade {
             return; // déjà estimé
         }
         r.insert(it.raw.clone(), Estimate::Pending(tr!("en file d'attente").into()));
-        let _ = self.tx.send(it.clone());
+        let _ = self.tx.send(Job::Estimate(it.clone()));
+    }
+
+    /// Lit les annonces du compte `account` (sa boutique) ; le résultat arrive sur le canal rendu.
+    pub fn shop(&self, account: &str) -> Receiver<ShopResult> {
+        let (reply, rx) = channel();
+        let _ = self.tx.send(Job::Shop { account: account.to_string(), reply });
+        rx
     }
 
     /// Relance l'estimation même si elle a déjà été faite (les prix bougent). L'estimation
@@ -747,7 +856,7 @@ impl Trade {
         } else {
             self.results.lock().unwrap().insert(it.raw.clone(), Estimate::Pending(tr!("en file d'attente").into()));
         }
-        let _ = self.tx.send(it.clone());
+        let _ = self.tx.send(Job::Estimate(it.clone()));
     }
 
     /// Estimation relancée en cours pour cet objet : son étape (« recherche… »).
@@ -765,20 +874,34 @@ fn set(shared: &Shared, ctx: &egui::Context, key: &str, e: Estimate) {
     ctx.request_repaint();
 }
 
-fn worker(rx: Receiver<Item>, shared: Shared, refreshing: Arc<Mutex<HashMap<String, String>>>, ctx: egui::Context, cache: PathBuf, league: String, prices: Prices) {
+fn worker(rx: Receiver<Job>, shared: Shared, refreshing: Arc<Mutex<HashMap<String, String>>>, ctx: egui::Context, cache: PathBuf, league: String, prices: Prices) {
     let index = StatIndex::load(&cache);
     let mut search_limit = Limiter::new(&[(5, 10), (15, 60), (30, 300)]);
     let mut fetch_limit = Limiter::new(&[(12, 4), (16, 12), (50, 300)]);
     let league_path = league.replace(' ', "%20");
     let mut queue: VecDeque<Item> = VecDeque::new();
+    let mut shops: VecDeque<(String, Sender<ShopResult>)> = VecDeque::new();
+    let push = |job: Job, queue: &mut VecDeque<Item>, shops: &mut VecDeque<(String, Sender<ShopResult>)>| match job {
+        Job::Estimate(it) => queue.push_back(it),
+        Job::Shop { account, reply } => shops.push_back((account, reply)),
+    };
     loop {
         // On traite d'abord les objets les plus récents ; au-delà de 5 en attente, on lâche les plus vieux.
-        match rx.recv() {
-            Ok(it) => queue.push_back(it),
-            Err(_) => return,
+        if queue.is_empty() && shops.is_empty() {
+            match rx.recv() {
+                Ok(job) => push(job, &mut queue, &mut shops),
+                Err(_) => return,
+            }
         }
-        while let Ok(it) = rx.try_recv() {
-            queue.push_back(it);
+        while let Ok(job) = rx.try_recv() {
+            push(job, &mut queue, &mut shops);
+        }
+        // La boutique d'abord : une lecture de temps en temps, sans faire attendre longtemps.
+        if let Some((account, reply)) = shops.pop_front() {
+            let result = shop_fetch(&account, &mut search_limit, &mut fetch_limit, &league_path, &prices).unwrap_or_else(ShopResult::Failed);
+            let _ = reply.send(result);
+            ctx.request_repaint();
+            continue;
         }
         while queue.len() > 5 {
             if let Some(old) = queue.pop_front() {
@@ -813,10 +936,80 @@ fn worker(rx: Receiver<Item>, shared: Shared, refreshing: Arc<Mutex<HashMap<Stri
                 Err(_) => ctx.request_repaint(),
             }
             while let Ok(more) = rx.try_recv() {
-                queue.push_back(more);
+                push(more, &mut queue, &mut shops);
+            }
+            // Une lecture de boutique demandée entre-temps passe avant les estimations suivantes.
+            if !shops.is_empty() {
+                break;
             }
         }
     }
+}
+
+/// Grandes catégories du site : au-delà de ce qu'une recherche rend (100 annonces), la boutique
+/// est lue catégorie par catégorie.
+const SHOP_CATEGORIES: [&str; 10] = ["weapon", "armour", "accessory", "gem", "jewel", "flask", "map", "card", "sanctum.relic", "currency"];
+
+/// Les annonces d'un compte, toutes si possible : une recherche, et au-delà de 100 annonces
+/// une par catégorie (deux pour une catégorie de plus de 100 : les plus récentes et les plus
+/// anciennes).
+fn shop_fetch(account: &str, search_limit: &mut Limiter, fetch_limit: &mut Limiter, league_path: &str, prices: &Prices) -> Result<ShopResult, String> {
+    let report = |_: String| {};
+    let search_url = format!("{API}/search/poe2/{league_path}");
+    let search = |category: Option<&str>, oldest: bool, limit: &mut Limiter| -> Result<(String, u64, Vec<String>), String> {
+        let mut filters = json!({"trade_filters": {"filters": {"account": {"input": account}}}});
+        if let Some(c) = category {
+            filters["type_filters"] = json!({"filters": {"category": {"option": c}}});
+        }
+        let body = json!({"query": {"status": {"option": "any"}, "filters": filters}, "sort": {"indexed": if oldest { "asc" } else { "desc" }}});
+        let res = send(limit, &report, || ureq::post(&search_url).set("User-Agent", USER_AGENT).timeout(Duration::from_secs(20)).send_json(body.clone()))?;
+        let ids = res["result"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        Ok((res["id"].as_str().unwrap_or_default().to_string(), res["total"].as_u64().unwrap_or(0), ids))
+    };
+    let first = search(None, false, search_limit)?;
+    let total = first.1;
+    // Chaque lecture d'annonces se fait avec l'identifiant de la recherche qui les a trouvées.
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    if (first.2.len() as u64) < total {
+        let mut seen = std::collections::HashSet::new();
+        for c in SHOP_CATEGORIES {
+            let (id, n, ids) = search(Some(c), false, search_limit)?;
+            let mut runs = vec![(id, ids)];
+            if (runs[0].1.len() as u64) < n {
+                let (id, _, ids) = search(Some(c), true, search_limit)?;
+                runs.push((id, ids));
+            }
+            for (id, ids) in runs {
+                let fresh: Vec<String> = ids.into_iter().filter(|i| seen.insert(i.clone())).collect();
+                if !fresh.is_empty() {
+                    groups.push((id, fresh));
+                }
+            }
+        }
+    } else if !first.2.is_empty() {
+        groups.push((first.0, first.2));
+    }
+    let mut out = Vec::new();
+    for (query, ids) in &groups {
+        for chunk in ids.chunks(10) {
+            let fetch_url = format!("{API}/fetch/{}?query={query}", chunk.join(","));
+            let listings = send(fetch_limit, &report, || ureq::get(&fetch_url).set("User-Agent", USER_AGENT).timeout(Duration::from_secs(20)).call())?;
+            let data = prices.data.lock().unwrap();
+            for r in listings["result"].as_array().into_iter().flatten() {
+                let Some(id) = r["id"].as_str() else { continue };
+                let class = class_of(&r["item"]["properties"][0]["name"].as_str().map(clean_line).unwrap_or_default());
+                out.push(ShopSeen {
+                    id: id.to_string(),
+                    indexed: r["listing"]["indexed"].as_str().and_then(unix_time),
+                    stash: r["listing"]["stash"]["name"].as_str().unwrap_or_default().to_string(),
+                    listing: parse_listing(r, category(&class).unwrap_or(""), data.as_ref()),
+                    class,
+                });
+            }
+        }
+    }
+    let complete = out.len() as u64 >= total;
+    Ok(ShopResult::Done { seen: out, complete })
 }
 
 /// Estimations gardées d'une session à l'autre : un jour au plus (les prix bougent), pour la
@@ -942,36 +1135,11 @@ fn estimate(
         let listings = send(fetch_limit, &report, || ureq::get(&fetch_url).set("User-Agent", USER_AGENT).timeout(Duration::from_secs(20)).call())?;
         let data = prices.data.lock().unwrap();
         for r in listings["result"].as_array().into_iter().flatten() {
-            let price = &r["listing"]["price"];
-            let (amount, cur) = (price["amount"].as_f64(), price["currency"].as_str());
-            let ex = match (amount, cur, data.as_ref()) {
-                (Some(amount), Some(cur), Some(d)) => d.listing_to_ex(amount, cur),
-                _ => None,
-            };
-            let item = &r["item"];
-            // Chaque mod est un objet { description, … } (ou un simple texte).
-            let mods: Vec<String> = ["enchantMods", "runeMods", "implicitMods", "fracturedMods", "explicitMods", "desecratedMods"]
-                .iter()
-                .flat_map(|k| item[*k].as_array().into_iter().flatten())
-                .filter_map(|m| m["description"].as_str().or(m.as_str()).map(clean_line))
-                .collect();
-            found.push(Listing {
-                name: item["name"].as_str().unwrap_or_default().to_string(),
-                base: item["typeLine"].as_str().unwrap_or_default().to_string(),
-                item_level: item["ilvl"].as_u64().unwrap_or(0) as u32,
-                amount: amount.unwrap_or(0.0),
-                currency: cur.unwrap_or_default().to_string(),
-                ex,
-                score: weights::score(cat, &mods),
-                kept: false,
-                age_hours: r["listing"]["indexed"].as_str().and_then(unix_time).map(|t| (now_secs() as i64 - t) as f64 / 3600.0),
-                rarity: item["rarity"].as_str().unwrap_or_default().to_string(),
-                icon: item["icon"].as_str().unwrap_or_default().to_string(),
-                defences: ["ar", "ev", "es"].map(|k| item["extended"][k].as_f64().unwrap_or(0.0)),
-                properties: properties(item),
-                implicits: item["implicitMods"].as_array().into_iter().flatten().filter_map(|m| m["description"].as_str().or(m.as_str()).map(clean_line)).collect(),
-                mods,
-            });
+            let l = parse_listing(r, cat, data.as_ref());
+            // Les annonces du joueur lui-même (sa boutique) ne disent rien du marché.
+            if !is_own(&l.account) {
+                found.push(l);
+            }
         }
     }
     // Annonces proches : note à ±`SCORE_GAP` de celle de l'objet.

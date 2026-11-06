@@ -96,6 +96,8 @@ pub enum FeedKind {
     Whisper,
     Character,
     Reward,
+    /// Annonces de la boutique plus en vente.
+    Shop,
 }
 
 #[derive(Clone, Debug)]

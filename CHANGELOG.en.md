@@ -1,5 +1,18 @@
 # What's new
 
+## 0.9.6
+
+- New Shop tab: your listings on the trade site (searched by your seller account).
+  - Listed: for how long, at what price (and how it changed), the total asked; sort by time or price; the item's card on hover, its diagnosis on click.
+  - To sort: listings that disappeared, sold or removed (the site doesn't say which): two buttons to tell. A badge on the tab and a line in the activity feed point them out.
+  - History: sales (price in green) and removals, to filter or search; a click changes the state.
+  - Read again on its own (every 15 minutes by default) or with "Refresh": settings Diagnosis and prices, Shop.
+  - Items marked "sold" are sent to the poe2-tracker server ("Share my sales" setting), for better estimates later.
+- Estimates: your own listings no longer count among the comparable listings.
+- Path of Exile account (Name#1234) asked on first launch; your public profile link becomes your account's.
+- Mobalytics builds: a new version on the site is pointed out by a green button at the top of the app (a click downloads it); the version date in the build manager. "New build versions" setting.
+- Settings sorted in categories, easier to read.
+
 ## 0.9.5
 
 - Stats closer to the game:
