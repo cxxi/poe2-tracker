@@ -290,6 +290,13 @@ impl Coach {
         self.save();
     }
 
+    /// Map partagée avec un coéquipier déjà dedans à notre arrivée.
+    pub fn map_grouped(&mut self, code: &str, seed: u64) {
+        let Some(name) = self.state.active.clone() else { return };
+        self.book(&name).grouped(code, seed);
+        self.save();
+    }
+
     /// Boss de la map lu à l'écran.
     pub fn map_boss(&mut self, code: &str, seed: u64, boss: &str) {
         let Some(name) = self.state.active.clone() else { return };

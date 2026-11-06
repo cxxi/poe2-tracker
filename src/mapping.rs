@@ -322,6 +322,14 @@ impl Book {
         self.dirty.set(true);
     }
 
+    /// Un coéquipier était déjà dans la map en arrivant (le serveur l'a vu dans la même
+    /// instance) : le jeu ne l'écrit pas, elle est quand même en groupe.
+    pub fn grouped(&mut self, code: &str, seed: u64) {
+        let Some(r) = self.open_run(code, seed).filter(|r| !r.group) else { return };
+        r.group = true;
+        self.dirty.set(true);
+    }
+
     /// Boss de la map, lu à l'écran.
     pub fn boss(&mut self, code: &str, seed: u64, name: &str) {
         let Some(r) = self.open_run(code, seed).filter(|r| r.boss.as_deref() != Some(name)) else { return };

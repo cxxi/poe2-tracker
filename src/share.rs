@@ -25,6 +25,8 @@ const ACCOUNT_RETRY: Duration = Duration::from_secs(60);
 /// qui entre ou sort), toutes les 15 secondes sinon (seulement suivre les coéquipiers).
 const MAP_SYNC_INSIDE: Duration = Duration::from_secs(5);
 const MAP_SYNC_EVERY: Duration = Duration::from_secs(15);
+/// Map jouée seul : une fois par minute, pour voir si un coéquipier y est déjà.
+const MAP_SYNC_PROBE: Duration = Duration::from_secs(60);
 /// La synchro des maps échoue (déjà signalé dans le journal).
 static MAP_SYNC_FAILING: AtomicBool = AtomicBool::new(false);
 
@@ -47,6 +49,8 @@ pub struct Share {
     last_account: Option<Instant>,
     last_sale: Option<Instant>,
     last_map_sync: Option<Instant>,
+    /// Map de la dernière synchro (code, graine).
+    last_map: Option<(String, u64)>,
     /// Dernière réponse de la synchro des maps en groupe (vide hors groupe).
     pub group_maps: Vec<GroupMap>,
     /// Boss connus du serveur : code de la map → nom.
@@ -153,13 +157,16 @@ impl Share {
 
     /// Map en cours envoyée (ou rien, pour seulement suivre les coéquipiers) ; la réponse arrive
     /// par `poll` dans `group_maps`. Au plus une requête toutes les 5 secondes dans une map en
-    /// groupe, toutes les 15 secondes sinon.
-    pub fn map_sync(&mut self, token: String, map: Option<MapAt>) {
-        let every = if map.as_ref().is_some_and(|m| m.presence.group_secs > 0 || m.presence.inside_since.is_some()) { MAP_SYNC_INSIDE } else { MAP_SYNC_EVERY };
-        if self.last_map_sync.is_some_and(|t| t.elapsed() < every) {
+    /// groupe, toutes les 15 secondes sinon, toutes les minutes pour une map jouée seul (`probe`).
+    pub fn map_sync(&mut self, token: String, map: Option<MapAt>, probe: bool) {
+        let every = if probe { MAP_SYNC_PROBE } else if map.as_ref().is_some_and(|m| m.presence.group_secs > 0 || m.presence.inside_since.is_some()) { MAP_SYNC_INSIDE } else { MAP_SYNC_EVERY };
+        // Une nouvelle map part tout de suite.
+        let key = map.as_ref().map(|m| (m.code.clone(), m.seed));
+        if key == self.last_map && self.last_map_sync.is_some_and(|t| t.elapsed() < every) {
             return;
         }
         self.last_map_sync = Some(Instant::now());
+        self.last_map = key;
         let tx = self.tx();
         std::thread::spawn(move || {
             let Some(token) = ensure_token(token, &tx) else { return };

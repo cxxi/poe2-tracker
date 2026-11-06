@@ -1,5 +1,9 @@
 # Nouveautés
 
+## 0.9.8
+
+- Maps en groupe : un coéquipier déjà dans la map quand tu y entres est maintenant reconnu (le jeu n'écrit que les arrivées). Pour le trouver, une map jouée seule part au serveur à l'entrée puis une fois par minute.
+
 ## 0.9.7
 
 - Maps en groupe, synchronisées par le serveur de poe2-tracker (réglage « Maps en groupe », activé par défaut) :

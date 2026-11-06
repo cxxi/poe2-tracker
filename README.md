@@ -84,12 +84,12 @@ cliquer pendant ce temps.)
   de cette zone seulement, rien n'est lu dans la mémoire du jeu). « Map Completed » note la
   fin de map et son temps ; le nom du boss est lu par OCR (modèles d'ocrs, téléchargés une
   fois depuis le serveur) puis ramené au nom de monstre le plus proche des fichiers du jeu.
-- **Maps en groupe** (réglage « Maps en groupe », coché par défaut) : en groupe (ou dans les
-  3 heures qui suivent une map en groupe), la map en cours (code et graine de l'instance, temps,
-  morts, retours, waystone, boss) part au serveur toutes les 5 à 15 secondes. Il renvoie ce
-  qu'en savent les autres joueurs de la même instance, et les maps en cours de ceux avec qui tu
-  as fait une map ces 3 dernières heures. Rien n'est envoyé quand tu joues seul ; rien n'est
-  gardé plus de 2 jours.
+- **Maps en groupe** (réglage « Maps en groupe », coché par défaut) : la map en cours (code et
+  graine de l'instance, temps, morts, retours, waystone, boss) part au serveur, toutes les 5 à
+  15 secondes en groupe (ou dans les 3 heures qui suivent une map en groupe), à l'entrée puis
+  une fois par minute seul (le jeu n'écrit pas qu'un coéquipier était déjà dans la map). Il
+  renvoie ce qu'en savent les autres joueurs de la même instance, et les maps en cours de ceux
+  avec qui tu as fait une map ces 3 dernières heures. Rien n'est gardé plus de 2 jours.
 - **Journal** : `poe2-tracker.log` dans le dossier des données (bouton « Ouvrir le journal »
   dans les réglages). « Envoyer les erreurs » (décoché par défaut) envoie au serveur les
   avertissements, erreurs et plantages avec la fin du journal, et partage les boss lus pour

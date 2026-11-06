@@ -3358,7 +3358,7 @@ impl App {
                     label(
                         ui,
                         tr!("Maps en groupe"),
-                        tr!("en groupe, la map en cours (temps, morts, waystone, boss) part au serveur de poe2-tracker pour la suivre avec tes coéquipiers ; seuls les joueurs passés dans la même map la voient"),
+                        tr!("la map en cours (temps, morts, waystone, boss) part au serveur de poe2-tracker pour la suivre avec tes coéquipiers (une fois par minute seulement si tu joues seul) ; seuls les joueurs passés dans la même map la voient"),
                     );
                     on_off(ui, "group_maps", &mut draft.group_maps, tr!("activé"), tr!("désactivé"));
                     ui.end_row();
@@ -4325,8 +4325,9 @@ impl App {
     }
 
     /// Maps en groupe : la map en cours part au serveur (heures en UTC), qui renvoie ce qu'en
-    /// savent les autres joueurs et les maps que lancent les coéquipiers. Seulement en groupe :
-    /// une map en groupe ces trois dernières heures. La fin et le boss vus par un coéquipier
+    /// savent les autres joueurs et les maps que lancent les coéquipiers. Toutes les 5 à 15 secondes
+    /// en groupe (ou après une map en groupe ces trois dernières heures), une fois par minute
+    /// seul, pour trouver un coéquipier déjà dans la map. La fin et le boss vus par un coéquipier
     /// valent pour nous.
     fn sync_group(&mut self) {
         let Some(c) = self.coach.as_mut().filter(|_| self.stored.group_maps) else {
@@ -4338,7 +4339,10 @@ impl App {
         let Some(book) = c.maps() else { return };
         let grouped = book.grouped_recently(now);
         let current = book.current().filter(|(r, inside)| inside.is_some() || now - r.last < 15 * 60);
-        let mut map = current.filter(|(r, _)| r.group || grouped).map(|(r, inside)| poe2_shared::MapAt { code: r.code.clone(), seed: r.seed, presence: r.presence(&character, inside, offset) });
+        // Seul (pas de groupe ces 3 heures) : la map part quand même, une fois par minute, pour
+        // trouver un coéquipier qui y était avant nous (le jeu n'écrit que les arrivées).
+        let probe = current.is_some_and(|(r, _)| !r.group && !grouped);
+        let mut map = current.map(|(r, inside)| poe2_shared::MapAt { code: r.code.clone(), seed: r.seed, presence: r.presence(&character, inside, offset) });
         if map.is_none() && !grouped {
             self.share.stop_map_sync();
             self.group_clock = None;
@@ -4370,6 +4374,9 @@ impl App {
             let here = self.share.group_maps.iter().find(|g| g.code == m.code && g.seed == m.seed);
             let done = here.and_then(|g| g.members.iter().find_map(|x| x.presence.completed_at));
             let boss = here.and_then(|g| g.members.iter().find_map(|x| x.presence.boss.clone()));
+            if here.is_some_and(|g| !g.members.is_empty()) {
+                c.map_grouped(&m.code, m.seed);
+            }
             if let (Some(t), None) = (done, m.presence.completed_at) {
                 c.map_completed_at(&m.code, m.seed, t + offset);
             }
@@ -4377,7 +4384,7 @@ impl App {
                 c.map_boss(&m.code, m.seed, &b);
             }
         }
-        self.share.map_sync(self.stored.server_token.clone(), map);
+        self.share.map_sync(self.stored.server_token.clone(), map, probe);
     }
 
     /// La map en cours en grand, par-dessus toute la fenêtre : elle s'ouvre à l'entrée dans une

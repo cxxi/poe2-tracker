@@ -1,5 +1,9 @@
 # What's new
 
+## 0.9.8
+
+- Group maps: a teammate who is already in the map when you enter it is now recognized (the game only logs arrivals). To find them, a map played alone is sent to the server on entry, then once a minute.
+
 ## 0.9.7
 
 - Group maps, synced through the poe2-tracker server ("Group maps" setting, on by default):

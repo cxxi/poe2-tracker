@@ -274,7 +274,7 @@ pub const EN: &[(&str, &str)] = &[
     ("la map en cours en grand (chrono, morts, waystone, groupe), ouverte à l'entrée dans une map ; sinon, le suivi reste en bas à gauche", "the current map in large (timer, deaths, waystone, group), opened when you enter a map; otherwise tracking stays at the bottom left"),
     ("l'a lancée", "opened it"),
     ("Maps en groupe", "Group maps"),
-    ("en groupe, la map en cours (temps, morts, waystone, boss) part au serveur de poe2-tracker pour la suivre avec tes coéquipiers ; seuls les joueurs passés dans la même map la voient", "in a group, the current map (time, deaths, waystone, boss) goes to the poe2-tracker server so you can follow it with your teammates; only players who were in the same map can see it"),
+    ("la map en cours (temps, morts, waystone, boss) part au serveur de poe2-tracker pour la suivre avec tes coéquipiers (une fois par minute seulement si tu joues seul) ; seuls les joueurs passés dans la même map la voient", "the current map (time, deaths, waystone, boss) goes to the poe2-tracker server so you can follow it with your teammates (only once a minute when you play alone); only players who were in the same map can see it"),
     ("Map d'un autre joueur : son waystone n'est pas connu.", "Another player's map: its waystone isn't known."),
     ("Waystone non copié : Ctrl+C dessus avant de lancer la map pour garder ses mods.", "Waystone not copied: Ctrl+C on it before opening the map to keep its mods."),
     ("Pas de map en cours : le chronomètre démarre à l'entrée dans une map.", "No map running: the timer starts when you enter a map."),
