@@ -1,6 +1,6 @@
 ---
 name: poe2-profile
-description: Lire le profil public d'un personnage Path of Exile 2 publié par poe2-tracker (équipement, caractéristiques face au build, aptitudes, talents, joyaux, Atlas, maps, quêtes). À utiliser dès qu'on parle du personnage d'un joueur (le sien, celui d'un ami), de son équipement, de son build ou de ce qu'il doit améliorer, ou qu'un lien poe2-tracker.cxxi.io/v1/profiles/… est donné.
+description: Lire le profil public d'un personnage Path of Exile 2 publié par poe2-tracker (équipement, caractéristiques face au build, aptitudes, talents, joyaux, Atlas, maps, quêtes). À utiliser dès qu'on parle du personnage d'un joueur (le sien, celui d'un ami), de son équipement, de son build ou de ce qu'il doit améliorer, ou qu'un lien poe2-tracker.cxxi.io/v1/profiles/… ou un compte PoE (pseudo#1234) est donné.
 ---
 
 # Profil public poe2-tracker
@@ -19,20 +19,31 @@ change).
    public », bouton « Copier »).
 3. **Dès qu'un nouveau lien t'est donné, enregistre-le dans ce souvenir `poe2-profiles`**
    (crée-le s'il n'existe pas, type `reference`, avec son pointeur dans `MEMORY.md`) : une ligne
-   par personnage, `joueur — personnage (classe) — lien`. Mets-le à jour si un lien change, et
-   retire une ligne dont le profil répond 404 de façon durable.
+   par personnage, `joueur — compte — personnage (classe) — lien`. Mets-le à jour si un lien
+   change, et retire une ligne dont le profil répond 404 de façon durable.
 
-Un lien a la forme `https://poe2-tracker.cxxi.io/v1/profiles/<id>.md`, où `<id>` fait
-26 caractères (minuscules a–z et chiffres 2–7). Un identifiant seul suffit à refaire le lien.
+Un lien a la forme `https://poe2-tracker.cxxi.io/v1/profiles/<compte>/<personnage>.md`, où
+`<compte>` est le compte Path of Exile du joueur avec le `#` encodé (`cxxi#2432` →
+`cxxi%232432`). Le compte (`pseudo#1234` : lettres, chiffres et `_`, puis 4 chiffres) et le nom
+du personnage suffisent à refaire le lien : tu peux les demander au joueur plutôt qu'un lien. Ce
+lien suit le personnage même si le joueur réinstalle l'app.
+
+Les liens d'avant ont la forme `https://poe2-tracker.cxxi.io/v1/profiles/<id>.md`, où `<id>` fait
+26 caractères (minuscules a–z et chiffres 2–7). Ils marchent encore, mais un identifiant change
+quand l'app est réinstallée : préfère le compte quand tu le connais. Le JSON d'un profil donne
+son compte (`account`), s'il est connu.
 
 ## Lire le profil
 
 - **Commande `poe2-profile` (à préférer, si elle existe : `command -v poe2-profile`)** :
-  `poe2-profile <id>` rend l'export entier, `poe2-profile <id> <section>` une seule section (clés
-  plus bas : `gear`, `stats`, `passives`…), précédés de la date de mise à jour. Elle est autorisée
-  sans demander : lance-la **seule**, telle quelle, sans tube (`|`), redirection ni autre commande
-  dans le même appel, sinon chaque lecture demande une permission au joueur.
-- **Markdown** : `https://poe2-tracker.cxxi.io/v1/profiles/<id>.md`, l'export complet (environ
+  `poe2-profile <compte#1234> <personnage>` rend l'export entier,
+  `poe2-profile <compte#1234> <personnage> <section>` une seule section (clés plus bas : `gear`,
+  `stats`, `passives`…), précédés de la date de mise à jour. Écris le compte avec son `#`, entre
+  apostrophes (`poe2-profile 'cxxi#2432' Juliana_novachrono stats`) : la commande l'encode
+  elle-même. Pour un ancien lien : `poe2-profile <id> [section]`. Elle est autorisée sans
+  demander : lance-la **seule**, telle quelle, sans tube (`|`), redirection ni autre commande dans
+  le même appel, sinon chaque lecture demande une permission au joueur.
+- **Markdown** : `…/v1/profiles/<compte>/<personnage>.md` (ou `…/<id>.md`), l'export complet (environ
   30 Ko).
   - Si tu as un shell avec `curl`, `curl -s <lien>` rend le texte exact. Seul, sans le passer à
     `python3` ou `jq` : lis la sortie toi-même.
@@ -40,8 +51,9 @@ Un lien a la forme `https://poe2-tracker.cxxi.io/v1/profiles/<id>.md`, où `<id>
     lui une question précise qui sert la demande (« les mods exacts du casque », « le tableau
     porté / build des résistances », « les talents à prendre »), une par section utile, plutôt que
     de demander tout le texte. Pour un chiffre qui compte, redemande la ligne exacte.
-- **JSON** : `https://poe2-tracker.cxxi.io/v1/profiles/<id>` →
-  `{ id, updated_at, profile }`. `updated_at` : dernière mise à jour, en secondes Unix.
+- **JSON** : le même lien sans `.md` →
+  `{ id, account, updated_at, profile }`. `account` : le compte du joueur (`null` s'il n'est pas
+  connu). `updated_at` : dernière mise à jour, en secondes Unix.
   `profile` : `format`, `lang` (« fr » ou « en » : langue de l'app du joueur), `app_version`,
   `character` (`name`, `class`, `level`, `progress`, `league`, `build` : `name`, `url`, `step`),
   `markdown` (l'export entier) et `sections` (`key`, `title`, `markdown`). Utile pour la date de

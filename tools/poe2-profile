@@ -1,23 +1,43 @@
 #!/bin/sh
 # Lit un profil public poe2-tracker, en lecture seule, toujours sur le serveur de poe2-tracker :
-#   poe2-profile <id>            l'export entier (Markdown), précédé de sa date de mise à jour
-#   poe2-profile <id> <section>  une seule section (gear, stats, skills, passives, jewels, atlas,
-#                                maps, quests)
-# Faite pour être autorisée telle quelle à un assistant : l'identifiant et la section sont vérifiés,
-# rien d'autre n'est passé à curl.
+#   poe2-profile <compte#1234> <personnage>            l'export entier (Markdown), précédé de sa
+#                                                     date de mise à jour
+#   poe2-profile <compte#1234> <personnage> <section>  une seule section (gear, stats, skills,
+#                                                     passives, jewels, atlas, maps, quests)
+#   poe2-profile <id> [section]                        le même par identifiant (anciens liens)
+# Faite pour être autorisée telle quelle à un assistant : le compte, le personnage, l'identifiant et
+# la section sont vérifiés, rien d'autre n'est passé à curl.
 set -eu
-id=${1:-}
-section=${2:-}
-case $id in
-    *[!a-z2-7]* | '') echo "poe2-profile : identifiant invalide (26 caractères a–z et 2–7)" >&2; exit 2 ;;
+invalid() { echo "poe2-profile : $1" >&2; exit 2; }
+usage="usage : poe2-profile <compte#1234> <personnage> [section] | poe2-profile <id> [section]"
+first=${1:-}
+case $first in
+    *'#'*)
+        [ $# -ge 2 ] && [ $# -le 3 ] || invalid "$usage"
+        name=${first%%#*}
+        tag=${first#*#}
+        case $name in *[!A-Za-z0-9_]* | '') invalid "compte invalide (pseudo#1234)" ;; esac
+        case $tag in *[!0-9]* | '') invalid "compte invalide (pseudo#1234)" ;; esac
+        [ ${#name} -le 32 ] && [ ${#tag} -eq 4 ] || invalid "compte invalide (pseudo#1234)"
+        character=$2
+        case $character in *[!A-Za-z0-9_]* | '') invalid "personnage invalide" ;; esac
+        [ ${#character} -le 64 ] || invalid "personnage invalide"
+        path="$name%23$tag/$character"
+        section=${3:-}
+        ;;
+    *)
+        [ $# -ge 1 ] && [ $# -le 2 ] || invalid "$usage"
+        case $first in *[!a-z2-7]* | '') invalid "identifiant invalide (26 caractères a–z et 2–7)" ;; esac
+        [ ${#first} -eq 26 ] || invalid "identifiant invalide (26 caractères a–z et 2–7)"
+        path=$first
+        section=${2:-}
+        ;;
 esac
-[ ${#id} -eq 26 ] || { echo "poe2-profile : identifiant invalide (26 caractères a–z et 2–7)" >&2; exit 2; }
 case $section in
-    *[!a-z_]*) echo "poe2-profile : section invalide" >&2; exit 2 ;;
+    *[!a-z_]*) invalid "section invalide" ;;
 esac
-[ $# -le 2 ] || { echo "usage : poe2-profile <id> [section]" >&2; exit 2; }
 
-json=$(curl -sS --fail-with-body --max-time 20 "https://poe2-tracker.cxxi.io/v1/profiles/$id") || {
+json=$(curl -sS --fail-with-body --max-time 20 "https://poe2-tracker.cxxi.io/v1/profiles/$path") || {
     echo "poe2-profile : profil introuvable ou serveur injoignable ($json)" >&2
     exit 1
 }
