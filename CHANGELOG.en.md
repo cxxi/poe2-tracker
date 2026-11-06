@@ -1,5 +1,16 @@
 # What's new
 
+## 0.9.7
+
+- Group maps, synced through the poe2-tracker server ("Group maps" setting, on by default):
+  - the timer is the group's: it only stops when nobody is in the map;
+  - each player's deaths, returns and time, who opened the map, its waystone and its boss;
+  - the map end or the boss seen by a teammate counts for everyone;
+  - only players who were in the same map can see it, and nothing is sent when you play alone.
+- Large window for the current map: it opens when you enter a map (or when a teammate opens one) and closes on its own at the end. Once closed, tracking stays at the bottom left. "Map window" setting.
+- Equipment: the slot updated by Ctrl+Alt+C lights up for a moment, even if the item didn't change.
+- Empty equipment slots no longer show their name (it stays in the tooltip).
+
 ## 0.9.6
 
 - New Shop tab: your listings on the trade site (searched by your seller account).

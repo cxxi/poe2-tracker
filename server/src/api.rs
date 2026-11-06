@@ -14,13 +14,19 @@
 //! - `POST /v1/me/reports` (jeton) : rapport d'erreurs de l'app (les 50 derniers gardés).
 //! - `PUT /v1/me/sales/{annonce}` (jeton) : objet de la boutique marqué « vendu » par le joueur ;
 //!   `DELETE` : la vente retirée (le joueur s'était trompé).
+//! - `POST /v1/me/map-sync` (jeton) : la map où est l'installation (code, graine, temps, morts,
+//!   waystone) ; en retour, les autres joueurs de cette instance et les maps en cours de ceux
+//!   avec qui elle a fait une map ces dernières heures.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use poe2_shared::{Account, ApiError, InstallCreated, MapBoss, MapBosses, PROFILE_FORMAT, Profile, ProfileSaved, PublicProfile, Report, Sale, valid_account, valid_listing_id};
+use poe2_shared::{
+    Account, ApiError, GroupMap, InstallCreated, MapBoss, MapBosses, MapMember, MapPresence, MapSync, MapSyncReply, PROFILE_FORMAT, Profile, ProfileSaved, PublicProfile, Report, Sale, valid_account, valid_listing_id,
+    valid_map_code,
+};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::MySqlPool;
@@ -42,6 +48,7 @@ pub fn router(db: MySqlPool) -> Router {
         .route("/v1/me/map-bosses/{code}", put(save_map_boss))
         .route("/v1/me/reports", post(save_report))
         .route("/v1/me/sales/{listing}", put(save_sale).delete(delete_sale))
+        .route("/v1/me/map-sync", post(map_sync))
         .layer(RequestBodyLimitLayer::new(MAX_BODY))
         .layer(TraceLayer::new_for_http())
         .with_state(db)
@@ -232,7 +239,7 @@ async fn map_bosses(State(db): State<MySqlPool>) -> Result<Json<MapBosses>, Erro
 
 async fn save_map_boss(State(db): State<MySqlPool>, headers: HeaderMap, Path(code): Path<String>, Json(b): Json<MapBoss>) -> Result<StatusCode, Error> {
     let install = install_of(&db, &headers).await?;
-    if code.is_empty() || code.len() > 80 || !code.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+    if !valid_map_code(&code) {
         return Err(Error::BadRequest("code de map invalide".into()));
     }
     let boss = b.boss.trim();
@@ -317,6 +324,81 @@ async fn delete_sale(State(db): State<MySqlPool>, headers: HeaderMap, Path(listi
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Une instance de map ne dure pas plus longtemps : au-delà, même code et même graine sont une
+/// autre map (et ses joueurs ne sont plus ensemble).
+const INSTANCE_SECS: i64 = 6 * 3600;
+/// Joueurs « du même groupe » : ils ont été dans la même instance ces trois dernières heures.
+const GROUP_SECS: i64 = 3 * 3600;
+/// Map d'un coéquipier montrée comme en cours : envoyée il y a moins de 10 minutes.
+const RUNNING_SECS: i64 = 10 * 60;
+/// Ce qu'on garde des maps en groupe.
+const PRESENCE_KEPT_SECS: i64 = 2 * 24 * 3600;
+
+fn valid_presence(p: &MapPresence) -> bool {
+    let short = |v: &str, n: usize| v.chars().count() <= n;
+    let text = |v: &[String]| v.len() <= 40 && v.iter().all(|l| short(l, 300));
+    !p.character.is_empty()
+        && short(&p.character, 64)
+        && p.zone.as_deref().is_none_or(|z| short(z, 120))
+        && p.boss.as_deref().is_none_or(|b| short(b, 120))
+        && p.waystone.as_ref().is_none_or(|w| short(&w.name, 120) && text(&w.stats) && text(&w.mods))
+}
+
+async fn map_sync(State(db): State<MySqlPool>, headers: HeaderMap, Json(sync): Json<MapSync>) -> Result<Json<MapSyncReply>, Error> {
+    let install = install_of(&db, &headers).await?;
+    let t = now();
+    if let Some(map) = &sync.map {
+        if !valid_map_code(&map.code) || !valid_presence(&map.presence) {
+            return Err(Error::BadRequest("map invalide".into()));
+        }
+        let data = serde_json::to_string(&map.presence).map_err(|e| Error::BadRequest(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO map_presence (install_id, code, seed, data, completed, updated_at) VALUES (?, ?, ?, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE data = VALUES(data), completed = VALUES(completed), updated_at = VALUES(updated_at)",
+        )
+        .bind(install)
+        .bind(&map.code)
+        .bind(map.seed)
+        .bind(&data)
+        .bind(map.presence.completed_at.is_some())
+        .bind(t)
+        .execute(&db)
+        .await?;
+    }
+    sqlx::query("DELETE FROM map_presence WHERE updated_at < ?").bind(t - PRESENCE_KEPT_SECS).execute(&db).await?;
+    // Les autres joueurs de cette instance (la même graine prouve qu'on y est ensemble), puis les
+    // maps en cours des coéquipiers : ceux avec qui l'on a partagé une instance récemment.
+    let (code, seed) = sync.map.as_ref().map_or(("", 0), |m| (m.code.as_str(), m.seed));
+    let rows: Vec<(String, u64, String, i64)> = sqlx::query_as(
+        "SELECT p.code, p.seed, p.data, p.updated_at FROM map_presence p WHERE p.install_id <> ? AND ( \
+            (p.code = ? AND p.seed = ? AND p.updated_at > ?) \
+            OR (p.completed = FALSE AND p.updated_at > ? AND p.install_id IN ( \
+                SELECT o.install_id FROM map_presence m JOIN map_presence o ON o.code = m.code AND o.seed = m.seed AND o.install_id <> m.install_id \
+                WHERE m.install_id = ? AND m.updated_at > ? AND o.updated_at > ?))) \
+         ORDER BY p.code, p.seed, p.updated_at DESC",
+    )
+    .bind(install)
+    .bind(code)
+    .bind(seed)
+    .bind(t - INSTANCE_SECS)
+    .bind(t - RUNNING_SECS)
+    .bind(install)
+    .bind(t - GROUP_SECS)
+    .bind(t - GROUP_SECS)
+    .fetch_all(&db)
+    .await?;
+    let mut maps: Vec<GroupMap> = Vec::new();
+    for (code, seed, data, updated_at) in rows {
+        let Ok(presence) = serde_json::from_str::<MapPresence>(&data) else { continue };
+        let member = MapMember { presence, updated_at };
+        match maps.iter_mut().find(|m| m.code == code && m.seed == seed) {
+            Some(m) => m.members.push(member),
+            None => maps.push(GroupMap { code, seed, members: vec![member] }),
+        }
+    }
+    Ok(Json(MapSyncReply { maps }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,7 +428,7 @@ mod tests {
     async fn profile_round_trip() {
         let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
         let db = MySqlPool::connect(&url).await.unwrap();
-        sqlx::query("DROP TABLE IF EXISTS sales, reports, map_bosses, profiles, installs, _sqlx_migrations").execute(&db).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS map_presence, sales, reports, map_bosses, profiles, installs, _sqlx_migrations").execute(&db).await.unwrap();
         sqlx::migrate!().run(&db).await.unwrap();
         let app = router(db);
 
@@ -442,6 +524,37 @@ mod tests {
         assert_eq!(call(&app, del).await.0, StatusCode::NO_CONTENT);
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sales").fetch_one(&db).await.unwrap();
         assert_eq!(n, 0);
+
+        // Maps en groupe : la même instance (code et graine) relie deux installations ; la map
+        // suivante de l'une apparaît chez l'autre tant qu'elle est en cours.
+        let sync = |token: &str, map: Option<(&str, u64, &str, bool)>| {
+            let map = map.map(|(code, seed, character, done)| poe2_shared::MapAt {
+                code: code.into(),
+                seed,
+                presence: MapPresence { character: character.into(), level: 78, start: 1000, last: 1100, completed_at: done.then_some(1100), ..Default::default() },
+            });
+            Request::post("/v1/me/map-sync").header(header::AUTHORIZATION, format!("Bearer {token}")).header(header::CONTENT_TYPE, "application/json").body(Body::from(serde_json::to_string(&MapSync { map }).unwrap())).unwrap()
+        };
+        let maps = |body: &str| serde_json::from_str::<MapSyncReply>(body).unwrap().maps;
+        let (status, body) = call(&app, sync(&token, Some(("MapSlick", 1987693879, "Juliana", false)))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(maps(&body).is_empty());
+        // Un inconnu dans une autre map : invisible.
+        assert!(maps(&call(&app, sync(&third, Some(("MapBazaar", 42, "Inconnu", false)))).await.1).is_empty());
+        let (_, body) = call(&app, sync(&other, Some(("MapSlick", 1987693879, "Robin", false)))).await;
+        let seen = maps(&body);
+        assert_eq!(seen.len(), 1);
+        assert_eq!((seen[0].code.as_str(), seen[0].members[0].presence.character.as_str()), ("MapSlick", "Juliana"));
+        // Robin lance la map suivante : Juliana la voit, même sans y être encore.
+        call(&app, sync(&other, Some(("MapNecropolis", 1676595152, "Robin", false)))).await;
+        let seen = maps(&call(&app, sync(&token, None)).await.1);
+        assert!(seen.iter().any(|m| m.code == "MapNecropolis" && m.members[0].presence.character == "Robin"), "{seen:?}");
+        assert!(!seen.iter().any(|m| m.code == "MapBazaar"));
+        // Terminée : elle n'est plus « en cours ».
+        call(&app, sync(&other, Some(("MapNecropolis", 1676595152, "Robin", true)))).await;
+        assert!(!maps(&call(&app, sync(&token, None)).await.1).iter().any(|m| m.code == "MapNecropolis"));
+        assert_eq!(call(&app, sync(&token, Some(("Map Slick", 1, "Juliana", false)))).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call(&app, sync("faux", None)).await.0, StatusCode::UNAUTHORIZED);
 
         let del = Request::delete("/v1/me/profiles/Juliana").header(header::AUTHORIZATION, format!("Bearer {token}")).body(Body::empty()).unwrap();
         assert_eq!(call(&app, del).await.0, StatusCode::NO_CONTENT);

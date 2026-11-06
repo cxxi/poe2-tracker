@@ -171,3 +171,87 @@ pub struct ReportEntry {
     pub level: String,
     pub message: String,
 }
+
+/// Code de map bien formé (« MapSlick », « MapUberBoss_JadeCitadel ») : lettres, chiffres et
+/// « _ », 80 au plus.
+pub fn valid_map_code(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 80 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Ce qu'une installation sait d'une map faite en groupe. Les heures sont en secondes Unix (UTC),
+/// déjà corrigées du décalage de l'heure du journal.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapPresence {
+    /// Personnage qui y est.
+    pub character: String,
+    /// Niveau de la zone et nom affiché par le jeu.
+    pub level: u32,
+    pub zone: Option<String>,
+    /// Première entrée et dernière sortie (ou dernière activité).
+    pub start: i64,
+    pub last: i64,
+    /// Dedans depuis cette heure, ou dehors.
+    pub inside_since: Option<i64>,
+    /// Temps passé dedans hors AFK, présence en cours non comprise.
+    pub active_secs: i64,
+    /// Temps de la map pour le groupe à l'envoi : il avance tant qu'au moins un joueur est
+    /// dedans.
+    #[serde(default)]
+    pub group_secs: i64,
+    pub deaths: u32,
+    /// Entrées depuis la ville : 1 + retours.
+    pub entries: u32,
+    /// Ce joueur l'a lancée au device.
+    pub opened: bool,
+    /// « Map Completed » vu à l'écran.
+    pub completed_at: Option<i64>,
+    pub boss: Option<String>,
+    /// Waystone copié avant d'y entrer : seul celui qui l'a lancée l'a.
+    pub waystone: Option<MapWaystone>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapWaystone {
+    pub name: String,
+    pub tier: u32,
+    /// En-tête : « Item Rarity: +33% »…
+    pub stats: Vec<String>,
+    pub mods: Vec<String>,
+    pub corrupted: bool,
+}
+
+/// Synchro des maps en groupe (`POST /v1/me/map-sync`) : la map où est l'installation, s'il y en
+/// a une. La réponse donne les autres joueurs de cette map et les maps en cours de ceux avec qui
+/// elle a fait une map ces dernières heures.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapSync {
+    pub map: Option<MapAt>,
+}
+
+/// Une instance de map : son code et sa graine (la même pour tous les joueurs qui y sont).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapAt {
+    pub code: String,
+    pub seed: u64,
+    pub presence: MapPresence,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapSyncReply {
+    pub maps: Vec<GroupMap>,
+}
+
+/// Une map et ce qu'en disent les autres joueurs (jamais l'installation qui demande).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GroupMap {
+    pub code: String,
+    pub seed: u64,
+    pub members: Vec<MapMember>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MapMember {
+    pub presence: MapPresence,
+    /// Dernier envoi de ce joueur, en secondes Unix.
+    pub updated_at: i64,
+}

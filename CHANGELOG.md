@@ -1,5 +1,16 @@
 # Nouveautés
 
+## 0.9.7
+
+- Maps en groupe, synchronisées par le serveur de poe2-tracker (réglage « Maps en groupe », activé par défaut) :
+  - le chrono est celui du groupe : il ne s'arrête que quand plus personne n'est dans la map ;
+  - les morts, les retours et le temps de chaque joueur, qui a lancé la map, son waystone et son boss ;
+  - la fin de map ou le boss vu par un coéquipier vaut pour tous ;
+  - seuls les joueurs passés dans la même map la voient, et rien ne part quand tu joues seul.
+- Grande fenêtre de la map en cours : elle s'ouvre à l'entrée dans une map (ou quand un coéquipier en lance une) et se ferme seule à la fin. Fermée, le suivi reste en bas à gauche. Réglage « Fenêtre de la map ».
+- Équipement : la case mise à jour par Ctrl+Alt+C s'illumine un instant, même si la pièce n'a pas changé.
+- Les cases d'équipement vides n'affichent plus leur nom (il reste dans l'infobulle).
+
 ## 0.9.6
 
 - Nouvel onglet Boutique : tes annonces sur le site de trade (recherche par ton compte vendeur).

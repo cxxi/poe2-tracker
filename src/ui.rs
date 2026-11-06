@@ -183,7 +183,6 @@ pub fn rarity_color(r: Rarity) -> Color32 {
 }
 
 pub const MOD_COLOR: Color32 = Color32::from_rgb(136, 136, 255);
-const DIM: Color32 = Color32::from_rgb(127, 127, 127);
 const SLOT_FILL: Color32 = Color32::from_rgb(22, 20, 18);
 const SLOT_EMPTY_STROKE: Color32 = Color32::from_rgb(70, 62, 50);
 
@@ -291,13 +290,10 @@ pub fn slot(
             painter.text(rect.center(), Align2::CENTER_CENTER, &it.name, FontId::proportional(if small { 8.0 } else { 11.0 }), rarity_color(it.rarity));
         }
         (None, _) => {
-            // Case vide : la pièce que le build recommande, en noir et blanc.
-            match ghost {
-                Some(tex) => paint_texture(painter, rect, tex, Color32::from_gray(150)),
-                None if framed && !small => {
-                    painter.text(rect.center(), Align2::CENTER_CENTER, slot.label(), FontId::proportional(11.0), DIM);
-                }
-                None => {}
+            // Case vide : la pièce que le build recommande, en noir et blanc ; sinon rien (son nom
+            // est dans l'infobulle).
+            if let Some(tex) = ghost {
+                paint_texture(painter, rect, tex, Color32::from_gray(150));
             }
             if hovered {
                 match build {

@@ -283,6 +283,13 @@ impl Coach {
         self.save();
     }
 
+    /// Fin de la map vue par un coéquipier, à l'heure `t` du log.
+    pub fn map_completed_at(&mut self, code: &str, seed: u64, t: i64) {
+        let Some(name) = self.state.active.clone() else { return };
+        self.book(&name).completed(code, seed, t);
+        self.save();
+    }
+
     /// Boss de la map lu à l'écran.
     pub fn map_boss(&mut self, code: &str, seed: u64, boss: &str) {
         let Some(name) = self.state.active.clone() else { return };

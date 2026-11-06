@@ -141,6 +141,9 @@ pub struct Run {
     /// joueur y est entré ou en est sorti.
     #[serde(default)]
     pub group: bool,
+    /// Lancée par nous au device (pas la map d'un autre).
+    #[serde(default)]
+    pub opened: bool,
     /// « Map Completed » vu à l'écran : heure du log et temps de jeu dans la map à ce moment.
     #[serde(default)]
     pub completed_at: Option<i64>,
@@ -152,6 +155,58 @@ pub struct Run {
 }
 
 impl Run {
+    /// La map d'un coéquipier, d'après ce qu'il en a envoyé (heures UTC, ramenées à celle du
+    /// log par `offset`).
+    pub fn from_presence(code: &str, seed: u64, p: &poe2_shared::MapPresence, offset: i64) -> Run {
+        let kind = match place(code) {
+            Place::Run(kind) => kind,
+            _ => RunKind::Map,
+        };
+        let waystone = p.waystone.as_ref().map(|w| Waystone { name: w.name.clone(), tier: w.tier, stats: w.stats.clone(), mods: w.mods.clone(), corrupted: w.corrupted });
+        Run {
+            code: code.to_string(),
+            level: p.level,
+            seed,
+            kind,
+            zone: p.zone.clone(),
+            start: p.start + offset,
+            last: p.last + offset,
+            inside_secs: p.active_secs,
+            afk_secs: 0,
+            entries: p.entries,
+            deaths: p.deaths,
+            sub_areas: vec![],
+            waystone,
+            group: true,
+            opened: false,
+            completed_at: p.completed_at.map(|t| t + offset),
+            completed_secs: None,
+            boss: p.boss.clone(),
+        }
+    }
+
+    /// Ce qu'on envoie de cette map aux coéquipiers : heures du log ramenées en UTC (`offset` :
+    /// heure du log moins UTC), `inside` : dedans depuis (heure du log).
+    pub fn presence(&self, character: &str, inside: Option<i64>, offset: i64) -> poe2_shared::MapPresence {
+        let waystone = self.waystone.as_ref().map(|w| poe2_shared::MapWaystone { name: w.name.clone(), tier: w.tier, stats: w.stats.clone(), mods: w.mods.clone(), corrupted: w.corrupted });
+        poe2_shared::MapPresence {
+            character: character.to_string(),
+            level: self.level,
+            zone: self.zone.clone(),
+            start: self.start - offset,
+            last: self.last - offset,
+            inside_since: inside.map(|t| t - offset),
+            active_secs: self.active_secs(),
+            group_secs: 0,
+            deaths: self.deaths,
+            entries: self.entries,
+            opened: self.opened,
+            completed_at: self.completed_at.map(|t| t - offset),
+            boss: self.boss.clone(),
+            waystone,
+        }
+    }
+
     /// Temps de jeu dans la map, hors AFK.
     pub fn active_secs(&self) -> i64 {
         (self.inside_secs - self.afk_secs).max(0)
@@ -237,6 +292,12 @@ impl Book {
     /// Map en cours (ouverte, même depuis le repaire) et l'heure d'entrée si l'on est dedans.
     pub fn current(&self) -> Option<(&Run, Option<i64>)> {
         Some((self.runs.get(self.open?)?, self.inside_since))
+    }
+
+    /// Une map en groupe ces trois dernières heures (heure du log `now`) : on suit encore ses
+    /// coéquipiers.
+    pub fn grouped_recently(&self, now: i64) -> bool {
+        self.runs.iter().rev().take_while(|r| now - r.last < 3 * 3600).any(|r| r.group)
     }
 
     /// Map où l'on est en ce moment (code et seed).
@@ -347,7 +408,7 @@ impl Book {
                             }
                             _ => None,
                         };
-                        self.runs.push(Run { code: code.to_string(), level, seed, kind, zone: None, start: t, last: t, inside_secs: 0, afk_secs: 0, entries: 1, deaths: 0, sub_areas: vec![], waystone, group: !self.device, completed_at: None, completed_secs: None, boss: None });
+                        self.runs.push(Run { code: code.to_string(), level, seed, kind, zone: None, start: t, last: t, inside_secs: 0, afk_secs: 0, entries: 1, deaths: 0, sub_areas: vec![], waystone, group: !self.device, opened: self.device, completed_at: None, completed_secs: None, boss: None });
                         self.device = false;
                         self.runs.len() - 1
                     }
@@ -519,6 +580,25 @@ Corrupted";
         b.area("HideoutShrine", 65, 1, 3400);
         b.party();
         assert!(!b.runs[2].group);
+    }
+
+    #[test]
+    fn shared_with_the_group() {
+        let mut b = Book::default();
+        b.area("HideoutShrine", 65, 1, 1000);
+        b.device();
+        b.area("MapCrypt", 79, 2, 1010);
+        b.death(1050);
+        assert!(b.runs[0].opened && !b.grouped_recently(1100));
+        b.party();
+        assert!(b.grouped_recently(1100) && !b.grouped_recently(1010 + 3 * 3600 + 1));
+        // Heure du log en avance d'une heure sur UTC : ramenée en UTC à l'envoi, puis à l'heure
+        // du log chez le coéquipier.
+        let (r, inside) = b.current().unwrap();
+        let p = r.presence("Juliana", inside, 3600);
+        assert_eq!((p.start, p.inside_since, p.deaths, p.opened), (1010 - 3600, Some(1010 - 3600), 1, true));
+        let back = Run::from_presence("MapCrypt", 2, &p, 3600);
+        assert_eq!((back.start, back.deaths, back.kind, back.opened), (1010, 1, RunKind::Map, false));
     }
 
     #[test]

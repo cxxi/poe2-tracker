@@ -2,12 +2,14 @@
 //! « Envoyer les erreurs ») : ses erreurs, avec la fin de son journal, et les boss des maps lus
 //! à l'écran. Les boss déjà connus de tous sont lus au démarrage, sans rien envoyer, pour ne
 //! pas relire l'écran d'une map connue. Le compte Path of Exile du joueur part toujours : les
-//! profils se lisent par compte.
+//! profils se lisent par compte. En groupe (réglage « Maps en groupe »), la map en cours part
+//! aussi, pour la voir avec les temps, morts et waystone des coéquipiers.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use poe2_shared::{Account, MapBoss, MapBosses, Report, ReportEntry, Sale};
+use poe2_shared::{Account, GroupMap, MapAt, MapBoss, MapBosses, MapSync, MapSyncReply, Report, ReportEntry, Sale};
 
 use crate::applog;
 use crate::art::USER_AGENT;
@@ -19,6 +21,12 @@ const REPORT_EVERY: Duration = Duration::from_secs(60);
 const LOG_TAIL: usize = 32 * 1024;
 /// Compte refusé ou serveur injoignable : nouvel essai au plus une fois par minute.
 const ACCOUNT_RETRY: Duration = Duration::from_secs(60);
+/// Maps en groupe : une synchro toutes les 5 secondes dans une map en groupe (pour savoir vite
+/// qui entre ou sort), toutes les 15 secondes sinon (seulement suivre les coéquipiers).
+const MAP_SYNC_INSIDE: Duration = Duration::from_secs(5);
+const MAP_SYNC_EVERY: Duration = Duration::from_secs(15);
+/// La synchro des maps échoue (déjà signalé dans le journal).
+static MAP_SYNC_FAILING: AtomicBool = AtomicBool::new(false);
 
 pub enum Event {
     /// Jeton de l'installation, à garder dans la config.
@@ -28,6 +36,8 @@ pub enum Event {
     Account { token: String, account: String },
     /// Vente enregistrée (ou retirée) par le serveur : identifiant de l'annonce, et si elle y est.
     Sale { listing: String, kept: bool },
+    /// Maps des coéquipiers : celle où l'on est, et celles qu'ils viennent de lancer.
+    Maps(Vec<GroupMap>),
 }
 
 #[derive(Default)]
@@ -36,6 +46,9 @@ pub struct Share {
     last_report: Option<Instant>,
     last_account: Option<Instant>,
     last_sale: Option<Instant>,
+    last_map_sync: Option<Instant>,
+    /// Dernière réponse de la synchro des maps en groupe (vide hors groupe).
+    pub group_maps: Vec<GroupMap>,
     /// Boss connus du serveur : code de la map → nom.
     pub bosses: MapBosses,
     fetched: bool,
@@ -53,6 +66,10 @@ impl Share {
             .filter_map(|e| match e {
                 Event::Bosses(b) => {
                     self.bosses.extend(b);
+                    None
+                }
+                Event::Maps(m) => {
+                    self.group_maps = m;
                     None
                 }
                 e => Some(e),
@@ -132,6 +149,42 @@ impl Share {
                 Err(e) => crate::log_warn!("vente {listing} non envoyée : {}", error_text(e)),
             }
         });
+    }
+
+    /// Map en cours envoyée (ou rien, pour seulement suivre les coéquipiers) ; la réponse arrive
+    /// par `poll` dans `group_maps`. Au plus une requête toutes les 5 secondes dans une map en
+    /// groupe, toutes les 15 secondes sinon.
+    pub fn map_sync(&mut self, token: String, map: Option<MapAt>) {
+        let every = if map.as_ref().is_some_and(|m| m.presence.group_secs > 0 || m.presence.inside_since.is_some()) { MAP_SYNC_INSIDE } else { MAP_SYNC_EVERY };
+        if self.last_map_sync.is_some_and(|t| t.elapsed() < every) {
+            return;
+        }
+        self.last_map_sync = Some(Instant::now());
+        let tx = self.tx();
+        std::thread::spawn(move || {
+            let Some(token) = ensure_token(token, &tx) else { return };
+            let url = format!("{}/v1/me/map-sync", server());
+            let sent = ureq::post(&url).set("User-Agent", USER_AGENT).set("Authorization", &format!("Bearer {token}")).timeout(Duration::from_secs(10)).send_json(MapSync { map });
+            match sent.map_err(|e| {
+                if matches!(e, ureq::Error::Status(401, _)) {
+                    let _ = tx.send(Event::Token(String::new()));
+                }
+                error_text(e)
+            }).and_then(|r| r.into_json::<MapSyncReply>().map_err(|e| e.to_string())) {
+                Ok(reply) => {
+                    MAP_SYNC_FAILING.store(false, Ordering::Relaxed);
+                    let _ = tx.send(Event::Maps(reply.maps));
+                }
+                // Signalé une fois par panne, pas toutes les 15 secondes.
+                Err(e) if !MAP_SYNC_FAILING.swap(true, Ordering::Relaxed) => crate::log_warn!("synchro des maps en groupe impossible : {e}"),
+                Err(_) => {}
+            }
+        });
+    }
+
+    /// Plus en groupe (ou réglage coupé) : on oublie les maps des coéquipiers.
+    pub fn stop_map_sync(&mut self) {
+        self.group_maps.clear();
     }
 
     /// Boss d'une map lu à l'écran, partagé.

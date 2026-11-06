@@ -118,6 +118,10 @@ struct Config {
     /// Objets de la boutique marqués « vendu » envoyés au serveur (prix, temps en vente), pour
     /// les estimations.
     share_sales: bool,
+    /// Maps en groupe : la map en cours partagée avec les coéquipiers (par le serveur).
+    group_maps: bool,
+    /// Grande fenêtre de la map en cours, ouverte toute seule à l'entrée dans une map.
+    map_window: bool,
     /// Compte Path of Exile du joueur (« Pseudo#1234 »), demandé au lancement s'il manque.
     account: String,
     /// Compte confirmé par le serveur pour le jeton actuel (vidé quand le jeton change).
@@ -144,6 +148,8 @@ impl Default for Config {
             shop_auto: true,
             shop_every: 15,
             share_sales: true,
+            group_maps: true,
+            map_window: true,
             account: String::new(),
             account_sent: String::new(),
         }
@@ -263,6 +269,14 @@ struct App {
     add_build: AddBuild,
     /// Case d'équipement dont le détail est ouvert (clic sur la case ou son étoile).
     slot_detail: Option<Slot>,
+    /// Case que Ctrl+Alt+C vient de mettre à jour, et quand : sa bordure dorée pulse puis s'efface.
+    equip_flash: Option<(Slot, Instant)>,
+    /// Map dont la grande fenêtre a été fermée à la main (code, seed) : elle ne revient pas pour
+    /// cette map.
+    map_closed: Option<(String, u64)>,
+    /// Temps de la map en cours pour le groupe (code, seed, secondes, heure UTC du dernier
+    /// compte, quelqu'un était dedans) : il n'avance que tant qu'au moins un joueur est dedans.
+    group_clock: Option<(String, u64, i64, i64, bool)>,
     /// Bandeaux « comparer » du diagnostic affiché (au-dessus de l'estimation).
     diag_bands: Option<DiagBands>,
     /// Ce que montre ce détail : la pièce portée face au build, ou la pièce diagnostiquée face au
@@ -382,6 +396,8 @@ struct SettingsDraft {
     shop_auto: bool,
     shop_every: u32,
     share_sales: bool,
+    group_maps: bool,
+    map_window: bool,
     account: String,
     lang: i18n::Lang,
     /// Choix du dossier du jeu en cours (fenêtre du système).
@@ -435,6 +451,8 @@ impl SettingsDraft {
             shop_auto: stored.shop_auto,
             shop_every: stored.shop_every,
             share_sales: stored.share_sales,
+            group_maps: stored.group_maps,
+            map_window: stored.map_window,
             account: stored.account.clone(),
             lang: i18n::base(),
             picking: None,
@@ -482,7 +500,7 @@ fn tier_image(ui: &mut egui::Ui, icons: &mut passive_icons::PassiveIcons, r: &ma
     let tier = r.level.checked_sub(64).filter(|t| (1..=16).contains(t) && r.kind == mapping::RunKind::Map);
     let icon = match (r.kind, tier) {
         // Arène de boss : le crâne des boss de l'Atlas.
-        (mapping::RunKind::Boss, _) => Some("art/textures/interface/2d/2dart/uiimages/ingame/atlasscreen/atlasiconcontent/atlasiconcontentmapbossspecial.dds".to_string()),
+        (mapping::RunKind::Boss, _) => Some(BOSS_ICON.to_string()),
         (_, Some(t)) => Some(format!("art/2ditems/maps/endgamemaps/endgamemap{t}.dds")),
         _ => None,
     };
@@ -500,6 +518,7 @@ fn tier_image(ui: &mut egui::Ui, icons: &mut passive_icons::PassiveIcons, r: &ma
     }
 }
 
+const BOSS_ICON: &str = "art/textures/interface/2d/2dart/uiimages/ingame/atlasscreen/atlasiconcontent/atlasiconcontentmapbossspecial.dds";
 const TOMB_ICON: &str = "art/textures/interface/2d/2dart/uiimages/ingame/partymenu/4k/partyrevivesicon.dds";
 const PORTAL_ICON: &str = "art/textures/interface/2d/2dart/uiimages/ingame/4k/worldpaneltownportalicon.dds";
 
@@ -524,6 +543,56 @@ fn time_note(r: &mapping::Run) -> &'static str {
     } else {
         tr!("Temps passé dans la map, hors repaire et AFK.")
     }
+}
+
+/// Un coéquipier qui a envoyé depuis moins d'1 min 30 est encore là où il le dit.
+fn member_live(m: &poe2_shared::MapMember, utc: i64) -> bool {
+    utc - m.updated_at < 90
+}
+
+/// Temps d'un coéquipier dans la map, présence en cours comprise (arrêtée à son dernier envoi
+/// s'il ne donne plus de nouvelles).
+fn member_secs(m: &poe2_shared::MapMember, utc: i64) -> i64 {
+    let end = if member_live(m, utc) { utc } else { m.updated_at };
+    m.presence.active_secs + m.presence.inside_since.map_or(0, |s| (end - s).max(0))
+}
+
+/// Une map vue avec le groupe : notre part (`mine` : temps et dedans, si l'on y est) et celle
+/// des coéquipiers reçue du serveur.
+struct GroupView {
+    members: Vec<poe2_shared::MapMember>,
+    /// Temps de la map : le plus long des joueurs.
+    secs: i64,
+    /// Quelqu'un est dedans.
+    inside: bool,
+    deaths: u32,
+    boss: Option<String>,
+    waystone: Option<mapping::Waystone>,
+    /// Le coéquipier qui l'a lancée.
+    opener: Option<String>,
+    /// Finie chez un coéquipier.
+    done: bool,
+}
+
+fn group_view(maps: &[poe2_shared::GroupMap], run: &mapping::Run, mine: Option<(i64, bool)>, utc: i64, clock: Option<&(String, u64, i64, i64, bool)>) -> GroupView {
+    let members: Vec<poe2_shared::MapMember> = maps.iter().find(|g| g.code == run.code && g.seed == run.seed).map(|g| g.members.clone()).unwrap_or_default();
+    let inside = mine.is_some_and(|(_, i)| i) || members.iter().any(|m| member_live(m, utc) && m.presence.inside_since.is_some());
+    // Le temps du groupe : notre horloge, celles des coéquipiers (avancées depuis leur envoi si
+    // quelqu'un est dedans) et, à défaut, le plus long des temps de chacun.
+    let clock = clock.filter(|c| c.0 == run.code && c.1 == run.seed).map(|c| c.2 + if c.4 { (utc - c.3).max(0) } else { 0 });
+    let theirs = members.iter().map(|m| m.presence.group_secs + if inside { (utc - m.updated_at).max(0) } else { 0 });
+    let secs = members.iter().map(|m| member_secs(m, utc)).chain(mine.map(|(s, _)| s)).chain(theirs).chain(clock).max().unwrap_or(0);
+    let deaths = if mine.is_some() { run.deaths } else { 0 } + members.iter().map(|m| m.presence.deaths).sum::<u32>();
+    let waystone = run.waystone.clone().or_else(|| members.iter().find_map(|m| m.presence.waystone.as_ref()).map(|w| mapping::Waystone { name: w.name.clone(), tier: w.tier, stats: w.stats.clone(), mods: w.mods.clone(), corrupted: w.corrupted }));
+    let boss = run.boss.clone().or_else(|| members.iter().find_map(|m| m.presence.boss.clone()));
+    let opener = members.iter().find(|m| m.presence.opened).map(|m| m.presence.character.clone());
+    let done = members.iter().any(|m| m.presence.completed_at.is_some());
+    GroupView { members, secs, inside, deaths, boss, waystone, opener, done }
+}
+
+/// Ce que mesure le chrono d'une map vue avec le groupe.
+fn group_time_note(r: &mapping::Run, g: &GroupView) -> &'static str {
+    if g.members.is_empty() { time_note(r) } else { tr!("Temps de la map pour le groupe : il ne s'arrête que quand plus personne n'y est.") }
 }
 
 /// « solo » ou « en groupe », à la suite du nom de la map.
@@ -856,6 +925,9 @@ impl App {
                 _ => DetailMode::Worn,
             },
             diag_bands: None,
+            equip_flash: None,
+            map_closed: None,
+            group_clock: None,
             slot_detail: std::env::var("POE2_TRACKER_SLOT").ok().and_then(|v| Slot::ALL.into_iter().find(|s| format!("{s:?}") == v)),
             data_dir: dirs.data_dir().to_path_buf(),
             cache_dir: dirs.cache_dir().to_path_buf(),
@@ -2618,9 +2690,10 @@ impl App {
                         s.set_reported(&listing, kept);
                     }
                 }
-                share::Event::Bosses(_) => {}
+                share::Event::Bosses(_) | share::Event::Maps(_) => {}
             }
         }
+        self.sync_group();
         // Le compte part au serveur (une fois par jeton, et à chaque changement).
         if poe2_shared::valid_account(&self.stored.account) && self.stored.account_sent != self.stored.account {
             self.share.send_account(self.stored.server_token.clone(), self.stored.account.clone());
@@ -3076,6 +3149,9 @@ impl App {
                             }
                         });
                     ui.end_row();
+                    label(ui, tr!("Fenêtre de la map"), tr!("la map en cours en grand (chrono, morts, waystone, groupe), ouverte à l'entrée dans une map ; sinon, le suivi reste en bas à gauche"));
+                    on_off(ui, "map_window", &mut draft.map_window, tr!("activée"), tr!("désactivée"));
+                    ui.end_row();
 
                     section(ui, tr!("Jeu"));
                     let check = paths::check(&draft.game_dir);
@@ -3279,6 +3355,13 @@ impl App {
                     label(ui, tr!("Partager mes ventes"), tr!("les objets de ta boutique que tu marques « vendu » (objet, dernier prix, temps en vente), envoyés au serveur de poe2-tracker pour améliorer les estimations"));
                     on_off(ui, "share_sales", &mut draft.share_sales, tr!("activé"), tr!("désactivé"));
                     ui.end_row();
+                    label(
+                        ui,
+                        tr!("Maps en groupe"),
+                        tr!("en groupe, la map en cours (temps, morts, waystone, boss) part au serveur de poe2-tracker pour la suivre avec tes coéquipiers ; seuls les joueurs passés dans la même map la voient"),
+                    );
+                    on_off(ui, "group_maps", &mut draft.group_maps, tr!("activé"), tr!("désactivé"));
+                    ui.end_row();
                     section(ui, tr!("Journal"));
                     label(ui, tr!("Journal de l'app"), tr!("ce que fait l'app et ses erreurs, utile pour signaler un problème"));
                     if ui::action_button(ui, tr!("Ouvrir le journal")).clicked() {
@@ -3332,6 +3415,8 @@ impl App {
             self.stored.shop_auto = draft.shop_auto;
             self.stored.shop_every = draft.shop_every;
             self.stored.share_sales = draft.share_sales;
+            self.stored.group_maps = draft.group_maps;
+            self.stored.map_window = draft.map_window;
             // Un compte mal formé n'est pas pris : l'ancien reste.
             let account = draft.account.trim();
             if poe2_shared::valid_account(account) && account != self.stored.account {
@@ -3775,7 +3860,11 @@ impl App {
             }
             CopyKind::Equip => {
                 self.tab = views::Tab::Equipment;
-                let msg = match self.gear.equip(&it) {
+                let equipped = self.gear.equip(&it);
+                if let Equipped::Placed { slot, .. } | Equipped::AlreadyThere(slot) = equipped {
+                    self.equip_flash = Some((slot, Instant::now()));
+                }
+                let msg = match equipped {
                     Equipped::Placed { slot, replaced } => tr!(
                         "{item} suivi en {slot}{replaced}",
                         item = it.title(),
@@ -4129,39 +4218,47 @@ impl App {
         match book.current().filter(|(r, inside)| inside.is_some() || recent(r.last, 15 * 60)) {
             Some((run, inside)) => {
                 let secs = now.and_then(|n| book.live_secs(n)).unwrap_or(run.active_secs());
+                // En groupe : le temps, les morts et le boss de tous (comme la grande fenêtre).
+                let group = group_view(&self.share.group_maps, run, Some((secs, inside.is_some())), logwatch::utc_now(), self.group_clock.as_ref());
                 ui.horizontal(|ui| {
                     tier_badge(ui, &mut self.passive_icons, run, 44.0, dim);
                     ui.label(RichText::new(run_name(run)).color(ui::GOLD).size(20.0).strong());
-                    ui.label(group_label(run));
-                    if let Some(boss) = &run.boss {
+                    match &group.opener {
+                        Some(name) => ui.label(RichText::new(tr!("lancée par {name}", name)).color(dim).size(13.5)),
+                        None => ui.label(group_label(run)),
+                    };
+                    if let Some(boss) = &group.boss {
                         ui.label(RichText::new(boss).color(dim).size(13.5));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Map terminée : le chrono s'arrête sur son temps.
                         let (secs, color) = match run.completed_secs {
-                            Some(done) => (done, MAP_DONE),
-                            None if inside.is_some() => (secs, Color32::from_gray(230)),
-                            None => (secs, dim),
+                            Some(done) if group.members.is_empty() => (done, MAP_DONE),
+                            // En groupe, l'horloge du groupe s'est arrêtée à la fin.
+                            Some(_) => (group.secs, MAP_DONE),
+                            None if group.inside => (group.secs, Color32::from_gray(230)),
+                            None => (group.secs, dim),
                         };
-                        ui.label(RichText::new(clock_text(secs)).color(color).size(28.0).monospace()).on_hover_text(time_note(run));
+                        ui.label(RichText::new(clock_text(secs)).color(color).size(28.0).monospace()).on_hover_text(group_time_note(run, &group));
                     });
                 });
                 ui.horizontal(|ui| {
-                    match inside {
-                        Some(_) => ui.label(RichText::new(tr!("en cours")).color(Color32::from_rgb(110, 200, 110)).size(13.5)),
+                    if group.inside {
+                        ui.label(RichText::new(tr!("en cours")).color(Color32::from_rgb(110, 200, 110)).size(13.5));
+                    } else {
                         // Dehors après y être entré : retour en ville, le chrono est arrêté.
-                        None => ui.label(RichText::new(tr!("en pause")).color(Color32::from_rgb(230, 160, 70)).size(13.5)),
-                    };
+                        ui.label(RichText::new(tr!("en pause")).color(Color32::from_rgb(230, 160, 70)).size(13.5));
+                    }
                     if let Some(secs) = run.completed_secs {
                         ui.add_space(10.0);
                         ui.label(RichText::new(tr!("✔ terminée en {time}", time = clock_text(secs))).color(MAP_DONE).size(13.5));
                     }
                     ui.add_space(10.0);
-                    icon_count(ui, &mut self.passive_icons, TOMB_ICON, run.deaths, &trn!(run.deaths, "{n} mort", "{n} morts"), Color32::from_rgb(225, 90, 80));
+                    icon_count(ui, &mut self.passive_icons, TOMB_ICON, group.deaths, &trn!(group.deaths, "{n} mort", "{n} morts"), Color32::from_rgb(225, 90, 80));
                     ui.add_space(10.0);
                     icon_count(ui, &mut self.passive_icons, PORTAL_ICON, run.returns(), &trn!(run.returns(), "{n} retour en ville", "{n} retours en ville"), Color32::from_rgb(110, 150, 255));
                 });
-                if inside.is_some() {
+                if group.inside {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
                 }
             }
@@ -4224,6 +4321,212 @@ impl App {
                     });
                 }
             });
+        }
+    }
+
+    /// Maps en groupe : la map en cours part au serveur (heures en UTC), qui renvoie ce qu'en
+    /// savent les autres joueurs et les maps que lancent les coéquipiers. Seulement en groupe :
+    /// une map en groupe ces trois dernières heures. La fin et le boss vus par un coéquipier
+    /// valent pour nous.
+    fn sync_group(&mut self) {
+        let Some(c) = self.coach.as_mut().filter(|_| self.stored.group_maps) else {
+            self.share.stop_map_sync();
+            return;
+        };
+        let (Some(now), Some(character)) = (c.log_now(), self.character.clone()) else { return };
+        let offset = now - logwatch::utc_now();
+        let Some(book) = c.maps() else { return };
+        let grouped = book.grouped_recently(now);
+        let current = book.current().filter(|(r, inside)| inside.is_some() || now - r.last < 15 * 60);
+        let mut map = current.filter(|(r, _)| r.group || grouped).map(|(r, inside)| poe2_shared::MapAt { code: r.code.clone(), seed: r.seed, presence: r.presence(&character, inside, offset) });
+        if map.is_none() && !grouped {
+            self.share.stop_map_sync();
+            self.group_clock = None;
+            return;
+        }
+        // Horloge du groupe : elle repart du temps connu le plus long, puis avance tant que
+        // quelqu'un est dedans ; arrêtée une fois la map finie.
+        let utc = logwatch::utc_now();
+        if let Some((r, inside)) = current.filter(|(r, _)| r.group) {
+            let secs = book.live_secs(now).unwrap_or(r.active_secs());
+            let view = group_view(&self.share.group_maps, r, Some((secs, inside.is_some())), utc, self.group_clock.as_ref());
+            let running = view.inside && r.completed_at.is_none() && !view.done;
+            let mut total = view.secs;
+            // Tout le monde vient de sortir : on ne l'apprend qu'à la synchro, l'horloge a donc
+            // pu tourner quelques secondes de trop. Elle repart de la dernière sortie connue.
+            if let Some(c) = self.group_clock.as_ref().filter(|c| c.0 == r.code && c.1 == r.seed && c.4 && !running) {
+                let exits = view.members.iter().map(|m| m.presence.last).chain([r.last - offset]);
+                let end = exits.max().unwrap_or(utc).clamp(c.3, utc);
+                let known = group_view(&self.share.group_maps, r, Some((secs, false)), utc, None).secs;
+                total = known.max(c.2 + (end - c.3));
+            }
+            self.group_clock = Some((r.code.clone(), r.seed, total, utc, running));
+            if let Some(m) = &mut map {
+                m.presence.group_secs = total;
+            }
+        }
+        // Ce que les coéquipiers ont vu de notre map et pas nous : sa fin, son boss.
+        if let Some(m) = &map {
+            let here = self.share.group_maps.iter().find(|g| g.code == m.code && g.seed == m.seed);
+            let done = here.and_then(|g| g.members.iter().find_map(|x| x.presence.completed_at));
+            let boss = here.and_then(|g| g.members.iter().find_map(|x| x.presence.boss.clone()));
+            if let (Some(t), None) = (done, m.presence.completed_at) {
+                c.map_completed_at(&m.code, m.seed, t + offset);
+            }
+            if let (Some(b), None) = (boss, &m.presence.boss) {
+                c.map_boss(&m.code, m.seed, &b);
+            }
+        }
+        self.share.map_sync(self.stored.server_token.clone(), map);
+    }
+
+    /// La map en cours en grand, par-dessus toute la fenêtre : elle s'ouvre à l'entrée dans une
+    /// map (ou quand un coéquipier en lance une) et se ferme seule quand la map est terminée (ou
+    /// n'est plus en cours). Fermée à la main, elle ne revient pas pour cette map : le bloc
+    /// Mapping en bas à gauche garde le suivi. En groupe : le temps, les morts, le waystone et le
+    /// boss de tous.
+    fn map_window(&mut self, ctx: &egui::Context) {
+        if !self.stored.map_window {
+            return;
+        }
+        let Some(c) = &mut self.coach else { return };
+        let Some(now) = c.log_now() else { return };
+        let utc = logwatch::utc_now();
+        let offset = now - utc;
+        let Some(book) = c.maps() else { return };
+        let mine = book.current().filter(|(r, inside)| (inside.is_some() || now - r.last < 15 * 60) && r.completed_at.is_none());
+        let live = |m: &poe2_shared::MapMember| member_live(m, utc);
+        // La map qu'un coéquipier vient de lancer, si l'on n'est pas déjà dans une plus récente.
+        let theirs = self.share.group_maps.iter().find(|g| {
+            let running = g.members.iter().any(|m| live(m) && m.presence.inside_since.is_some() && m.presence.completed_at.is_none());
+            let newer = mine.is_none_or(|(r, inside)| inside.is_none() && (r.code != g.code || r.seed != g.seed) && g.members.iter().any(|m| m.presence.start + offset > r.last));
+            running && newer
+        });
+        let (run, my_secs, my_inside) = match (theirs, mine) {
+            (Some(g), _) => {
+                let first = g.members.iter().min_by_key(|m| m.presence.start).expect("une map a des joueurs");
+                (mapping::Run::from_presence(&g.code, g.seed, &first.presence, offset), None, false)
+            }
+            (None, Some((r, inside))) => (r.clone(), Some(book.live_secs(now).unwrap_or(r.active_secs())), inside.is_some()),
+            (None, None) => return,
+        };
+        let group = group_view(&self.share.group_maps, &run, my_secs.map(|s| (s, my_inside)), utc, self.group_clock.as_ref());
+        // Finie chez un coéquipier : la synchro la termine chez nous aussi.
+        if group.done {
+            return;
+        }
+        let key = (run.code.clone(), run.seed);
+        if self.map_closed.as_ref() == Some(&key) {
+            return;
+        }
+        let GroupView { secs, inside, ref waystone, ref opener, .. } = group;
+        // Boss : lu par l'un de nous, sinon celui déjà connu pour ce genre de map.
+        let boss = group.boss.clone().or_else(|| book.known_boss(&run.code).map(str::to_string)).or_else(|| self.share.bosses.get(&run.code).cloned());
+        let members = &group.members;
+        let dim = Color32::GRAY;
+        let width = (ctx.screen_rect().width() - 80.0).clamp(320.0, 560.0);
+        let frame = egui::Frame::window(&ctx.style())
+            .fill(Color32::from_rgb(12, 11, 10))
+            .stroke(egui::Stroke::new(1.0_f32, ui::GOLD_DIM))
+            .corner_radius(8)
+            .inner_margin(24);
+        let mut close = false;
+        let me = self.character.clone().unwrap_or_default();
+        let resp = egui::Modal::new(egui::Id::new("map_window")).backdrop_color(Color32::from_black_alpha(200)).frame(frame).show(ctx, |ui| {
+            ui.set_width(width);
+            // En-tête : la map à gauche, le chrono à droite.
+            ui.horizontal(|ui| {
+                tier_badge(ui, &mut self.passive_icons, &run, 64.0, dim);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(run_name(&run)).color(ui::GOLD).size(30.0).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(run_tier(&run)).color(Color32::LIGHT_GRAY).size(15.0));
+                        match opener {
+                            Some(name) => ui.label(RichText::new(tr!("lancée par {name}", name)).color(dim).size(15.0)),
+                            None => ui.label(group_label(&run).size(15.0)),
+                        };
+                    });
+                    if let Some(boss) = &boss {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            if let Some(tex) = self.passive_icons.get(BOSS_ICON) {
+                                ui.add(egui::Image::new((tex.id(), Vec2::splat(18.0))));
+                            }
+                            ui.label(RichText::new(boss).color(Color32::from_rgb(210, 120, 90)).size(15.0));
+                        });
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    close = ui::text_button(ui, "✕").on_hover_text(tr!("Fermer : le suivi continue en bas à gauche")).clicked();
+                    ui.add_space(18.0);
+                    ui.vertical(|ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                            let color = if inside { Color32::from_gray(235) } else { dim };
+                            ui.label(RichText::new(clock_text(secs)).color(color).size(56.0).monospace()).on_hover_text(group_time_note(&run, &group));
+                            if inside {
+                                ui.label(RichText::new(tr!("en cours")).color(Color32::from_rgb(110, 200, 110)).size(15.0));
+                            } else {
+                                ui.label(RichText::new(tr!("en pause")).color(Color32::from_rgb(230, 160, 70)).size(15.0));
+                            }
+                        });
+                    });
+                });
+            });
+            ui.add_space(14.0);
+            ui.add(egui::Separator::default().spacing(0.0));
+            ui.add_space(14.0);
+            // Corps : les joueurs (temps, morts, retours), puis le waystone.
+            {
+                ui.label(RichText::new(if members.is_empty() { tr!("JOUEUR") } else { tr!("GROUPE") }).color(ui::GOLD_DIM).size(13.0).strong());
+                ui.add_space(6.0);
+                egui::Grid::new("map_group").num_columns(4).spacing([18.0, 8.0]).show(ui, |ui| {
+                    let mut row = |ui: &mut egui::Ui, name: &str, opened: bool, here: bool, secs: i64, deaths: u32, returns: u32| {
+                        let text = RichText::new(name).color(if here { Color32::from_gray(225) } else { dim }).size(15.0);
+                        let resp = ui.label(text);
+                        if opened {
+                            resp.on_hover_text(tr!("l'a lancée"));
+                        }
+                        ui.label(RichText::new(clock_text(secs)).color(if here { Color32::from_gray(225) } else { dim }).size(15.0).monospace());
+                        ui.horizontal(|ui| icon_count(ui, &mut self.passive_icons, TOMB_ICON, deaths, &trn!(deaths, "{n} mort", "{n} morts"), Color32::from_rgb(225, 90, 80)));
+                        ui.horizontal(|ui| icon_count(ui, &mut self.passive_icons, PORTAL_ICON, returns, &trn!(returns, "{n} retour en ville", "{n} retours en ville"), Color32::from_rgb(110, 150, 255)));
+                        ui.end_row();
+                    };
+                    if let Some(s) = my_secs {
+                        row(ui, &me, run.opened, my_inside, s, run.deaths, run.returns());
+                    }
+                    for m in members {
+                        let here = member_live(m, utc) && m.presence.inside_since.is_some();
+                        row(ui, &m.presence.character, m.presence.opened, here, member_secs(m, utc), m.presence.deaths, m.presence.entries.saturating_sub(1));
+                    }
+                });
+                ui.add_space(14.0);
+                ui.add(egui::Separator::default().spacing(0.0));
+                ui.add_space(14.0);
+                ui.label(RichText::new(tr!("PIERRE DE TÉLÉPORTATION")).color(ui::GOLD_DIM).size(13.0).strong());
+                ui.add_space(6.0);
+                match waystone {
+                    Some(w) => {
+                        ui.label(RichText::new(format!("{} · T{}", gametext::name(&w.name), w.tier)).color(Color32::from_gray(225)).size(16.0));
+                        ui.add_space(2.0);
+                        waystone_lines(ui, w);
+                        if w.corrupted {
+                            ui.label(RichText::new(tr!("Corrompue")).color(Color32::from_rgb(210, 60, 60)).size(13.5));
+                        }
+                    }
+                    None if !run.opened && run.group => {
+                        ui.label(RichText::new(tr!("Map d'un autre joueur : son waystone n'est pas connu.")).color(dim).size(14.0));
+                    }
+                    None => {
+                        ui.label(RichText::new(tr!("Waystone non copié : Ctrl+C dessus avant de lancer la map pour garder ses mods.")).color(dim).size(14.0));
+                    }
+                }
+            }
+        });
+        if close || resp.should_close() {
+            self.map_closed = Some(key);
+        }
+        if inside {
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
     }
 
@@ -5072,6 +5375,28 @@ impl App {
     }
 
     /// Cases d'équipement posées sur le fond.
+    /// Bordure dorée sur la case que Ctrl+Alt+C vient de mettre à jour : deux pulsations, puis
+    /// elle s'efface. Visible même quand la pièce copiée est la même (l'image ne change pas).
+    fn flash(&mut self, ui: &egui::Ui, rect: egui::Rect, slot: Slot) {
+        const SECS: f32 = 1.8;
+        let Some((s, at)) = self.equip_flash else { return };
+        if s != slot {
+            return;
+        }
+        let t = at.elapsed().as_secs_f32();
+        if t >= SECS {
+            self.equip_flash = None;
+            return;
+        }
+        let pulse = 0.5 - 0.5 * (2.0 * std::f32::consts::TAU * t / SECS).cos();
+        let fade = 1.0 - (t / SECS).powi(3);
+        let alpha = (0.35 + 0.65 * pulse) * fade;
+        let p = ui.painter();
+        p.rect_stroke(rect.expand(2.0), 4.0, egui::Stroke::new(3.0_f32, ui::GOLD.gamma_multiply(alpha)), egui::StrokeKind::Outside);
+        p.rect_filled(rect, 4.0, ui::GOLD.gamma_multiply(0.12 * alpha));
+        ui.ctx().request_repaint();
+    }
+
     fn equipment(&mut self, ui: &mut egui::Ui, area: egui::Rect, scale: f32, glow: &HashMap<Slot, Color32>) {
         use ui_art::Part;
         // Sans le fond du jeu, on dessine nos propres cadres.
@@ -5161,6 +5486,7 @@ impl App {
                 ui::SlotAction::None => {}
             }
             star(ui, rect, slot);
+            self.flash(ui, rect, slot);
 
         }
         // Set inactif : ses armes en petit aux extrémités (comme en jeu), avec leur propre cadre.
@@ -5192,6 +5518,7 @@ impl App {
                 ui::SlotAction::None => {}
             }
             star(ui, rect, slot);
+            self.flash(ui, rect, slot);
         }
         self.gear.set = new_set;
         if let Some(slot) = open_detail.or(clicked) {
@@ -7861,6 +8188,7 @@ impl eframe::App for App {
         self.sync_league(ctx);
         self.welcome_window(ctx);
         self.account_window(ctx);
+        self.map_window(ctx);
         self.shop_status_window(ctx);
         self.changelog_window(ctx);
         self.settings_window(ctx);
