@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.9
+
+- Logging back into your hideout or town after quitting elsewhere (from a map, or a teammate's hideout): the character was no longer recognized, and no map was tracked until the next level. It's now the last endgame character played.
+- Tree, socketed jewel picker: the jewel cards no longer overlap.
+
 ## 0.9.8
 
 - Group maps: a teammate who is already in the map when you enter it is now recognized (the game only logs arrivals). To find them, a map played alone is sent to the server on entry, then once a minute.

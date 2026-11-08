@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.9.9
+
+- Reconnexion dans son repaire ou en ville après avoir quitté ailleurs (depuis une map, ou le repaire d'un coéquipier) : le personnage n'était plus reconnu, et plus aucune map n'était suivie jusqu'au prochain niveau. C'est maintenant le dernier personnage d'endgame joué.
+- Arbre, choix du joyau serti : les cartes des joyaux ne se chevauchent plus.
+
 ## 0.9.8
 
 - Maps en groupe : un coéquipier déjà dans la map quand tu y entres est maintenant reconnu (le jeu n'écrit que les arrivées). Pour le trouver, une map jouée seule part au serveur à l'entrée puis une fois par minute.

@@ -510,13 +510,12 @@ impl Coach {
                 if self.awaiting_login {
                     // Connexion : le jeu replace le personnage dans sa dernière zone.
                     self.awaiting_login = false;
-                    let guess = self
-                        .state
-                        .characters
-                        .iter()
-                        .filter(|(_, c)| c.last_area.as_deref() == Some(code))
-                        .max_by_key(|(_, c)| c.last_seen)
-                        .map(|(n, _)| n.clone());
+                    let latest = |same: &dyn Fn(&str) -> bool| self.state.characters.iter().filter(|(_, c)| c.last_area.as_deref().is_some_and(same)).max_by_key(|(_, c)| c.last_seen).map(|(n, _)| n.clone());
+                    // Reconnecté dans un repaire ou en ville sans y avoir quitté : sorti d'une map
+                    // ou du repaire d'un autre, le jeu ramène chez soi. Le dernier personnage
+                    // d'endgame joué, alors.
+                    let endgame = |area: &str| crate::mapping::place(area) != crate::mapping::Place::Campaign;
+                    let guess = latest(&|area| area == code).or_else(|| if crate::mapping::place(code) == crate::mapping::Place::Safe { latest(&endgame) } else { None });
                     self.attributing = guess.is_some();
                     match guess {
                         Some(name) => {
@@ -827,5 +826,24 @@ mod tests {
         assert!(!c.confirmed);
         let out = c.handle(&Event::Received { character: Some("Juliana".into()), text: "+30 to [Spirit|Spirit].".into() });
         assert!(c.confirmed && out[0].head.contains("confirmé"));
+    }
+
+    #[test]
+    fn login_home_after_leaving_elsewhere() {
+        let mut c = coach();
+        c.handle(&Event::Session);
+        c.handle(&Event::Area { code: "G1_town".into(), level: 15, act: Some(1), seed: 1, time: 0 });
+        c.handle(&Event::Level { character: "Bob".into(), class: "Monk".into(), level: 5 }); // Bob, en campagne
+        c.handle(&Event::Session);
+        c.handle(&Event::Area { code: "HideoutShoreline".into(), level: 65, act: None, seed: 1, time: 0 });
+        c.handle(&level(83)); // Juliana, partie depuis le repaire d'un coéquipier
+        // Reconnexion dans son propre repaire : Juliana probable, et ses maps sont suivies.
+        c.handle(&Event::Session);
+        c.handle(&Event::Area { code: "HideoutShrine".into(), level: 65, act: None, seed: 1, time: 0 });
+        assert!(c.attributing && c.character().unwrap().0 == "Juliana");
+        // En campagne, un endroit jamais vu ne désigne personne.
+        c.handle(&Event::Session);
+        c.handle(&Event::Area { code: "G1_5".into(), level: 10, act: Some(1), seed: 1, time: 0 });
+        assert!(!c.attributing);
     }
 }

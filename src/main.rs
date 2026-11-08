@@ -5317,9 +5317,11 @@ impl App {
                         if card.hovered() && !*here {
                             ui.painter().rect_stroke(card.rect.shrink(1.0), 4.0, egui::Stroke::new(1.0_f32, ui::GOLD), egui::StrokeKind::Inside);
                         }
-                        // Ne plus suivre ce joyau : posé après la carte, pour garder son clic.
+                        // Ne plus suivre ce joyau : posé après la carte, pour garder son clic, dans
+                        // une Ui à part (`put` avancerait le curseur : la carte suivante chevaucherait).
                         let close = egui::Rect::from_min_size(card.rect.right_top() + Vec2::new(-30.0, 6.0), Vec2::splat(24.0));
-                        if ui.put(close, egui::Button::new(RichText::new("✕").color(Color32::GRAY)).frame(false)).on_hover_text(tr!("Ne plus suivre ce joyau")).clicked() {
+                        let mut over = ui.new_child(egui::UiBuilder::new().max_rect(close).layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)));
+                        if over.add(egui::Button::new(RichText::new("✕").color(Color32::GRAY)).frame(false)).on_hover_text(tr!("Ne plus suivre ce joyau")).clicked() {
                             untrack = Some(k);
                         } else if card.clicked() {
                             chosen = Some(Some(k));
