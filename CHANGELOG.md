@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.9.10
+
+- Équipement : les châsses de l'armure de torse sont côte à côte, comme en jeu.
+- Boutique, historique : classé du plus récent au plus ancien (un clic sur « resté en vente » ou « prix » trie toujours par cette colonne).
+
 ## 0.9.9
 
 - Reconnexion dans son repaire ou en ville après avoir quitté ailleurs (depuis une map, ou le repaire d'un coéquipier) : le personnage n'était plus reconnu, et plus aucune map n'était suivie jusqu'au prochain niveau. C'est maintenant le dernier personnage d'endgame joué.

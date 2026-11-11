@@ -392,15 +392,24 @@ pub struct SocketView {
     pub ghosts: Vec<Option<TextureHandle>>,
     /// Fiche de chaque augment posé (même ordre que `filled`), au survol de sa châsse.
     pub tips: Vec<RuneLine>,
+    /// Châsses côte à côte (armure de torse, comme en jeu), sinon les unes sous les autres.
+    pub row: bool,
 }
 
-/// Centre et rayon de chaque châsse d'une case, les unes sous les autres au milieu de l'image.
+/// Centre et rayon de chaque châsse d'une case, les unes sous les autres au milieu de l'image
+/// (ou côte à côte pour une armure de torse).
 fn socket_circles(rect: Rect, v: &SocketView) -> Vec<(Pos2, f32)> {
     let n = v.filled.len() + v.unknown.len() + v.empty;
     if n == 0 {
         return vec![];
     }
     // Un écart entre châsses d'un quart de leur taille.
+    if v.row {
+        let size = (rect.height() * 0.34).min(rect.width() * 0.9 / (n as f32 * 1.25)).min(52.0);
+        let step = size * 1.25;
+        let left = rect.center().x - step * n as f32 / 2.0 + step / 2.0;
+        return (0..n).map(|i| (Pos2::new(left + i as f32 * step, rect.center().y), size / 2.0)).collect();
+    }
     let size = (rect.width() * 0.34).min(rect.height() * 0.8 / (n as f32 * 1.25)).min(52.0);
     let step = size * 1.25;
     let top = rect.center().y - step * n as f32 / 2.0 + step / 2.0;

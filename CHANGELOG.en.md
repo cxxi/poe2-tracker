@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.10
+
+- Equipment: body armour sockets sit side by side, as in game.
+- Shop, history: sorted from most recent to oldest (clicking "was listed for" or "price" still sorts by that column).
+
 ## 0.9.9
 
 - Logging back into your hideout or town after quitting elsewhere (from a map, or a teammate's hideout): the character was no longer recognized, and no map was tracked until the next level. It's now the last endgame character played.

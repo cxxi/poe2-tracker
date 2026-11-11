@@ -323,6 +323,8 @@ struct App {
     shop_error: Option<String>,
     /// Tri de la boutique (colonne, décroissant), vue affichée et filtre de l'historique.
     shop_sort: (ShopSort, bool),
+    /// Tri de l'historique choisi au clic ; sans choix, du plus récent au plus ancien.
+    shop_history_sort: Option<(ShopSort, bool)>,
     shop_view: ShopView,
     shop_filter: Option<shop::Status>,
     /// Recherche de l'historique, et annonce dont la fenêtre « vendu / retiré » est ouverte.
@@ -685,12 +687,15 @@ enum ShopSort {
 
 /// Titres des colonnes de la boutique, au-dessus des lignes ; « depuis » et « prix » trient au
 /// clic (la colonne du tri en cours porte sa flèche). Rend la colonne cliquée.
-fn shop_columns(ui: &mut egui::Ui, since: &str, sort: (ShopSort, bool), actions: bool) -> Option<ShopSort> {
+fn shop_columns(ui: &mut egui::Ui, since: &str, sort: Option<(ShopSort, bool)>, actions: bool) -> Option<ShopSort> {
     let style = |t: &str, on: bool| RichText::new(t).color(if on { ui::GOLD } else { ui::GOLD_DIM }).size(11.5).strong();
     let mut clicked = None;
     let mut sortable = |ui: &mut egui::Ui, text: &str, col: ShopSort| {
-        let on = sort.0 == col;
-        let arrow = if !on { "" } else if sort.1 { " ▼" } else { " ▲" };
+        let on = sort.is_some_and(|s| s.0 == col);
+        let arrow = match sort {
+            Some((c, down)) if c == col => if down { " ▼" } else { " ▲" },
+            _ => "",
+        };
         let r = ui.add(egui::Label::new(style(&format!("{text}{arrow}"), on)).sense(egui::Sense::click()));
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr!("Trier par cette colonne (clic de nouveau : inverser)")).clicked() {
             clicked = Some(col);
@@ -981,6 +986,7 @@ impl App {
             shop_error: None,
             // Les plus anciennes d'abord : celles qui ne partent pas.
             shop_sort: (ShopSort::Since, true),
+            shop_history_sort: None,
             // Développement : la vue « à classer » d'office (POE2_TRACKER_SHOP=tosort, ou history).
             shop_view: match std::env::var("POE2_TRACKER_SHOP").as_deref() {
                 Ok("tosort") => ShopView::ToSort,
@@ -2245,7 +2251,7 @@ impl App {
             .collect();
         let ghosts = missing.iter().take(s.empty()).map(|n| self.assets.texture_by_name_gray(n)).collect();
         let tips = s.augments.iter().map(|n| self.rune_line(n.clone(), String::new(), Some(&it.item_class))).collect();
-        Some(ui::SocketView { filled, empty: s.empty(), unknown: s.unknown, ghosts, tips })
+        Some(ui::SocketView { filled, empty: s.empty(), unknown: s.unknown, ghosts, tips, row: slot == Slot::Body })
     }
 
     fn compare(&self, it: &Item) -> Option<compare::Comparison> {
@@ -6338,8 +6344,8 @@ impl App {
             }
         };
         // Tri choisi : par durée en vente ou par prix (en exalts ; sans cours, à la fin).
-        let sort = self.shop_sort;
-        {
+        let sort = if view == ShopView::History { self.shop_history_sort } else { Some(self.shop_sort) };
+        if let Some(sort) = sort {
             let data = self.prices.data.lock().unwrap();
             let ex = |e: &shop::Entry| e.price().and_then(|p| data.as_ref()?.listing_to_ex(p.amount, &p.currency));
             rows.sort_by(|a, b| {
@@ -6349,6 +6355,8 @@ impl App {
                 };
                 if sort.1 { o.reverse() } else { o }
             });
+        } else {
+            rows.sort_by_key(|e| std::cmp::Reverse(e.gone_at));
         }
         let mut sort_by: Option<ShopSort> = None;
         let mut refresh = false;
@@ -6498,7 +6506,15 @@ impl App {
         }
         // Même colonne : ordre inversé ; autre colonne : du plus grand au plus petit.
         if let Some(col) = sort_by {
-            self.shop_sort = if self.shop_sort.0 == col { (col, !self.shop_sort.1) } else { (col, true) };
+            let toggle = |s: Option<(ShopSort, bool)>| match s {
+                Some((c, down)) if c == col => (col, !down),
+                _ => (col, true),
+            };
+            if view == ShopView::History {
+                self.shop_history_sort = Some(toggle(self.shop_history_sort));
+            } else {
+                self.shop_sort = toggle(Some(self.shop_sort));
+            }
         }
         if let Some((id, s)) = status {
             if let Some(shop) = &mut self.shop {
