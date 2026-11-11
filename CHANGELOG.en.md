@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.11
+
+- Menu: "Check for updates", to look for one right away without waiting for the automatic check.
+- Map window: it no longer opens when the app starts during a map already in progress (tracking stays at the bottom left).
+
 ## 0.9.10
 
 - Equipment: body armour sockets sit side by side, as in game.

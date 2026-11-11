@@ -1,5 +1,10 @@
 # Nouveautés
 
+## 0.9.11
+
+- Menu : « Rechercher une mise à jour », pour la chercher tout de suite sans attendre la recherche automatique.
+- Fenêtre de la map : elle ne s'ouvre plus au lancement de l'app pour une map déjà en cours (le suivi reste en bas à gauche).
+
 ## 0.9.10
 
 - Équipement : les châsses de l'armure de torse sont côte à côte, comme en jeu.

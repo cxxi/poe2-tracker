@@ -38,6 +38,10 @@ pub struct Updater {
     state: Arc<Mutex<State>>,
     /// Recherche automatique activée (réglage).
     enabled: Arc<AtomicBool>,
+    /// Recherche demandée depuis le menu : en cours, puis son résultat (la version trouvée, ou
+    /// aucune), relevé une fois par `take_checked`.
+    checking: Arc<AtomicBool>,
+    checked: Arc<Mutex<Option<Result<Option<String>, String>>>>,
 }
 
 /// "0.10.2" > "0.9.7" : comparaison numérique, partie par partie.
@@ -108,6 +112,8 @@ impl Updater {
         let updater = Updater {
             state: Arc::new(Mutex::new(State::UpToDate)),
             enabled: Arc::new(AtomicBool::new(enabled)),
+            checking: Arc::default(),
+            checked: Arc::default(),
         };
         if std::env::var_os("POE2_TRACKER_NO_UPDATE").is_some() {
             return updater;
@@ -141,6 +147,35 @@ impl Updater {
         if !on && matches!(*state, State::Available { .. } | State::Failed(_)) {
             *state = State::UpToDate;
         }
+    }
+
+    /// Recherche tout de suite une nouvelle version (menu), même la recherche automatique coupée.
+    pub fn check_now(&self, ctx: &egui::Context) {
+        if !matches!(self.state(), State::UpToDate | State::Failed(_) | State::Available { .. }) || self.checking.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let (shared, ctx) = (self.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let result = check();
+            if let Ok(s) = &result {
+                *shared.state.lock().unwrap() = s.clone();
+            }
+            *shared.checked.lock().unwrap() = Some(result.map(|s| match s {
+                State::Available { version, .. } => Some(version),
+                _ => None,
+            }));
+            shared.checking.store(false, Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn checking(&self) -> bool {
+        self.checking.load(Ordering::Relaxed)
+    }
+
+    /// Résultat de la dernière recherche demandée depuis le menu, une seule fois.
+    pub fn take_checked(&self) -> Option<Result<Option<String>, String>> {
+        self.checked.lock().unwrap().take()
     }
 
     pub fn state(&self) -> State {

@@ -274,6 +274,9 @@ struct App {
     /// Map dont la grande fenêtre a été fermée à la main (code, seed) : elle ne revient pas pour
     /// cette map.
     map_closed: Option<(String, u64)>,
+    /// La fenêtre de la map a déjà regardé la map en cours : au lancement de l'app, celle-ci
+    /// (quittée en pleine map) reste dans le bloc en bas à gauche.
+    map_window_primed: bool,
     /// Temps de la map en cours pour le groupe (code, seed, secondes, heure UTC du dernier
     /// compte, quelqu'un était dedans) : il n'avance que tant qu'au moins un joueur est dedans.
     group_clock: Option<(String, u64, i64, i64, bool)>,
@@ -932,6 +935,7 @@ impl App {
             diag_bands: None,
             equip_flash: None,
             map_closed: None,
+            map_window_primed: false,
             group_clock: None,
             slot_detail: std::env::var("POE2_TRACKER_SLOT").ok().and_then(|v| Slot::ALL.into_iter().find(|s| format!("{s:?}") == v)),
             data_dir: dirs.data_dir().to_path_buf(),
@@ -2561,6 +2565,12 @@ impl App {
     /// (bouton de relance seulement si ça a échoué).
     fn update_status(&mut self, ui: &mut egui::Ui) {
         use updater::State;
+        match self.updater.take_checked() {
+            Some(Ok(Some(version))) => self.say(tr!("Version {version} disponible : bouton « mettre à jour » en bas à droite", version)),
+            Some(Ok(None)) => self.say(tr!("Déjà à jour (version {version})", version = updater::VERSION)),
+            Some(Err(e)) => self.say(tr!("Recherche de mise à jour impossible : {e}", e)),
+            None => {}
+        }
         ui::gold_widgets(ui);
         match self.updater.state() {
             State::UpToDate => {
@@ -3558,6 +3568,11 @@ impl App {
                 self.assets.refresh();
                 self.say(tr!("Mise à jour des catalogues en cours (quelques secondes)").into());
             }
+            let checking = self.updater.checking();
+            let hint = if checking { tr!("recherche en cours…").to_string() } else { tr!("tu as la version {version}", version = updater::VERSION) };
+            if ui::menu_item(ui, "⬆", tr!("Rechercher une mise à jour"), &hint, !checking, false).clicked() {
+                self.updater.check_now(ui.ctx());
+            }
             if ui::menu_item(ui, "✨", tr!("Nouveautés"), &tr!("ce qui a changé jusqu'à la version {version}", version = updater::VERSION), true, false).clicked() {
                 self.changelog = Some(changelog::releases());
             }
@@ -4402,6 +4417,11 @@ impl App {
         if !self.stored.map_window {
             return;
         }
+        if self.coach.is_none() {
+            return;
+        }
+        // Map déjà en cours au lancement de l'app : pas de fenêtre, seulement pour les suivantes.
+        let launch = !std::mem::replace(&mut self.map_window_primed, true);
         let Some(c) = &mut self.coach else { return };
         let Some(now) = c.log_now() else { return };
         let utc = logwatch::utc_now();
@@ -4429,6 +4449,10 @@ impl App {
             return;
         }
         let key = (run.code.clone(), run.seed);
+        if launch {
+            self.map_closed = Some(key);
+            return;
+        }
         if self.map_closed.as_ref() == Some(&key) {
             return;
         }
