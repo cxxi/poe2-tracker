@@ -1,5 +1,9 @@
 # What's new
 
+## 0.9.12
+
+- Equipment: a global comparison button, at the right end of the tab row. On hover, every mod of the worn gear, added up, next to those of the gear the build recommends, with the usual colours (reached, partial, missing). On click, a slot-by-slot overview: the worn piece, its score, its targeted lines and the recommended piece. Clicking a slot opens its detailed comparison.
+
 ## 0.9.11
 
 - Menu: "Check for updates", to look for one right away without waiting for the automatic check.

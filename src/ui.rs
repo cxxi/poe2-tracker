@@ -1878,3 +1878,211 @@ pub fn modal<R>(ctx: &egui::Context, id: &str, title: &str, closable: bool, widt
     let (inner, close) = resp.inner;
     (inner, close || (closable && should_close))
 }
+
+/// Bouton carré de la comparaison globale, dans le style des boutons de vue : deux colonnes de
+/// lignes côte à côte (équipé, recommandé). Renvoie aussi si le pointeur est dessus, même sous
+/// une infobulle non interactive (`hovered` serait faux : egui le croirait caché).
+pub fn overview_button(ui: &mut egui::Ui, rect: Rect) -> (egui::Response, bool) {
+    let resp = ui.interact(rect, ui.id().with("gear_overview_button"), Sense::click());
+    let over = ui.rect_contains_pointer(rect);
+    if over {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let color = if over { GOLD } else { GOLD_DIM };
+    let painter = ui.painter();
+    painter.rect(rect, 4.0, Color32::from_rgba_unmultiplied(12, 11, 10, 220), Stroke::new(1.0_f32, color), StrokeKind::Inside);
+    let inner = Rect::from_center_size(rect.center(), Vec2::splat((rect.width() * 0.56).round()));
+    let gap = inner.width() * 0.16;
+    let col_w = (inner.width() - gap) / 2.0;
+    let stroke = Stroke::new((rect.width() / 20.0).clamp(1.2, 2.2), color);
+    for i in 0..2 {
+        let col = Rect::from_min_size(inner.min + Vec2::new(i as f32 * (col_w + gap), 0.0), Vec2::new(col_w, inner.height()));
+        painter.rect_stroke(col, 2.0, stroke, StrokeKind::Inside);
+        for j in 1..4 {
+            let y = col.top() + col.height() * j as f32 / 4.0;
+            let x0 = col.left() + col.width() * 0.25;
+            let x1 = col.right() - col.width() * if (i + j) % 2 == 0 { 0.25 } else { 0.4 };
+            painter.line_segment([egui::pos2(x0, y), egui::pos2(x1, y)], stroke);
+        }
+    }
+    (resp, over)
+}
+
+/// Infobulle de la comparaison globale : à gauche les mods cumulés de l'équipement porté (blanc :
+/// visés par le build, gris : non), à droite ceux que vise le build sur les mêmes cases, marqués
+/// ✓ atteint, ~ en dessous (avec la valeur portée), ✗ absent ; les écarts d'abord.
+pub fn totals_tip(ui: &mut egui::Ui, worn: &crate::compare::Totals, want: &crate::compare::Totals, step: &str, score: Option<u32>) {
+    use crate::compare::{gap, Gap};
+    let mut wanted: Vec<(Gap, &crate::compare::TotalLine)> = want.lines.iter().map(|w| (gap(worn.get(&w.template), w), w)).collect();
+    wanted.sort_by_key(|(g, _)| match g {
+        Gap::Missing => 0,
+        Gap::Partial => 1,
+        Gap::Reached => 2,
+    });
+    let mut left: Vec<(&crate::compare::TotalLine, bool)> = wanted.iter().filter_map(|(_, w)| worn.get(&w.template)).map(|l| (l, true)).collect();
+    left.extend(worn.lines.iter().filter(|l| want.get(&l.template).is_none()).map(|l| (l, false)));
+    let right: Vec<(&str, Color32, String, Option<String>)> = wanted
+        .iter()
+        .map(|(g, w)| {
+            let (mark, color) = match g {
+                Gap::Reached => ("✓", SOCKET_GOOD),
+                Gap::Partial => ("~", EMPTY_SOCKET),
+                Gap::Missing => ("✗", SOCKET_WRONG),
+            };
+            let have = (*g == Gap::Partial).then(|| worn.get(&w.template).map(|h| tr!("  (toi : {value})", value = h.value_text()))).flatten();
+            (mark, color, gametext::line(&w.text()).into_owned(), have)
+        })
+        .collect();
+    let left: Vec<(String, Color32)> = left.into_iter().map(|(l, aimed)| (gametext::line(&l.text()).into_owned(), Color32::from_gray(if aimed { 225 } else { 120 }))).collect();
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text_w = |t: &str| ui.fonts(|f| f.layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x);
+    let left_w = left.iter().map(|(t, _)| text_w(t)).fold(220.0_f32, f32::max);
+    let right_w = right.iter().map(|(m, _, t, h)| text_w(&format!("{m}  {t}{}", h.as_deref().unwrap_or_default()))).fold(220.0_f32, f32::max);
+    egui::Frame::new().inner_margin(8).show(ui, |ui| {
+        ui.set_width(left_w + right_w + 24.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tr!("COMPARAISON GLOBALE")).color(GOLD).strong());
+            if !step.is_empty() {
+                ui.label(RichText::new(step).color(Color32::GRAY).small());
+            }
+        });
+        ui.add_space(2.0);
+        egui::Grid::new("totals_tip_grid").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+            for (title, w) in [(tr!("ÉQUIPÉ · TOUTES PIÈCES"), left_w), (tr!("RECOMMANDÉ PAR LE BUILD · TOUTES PIÈCES"), right_w)] {
+                ui.allocate_ui_with_layout(egui::vec2(w, 0.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_min_width(w);
+                    ui.label(RichText::new(title).color(GOLD_DIM).small().strong());
+                });
+            }
+            ui.end_row();
+            for w in [left_w, right_w] {
+                ui.add_sized([w, 6.0], egui::Separator::default().horizontal());
+            }
+            ui.end_row();
+            ui.vertical(|ui| {
+                ui.set_min_width(left_w);
+                if left.is_empty() {
+                    ui.label(RichText::new(tr!("Aucune pièce suivie")).color(Color32::GRAY).italics());
+                }
+                for (text, color) in &left {
+                    ui.add(egui::Label::new(RichText::new(text).color(*color)).extend());
+                }
+            });
+            ui.vertical(|ui| {
+                ui.set_min_width(right_w);
+                if right.is_empty() {
+                    ui.label(RichText::new(tr!("Le build ne vise rien ici")).color(Color32::GRAY).italics());
+                }
+                for (mark, color, text, have) in &right {
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(&format!("{mark}  "), 0.0, egui::TextFormat::simple(font.clone(), *color));
+                    job.append(text, 0.0, egui::TextFormat::simple(font.clone(), *color));
+                    if let Some(h) = have {
+                        job.append(h, 0.0, egui::TextFormat::simple(font.clone(), Color32::GRAY));
+                    }
+                    ui.add(egui::Label::new(job).extend());
+                }
+            });
+            ui.end_row();
+        });
+        click_hint(ui, tr!("Clic : vue d'ensemble, case par case"), score);
+    });
+}
+
+/// Une case de la vue d'ensemble : la pièce portée (image, nom, couleur de rareté), son score et
+/// ses lignes visées (atteintes, en dessous, absentes), la pièce recommandée.
+pub struct OverviewRow {
+    pub slot: Slot,
+    pub worn: Option<(Option<TextureHandle>, String, Color32)>,
+    pub score: Option<u32>,
+    pub marks: [usize; 3],
+    pub recommended: Option<(Option<TextureHandle>, String, Color32)>,
+}
+
+/// Tableau de la vue d'ensemble : une ligne par case, cliquable. Renvoie la case cliquée.
+pub fn overview_table(ui: &mut egui::Ui, rows: &[OverviewRow]) -> Option<Slot> {
+    const ROW_H: f32 = 44.0;
+    let total = ui.available_width();
+    let (slot_w, score_w, marks_w) = (120.0, 64.0, 110.0);
+    let item_w = ((total - slot_w - score_w - marks_w - 4.0 * 12.0) / 2.0).max(160.0);
+    let widths = [slot_w, item_w, score_w, marks_w, item_w];
+    let header = |ui: &mut egui::Ui, w: f32, text: &str| {
+        ui.allocate_ui_with_layout(egui::vec2(w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_min_width(w);
+            ui.label(RichText::new(text).color(GOLD_DIM).small().strong());
+        });
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        for (w, t) in widths.iter().zip([tr!("CASE"), tr!("ÉQUIPÉ"), tr!("SCORE"), tr!("LIGNES VISÉES"), tr!("RECOMMANDÉ PAR LE BUILD")]) {
+            header(ui, *w, t);
+        }
+    });
+    let piece = |ui: &mut egui::Ui, w: f32, p: &Option<(Option<TextureHandle>, String, Color32)>, none: &str| {
+        ui.allocate_ui_with_layout(egui::vec2(w, ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_min_size(egui::vec2(w, ROW_H));
+            ui.spacing_mut().item_spacing.x = 8.0;
+            match p {
+                Some((tex, name, color)) => {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(36.0, 40.0), Sense::hover());
+                    if let Some(tex) = tex {
+                        let size = tex.size_vec2();
+                        let k = (40.0 / size.y).min(36.0 / size.x);
+                        ui.painter().image(tex.id(), Rect::from_center_size(r.center(), size * k), Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    ui.add(egui::Label::new(RichText::new(gametext::name(name)).color(*color)).truncate());
+                }
+                None => {
+                    ui.add_space(44.0);
+                    ui.label(RichText::new(none).color(Color32::GRAY).italics());
+                }
+            }
+        });
+    };
+    let mut clicked = None;
+    for (i, row) in rows.iter().enumerate() {
+        let painter = ui.painter().clone();
+        let band = painter.add(egui::Shape::Noop);
+        let shown = ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.allocate_ui_with_layout(egui::vec2(slot_w, ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_size(egui::vec2(slot_w, ROW_H));
+                ui.label(RichText::new(row.slot.place()).color(GOLD));
+            });
+            piece(ui, item_w, &row.worn, tr!("Pas suivie"));
+            ui.allocate_ui_with_layout(egui::vec2(score_w, ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_size(egui::vec2(score_w, ROW_H));
+                match row.score {
+                    Some(s) => ui.label(RichText::new(crate::i18n::percent(s)).color(score_color(s)).size(16.0).strong()),
+                    None => ui.label(RichText::new("—").color(Color32::GRAY)),
+                };
+            });
+            ui.allocate_ui_with_layout(egui::vec2(marks_w, ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_size(egui::vec2(marks_w, ROW_H));
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for (n, (mark, color)) in row.marks.iter().zip([("✓", SOCKET_GOOD), ("~", EMPTY_SOCKET), ("✗", SOCKET_WRONG)]) {
+                    if *n > 0 {
+                        ui.label(RichText::new(format!("{mark} {n}")).color(color).strong());
+                    }
+                }
+            });
+            piece(ui, item_w, &row.recommended, tr!("Rien de recommandé"));
+        });
+        let rect = shown.response.rect;
+        let resp = ui.interact(rect, ui.id().with(("overview_row", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let fill = if resp.hovered() {
+            Some(Color32::from_white_alpha(10))
+        } else if i % 2 == 1 {
+            Some(Color32::from_rgb(21, 20, 18))
+        } else {
+            None
+        };
+        if let Some(f) = fill {
+            painter.set(band, egui::Shape::rect_filled(rect.expand2(egui::vec2(6.0, 0.0)), 3.0, f));
+        }
+        if resp.on_hover_text(tr!("Clic : comparer cette case avec le build")).clicked() {
+            clicked = Some(row.slot);
+        }
+    }
+    clicked
+}

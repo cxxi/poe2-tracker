@@ -100,6 +100,15 @@ pub fn template(line: &str) -> (String, Option<f64>) {
     (NUMBER.replace_all(&line, "#").into_owned(), value)
 }
 
+/// Comme `template`, avec chaque nombre de la ligne dans l'ordre : "Adds 3 to 7 Cold Damage" ->
+/// ("Adds # to # Cold Damage", [3, 7]).
+pub fn template_values(line: &str) -> (String, Vec<f64>) {
+    let line = TAG_PAIR.replace_all(line, "$2");
+    let line = TAG.replace_all(&line, "$1");
+    let nums = NUMBER.captures_iter(&line).filter_map(|c| c[1].parse().ok()).collect();
+    (NUMBER.replace_all(&line, "#").into_owned(), nums)
+}
+
 /// Modèle de stat du trade -> identifiant, par type (explicit, implicit…).
 pub struct StatIndex {
     ids: HashMap<(String, String), String>,

@@ -269,6 +269,8 @@ struct App {
     add_build: AddBuild,
     /// Case d'équipement dont le détail est ouvert (clic sur la case ou son étoile).
     slot_detail: Option<Slot>,
+    /// Vue d'ensemble de l'équipement face au build, case par case (bouton sous les bottes).
+    gear_overview: bool,
     /// Case que Ctrl+Alt+C vient de mettre à jour, et quand : sa bordure dorée pulse puis s'efface.
     equip_flash: Option<(Slot, Instant)>,
     /// Map dont la grande fenêtre a été fermée à la main (code, seed) : elle ne revient pas pour
@@ -784,6 +786,8 @@ const SIDE_MIN: f32 = 300.0;
 const TAB_H: f32 = 34.0;
 const FEED_MIN: f32 = 300.0;
 const HISTORY_MAX: usize = 50;
+/// Cases dont les mods s'additionnent dans la comparaison globale (fioles et charmes à part).
+const TOTAL_SLOTS: [Slot; 10] = [Slot::Weapon, Slot::Offhand, Slot::Helmet, Slot::Body, Slot::Gloves, Slot::Boots, Slot::Belt, Slot::Amulet, Slot::RingLeft, Slot::RingRight];
 
 /// « Mobalytics · cold-caster-chronomancer-ky » : site et dernier élément du lien d'un build.
 fn short_source(url: &str) -> String {
@@ -937,6 +941,7 @@ impl App {
             map_closed: None,
             map_window_primed: false,
             group_clock: None,
+            gear_overview: std::env::var("POE2_TRACKER_OVERVIEW").is_ok(),
             slot_detail: std::env::var("POE2_TRACKER_SLOT").ok().and_then(|v| Slot::ALL.into_iter().find(|s| format!("{s:?}") == v)),
             data_dir: dirs.data_dir().to_path_buf(),
             cache_dir: dirs.cache_dir().to_path_buf(),
@@ -2230,6 +2235,136 @@ impl App {
         }
         let base = Some(step.base_for(slot).to_string()).filter(|b| !b.is_empty())?;
         self.assets.texture_by_name_gray(&base)
+    }
+
+    /// Mods cumulés de l'équipement porté (set d'armes affiché, sans fioles ni charmes) et ceux
+    /// que vise le build sur les mêmes cases : lignes visées, implicites de la base, mods de
+    /// l'unique recommandé, effets des runes conseillées.
+    fn gear_totals(&mut self) -> Option<(compare::Totals, compare::Totals)> {
+        let (_, step) = self.basis()?;
+        let set = self.gear.set.max(1);
+        let catalog = self.augments.get();
+        let mut worn = compare::Totals::default();
+        let mut want = compare::Totals::default();
+        for base in TOTAL_SLOTS {
+            let slot = base.in_set(set);
+            let item = self.gear.item(slot);
+            if let Some(it) = &item {
+                worn.add_worn(it, slot);
+            }
+            let mut lines: Vec<String> = Vec::new();
+            let mut base_name = step.base_for(slot).to_string();
+            let unique = self.recommended_unique(&step, slot).and_then(|u| self.coach.as_ref()?.catalog().uniques.get(&u).cloned());
+            match unique {
+                Some(t) => {
+                    lines.extend(t.implicits.iter().chain(&t.mods).cloned());
+                    base_name = t.base.clone();
+                }
+                None => {
+                    lines.extend(step.targets_for(slot).map(|t| t.line.clone()));
+                    lines.extend(catalog.as_ref().and_then(|c| c.implicits.get(&base_name).cloned()).unwrap_or_default());
+                }
+            }
+            // Effet des runes conseillées sur la pièce visée (à défaut, sur celle portée).
+            let class = catalog.as_ref().and_then(|c| c.classes.get(&base_name)).map(|(c, _)| trade::text_class(c).to_string()).or_else(|| item.as_ref().map(|it| it.item_class.clone()));
+            if let (Some(c), Some(class)) = (catalog.as_ref(), class) {
+                for r in self.recommended_runes(slot) {
+                    if let Some(e) = c.augments.iter().find(|a| a.name == r).and_then(|a| a.effect_for(&class)) {
+                        lines.extend(e.text.iter().cloned());
+                    }
+                }
+            }
+            let defences = catalog.as_ref().and_then(|c| c.defences.get(&base_name).copied());
+            want.add_wanted(slot, defences, &lines);
+        }
+        Some((worn, want))
+    }
+
+    /// Chaque case du set affiché : la pièce portée et son score, ce que recommande le build.
+    fn overview_rows(&mut self) -> Vec<ui::OverviewRow> {
+        let set = self.gear.set.max(1);
+        let step = self.basis().map(|(_, s)| s);
+        let two_handed = self.gear.two_handed();
+        let charm_slots = self.gear.charm_slots();
+        let mut rows = Vec::new();
+        for base in Slot::ALL {
+            let slot = base.in_set(set);
+            let item = self.gear.item(slot);
+            if item.is_none() {
+                if base == Slot::Offhand && two_handed {
+                    continue;
+                }
+                let charm = gear::CHARMS.iter().position(|c| *c == slot);
+                if charm.zip(charm_slots).is_some_and(|(i, open)| i >= open) {
+                    continue;
+                }
+            }
+            let card = self.build_card(item.as_ref(), slot);
+            let worn = item.as_ref().map(|it| {
+                let (title, _) = ui::item_title(it);
+                (self.assets.texture(it), title.to_string(), ui::rarity_color(it.rarity))
+            });
+            let score = item.as_ref().and_then(|it| self.worn_view(slot, it, card.as_ref()).score);
+            let count = |f: fn(&compare::Have) -> bool| card.as_ref().map_or(0, |c| c.lines.iter().filter(|(_, h)| f(h)).count());
+            let marks = if item.is_some() {
+                [count(|h| matches!(h, compare::Have::Full(_))), count(|h| matches!(h, compare::Have::Partial(_))), count(|h| matches!(h, compare::Have::Missing))]
+            } else {
+                [0; 3]
+            };
+            let recommended = match (&step, &card) {
+                (Some(s), Some(c)) => match &c.unique {
+                    Some(u) => Some((self.assets.texture_unique(u), u.clone(), ui::rarity_color(item::Rarity::Unique))),
+                    None if !c.base.is_empty() => {
+                        let rarity = self.recommended_rarity(s, slot);
+                        Some((c.image.clone(), c.base.clone(), ui::rarity_color(rarity)))
+                    }
+                    None => None,
+                },
+                _ => None,
+            };
+            rows.push(ui::OverviewRow { slot, worn, score, marks, recommended });
+        }
+        rows
+    }
+
+    /// Correspondance moyenne au build des pièces portées qui en ont une.
+    fn overview_score(rows: &[ui::OverviewRow]) -> Option<u32> {
+        let scores: Vec<u32> = rows.iter().filter_map(|r| r.score).collect();
+        (!scores.is_empty()).then(|| (scores.iter().map(|s| *s as f64).sum::<f64>() / scores.len() as f64).round() as u32)
+    }
+
+    /// Vue d'ensemble : chaque case, la pièce portée face à la recommandation ; un clic sur une
+    /// ligne ouvre le détail de la case (la vue revient quand on le ferme).
+    fn gear_overview_window(&mut self, ui: &mut egui::Ui, zone: egui::Rect) {
+        let rows = self.overview_rows();
+        let average = Self::overview_score(&rows);
+        let step = self.basis().map(|(_, s)| guide::step_text(&s.label)).unwrap_or_default();
+        let set = self.gear.set.max(1);
+        let title = tr!("Vue d'ensemble de l'équipement · Set {set}", set = if set == 2 { "II" } else { "I" });
+        let mut open = None;
+        let (_, close) = ui::zone_modal(ui, zone, "gear_overview", &title, 1000.0, |ui| {
+            ui.horizontal(|ui| {
+                if !step.is_empty() {
+                    ui.label(RichText::new(tr!("Face au build, {step}", step)).color(Color32::GRAY));
+                }
+                if let Some(s) = average {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(i18n::percent(s)).color(ui::score_color(s)).size(18.0).strong());
+                        ui.label(RichText::new(tr!("CORRESPONDANCE MOYENNE")).color(ui::GOLD_DIM).small().strong());
+                    });
+                }
+            });
+            ui.add_space(6.0);
+            if let Some(slot) = ui::overview_table(ui, &rows) {
+                open = Some(slot);
+            }
+        });
+        if let Some(slot) = open {
+            self.slot_detail = Some(slot);
+            self.detail_mode = DetailMode::Worn;
+        } else if close {
+            self.gear_overview = false;
+        }
     }
 
     /// Vue des châsses d'une pièce suivie pour la grille d'équipement.
@@ -4837,6 +4972,11 @@ impl App {
         // Détail d'une case : sur l'équipement ; ceux du diagnostic, sur n'importe quel onglet.
         // Détail d'une case : sur l'équipement. Ceux du diagnostic s'ouvrent sur toute la fenêtre
         // (voir `update`).
+        if equipment && self.gear_overview && self.slot_detail.is_none() {
+            self.gear_overview_window(ui, whole);
+        } else if !equipment {
+            self.gear_overview = false;
+        }
         if self.detail_mode == DetailMode::Worn {
             if equipment {
                 self.slot_detail(ui, whole, 1.0, 1.8);
@@ -4884,6 +5024,51 @@ impl App {
         let tabs: Vec<_> = views::Tab::ALL.iter().map(|t| (*t, t.label())).collect();
         if let Some(tab) = ui::tab_strip(ui, rect, &tabs, self.tab) {
             self.tab = tab;
+        }
+        if self.tab == views::Tab::Equipment {
+            self.overview_control(ui, rect);
+        }
+    }
+
+    /// Bouton de comparaison globale, collé à droite de la rangée d'onglets (onglet Équipement) :
+    /// au survol, les mods de tout l'équipement porté face à ceux que vise le build ; au clic, la
+    /// vue case par case.
+    fn overview_control(&mut self, ui: &mut egui::Ui, row: egui::Rect) {
+        // Même haut que les onglets (3 px sous la rangée), même écart sous lui (jusqu'au trait des
+        // onglets) qu'à sa droite.
+        const GAP: f32 = 4.0;
+        let bottom = row.bottom() - 1.0 - GAP;
+        let size = (bottom - (row.top() + 3.0)).round().max(18.0);
+        let rect = egui::Rect::from_min_size(egui::pos2(row.right() - GAP - size, bottom - size).round(), Vec2::splat(size));
+        let (button, over) = ui::overview_button(ui, rect);
+        if button.clicked() || (over && ui.input(|i| i.pointer.primary_clicked())) {
+            self.gear_overview = true;
+        }
+        // Pas d'infobulle tant que la vue d'ensemble est ouverte : sur un petit écran elle
+        // recouvrirait la fenêtre qui vient de s'ouvrir.
+        if over && !self.gear_overview {
+            let rows = self.overview_rows();
+            let score = Self::overview_score(&rows);
+            let step = self.basis().map(|(_, s)| guide::step_text(&s.label)).unwrap_or_default();
+            match self.gear_totals() {
+                // Posée à gauche du bouton, calée sur son bas. Le survol se lit sur la couche du
+                // bouton, pas sur ses widgets : quand l'infobulle le recouvre (petit écran), egui le
+                // dirait caché et elle clignoterait.
+                Some((worn, want)) => {
+                    egui::Area::new(ui.id().with("totals_tip"))
+                        .order(egui::Order::Tooltip)
+                        .interactable(false)
+                        .pivot(egui::Align2::RIGHT_BOTTOM)
+                        .fixed_pos(button.rect.left_bottom() - Vec2::new(8.0, 0.0))
+                        .constrain(true)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| ui::totals_tip(ui, &worn, &want, &step, score));
+                        });
+                }
+                None => {
+                    button.clone().on_hover_text(tr!("Comparaison globale : choisis un build pour comparer ton équipement"));
+                }
+            }
         }
     }
 

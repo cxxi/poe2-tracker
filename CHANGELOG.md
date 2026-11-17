@@ -1,5 +1,9 @@
 # Nouveautés
 
+## 0.9.12
+
+- Équipement : un bouton de comparaison globale, à droite de la rangée d'onglets. Au survol, tous les mods de l'équipement porté, additionnés, face à ceux de l'équipement conseillé par le build, avec les couleurs habituelles (atteint, partiel, manquant). Au clic, une vue d'ensemble case par case : la pièce portée, son score, ses lignes visées et la pièce recommandée. Un clic sur une case ouvre sa comparaison détaillée.
+
 ## 0.9.11
 
 - Menu : « Rechercher une mise à jour », pour la chercher tout de suite sans attendre la recherche automatique.

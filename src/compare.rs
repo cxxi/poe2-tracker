@@ -759,6 +759,153 @@ pub fn compare_at(it: &Item, gear: &Gear, build: Option<(&str, &Step)>, item_bas
     Some(Comparison { verdict, against, against_name, deltas, notes, basis })
 }
 
+/// Une ligne cumulée sur plusieurs pièces : modèle de stat, somme de chacun de ses nombres.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TotalLine {
+    pub template: String,
+    pub values: Vec<f64>,
+    /// La ligne d'origine commence par « + » (« +21 to maximum Life »).
+    plus: bool,
+}
+
+impl TotalLine {
+    /// Valeur de comparaison : la moyenne des nombres (« Adds 3 to 7 » -> 5).
+    pub fn value(&self) -> f64 {
+        if self.values.is_empty() { 0.0 } else { self.values.iter().sum::<f64>() / self.values.len() as f64 }
+    }
+
+    /// La valeur de comparaison, arrondie pour l'affichage.
+    pub fn value_text(&self) -> String {
+        let v = self.value();
+        fmt_num(if v.abs() >= 100.0 { v.round() } else { (v * 10.0).round() / 10.0 })
+    }
+
+    /// La ligne telle qu'en jeu, nombres cumulés.
+    pub fn text(&self) -> String {
+        let mut out = String::from(if self.plus { "+" } else { "" });
+        let mut values = self.values.iter();
+        for (i, part) in self.template.split('#').enumerate() {
+            if i > 0 {
+                let v = values.next().copied().unwrap_or(0.0);
+                out.push_str(&fmt_num(if v.abs() >= 100.0 { v.round() } else { (v * 10.0).round() / 10.0 }));
+            }
+            out.push_str(part);
+        }
+        out
+    }
+}
+
+/// Mods cumulés de plusieurs pièces, dans l'ordre où ils apparaissent.
+#[derive(Clone, Debug, Default)]
+pub struct Totals {
+    pub lines: Vec<TotalLine>,
+}
+
+impl Totals {
+    pub fn add(&mut self, line: &str) {
+        let (template, values) = crate::trade::template_values(line);
+        let plus = line.trim_start().starts_with('+');
+        self.add_values(template, values, plus);
+    }
+
+    fn add_values(&mut self, template: String, values: Vec<f64>, plus: bool) {
+        match self.lines.iter_mut().find(|l| l.template == template && l.values.len() == values.len()) {
+            Some(l) => l.values.iter_mut().zip(values).for_each(|(a, b)| *a += b),
+            None => self.lines.push(TotalLine { template, values, plus }),
+        }
+    }
+
+    pub fn get(&self, template: &str) -> Option<&TotalLine> {
+        self.lines.iter().find(|l| l.template == template)
+    }
+
+    /// Ajoute une pièce portée en `slot`. Sur une pièce d'armure, ses défenses comptent par leur
+    /// total (en-tête de la pièce) plutôt que par les mods locaux qui les augmentent.
+    pub fn add_worn(&mut self, it: &Item, slot: Slot) {
+        let mut local: Vec<&str> = Vec::new();
+        if armour_slot(slot) {
+            for (i, (prop, flat, incs)) in ARMOUR_DEFENCES.iter().enumerate() {
+                let have = it.props.get(*prop).copied().unwrap_or(0.0);
+                if have > 0.0 {
+                    local.push(flat);
+                    local.extend(incs.iter().copied());
+                    self.add_values(defence_template(i), vec![have], false);
+                }
+            }
+        }
+        for m in &it.mods {
+            if !local.contains(&crate::trade::template(m).0.as_str()) {
+                self.add(m);
+            }
+        }
+    }
+
+    /// Ajoute ce que le build vise en `slot` : `lines`, ses lignes (plages du jeu ramenées à leur
+    /// milieu), et `base`, les défenses du type de base visé. Sur une pièce d'armure, les défenses
+    /// visées comptent par leur total : (base + plat) × (1 + %), comme `check_targets`.
+    pub fn add_wanted(&mut self, slot: Slot, base: Option<[f64; 3]>, lines: &[String]) {
+        let lines: Vec<String> = lines.iter().map(|l| mid_ranges(l)).collect();
+        let mut local: Vec<&str> = Vec::new();
+        if let Some(base) = base.filter(|b| armour_slot(slot) && b.iter().any(|v| *v > 0.0)) {
+            let values: Vec<(String, f64)> = lines.iter().filter_map(|l| match crate::trade::template(l) {
+                (t, Some(v)) => Some((t, v)),
+                _ => None,
+            }).collect();
+            for (i, (_, flat, incs)) in ARMOUR_DEFENCES.iter().enumerate() {
+                let flat_t: f64 = values.iter().filter(|(t, _)| t == flat).map(|(_, v)| v).sum();
+                let inc_t: f64 = values.iter().filter(|(t, _)| incs.contains(&t.as_str())).map(|(_, v)| v).sum();
+                let expected = ((base[i] + flat_t) * (1.0 + inc_t / 100.0)).round();
+                if expected > 0.0 {
+                    local.push(flat);
+                    local.extend(incs.iter().copied());
+                    self.add_values(defence_template(i), vec![expected], false);
+                }
+            }
+        }
+        for l in &lines {
+            if !local.contains(&crate::trade::template(l).0.as_str()) {
+                self.add(l);
+            }
+        }
+    }
+}
+
+/// Où en est l'équipement sur une ligne cumulée visée par le build.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Gap {
+    Reached,
+    Partial,
+    Missing,
+}
+
+pub fn gap(have: Option<&TotalLine>, want: &TotalLine) -> Gap {
+    match have {
+        None => Gap::Missing,
+        Some(h) if want.values.is_empty() || h.value() + 1e-6 >= want.value() => Gap::Reached,
+        Some(h) if h.value() > 0.0 => Gap::Partial,
+        Some(_) => Gap::Missing,
+    }
+}
+
+/// Emplacements d'armure, dont les défenses s'additionnent par leur total.
+fn armour_slot(slot: Slot) -> bool {
+    matches!(slot.in_set(1), Slot::Helmet | Slot::Body | Slot::Gloves | Slot::Boots | Slot::Offhand)
+}
+
+/// Ligne cumulée des défenses d'armure (armure, évasion, bouclier d'énergie).
+fn defence_template(i: usize) -> String {
+    [tr!("# d'Armure sur les pièces d'armure"), tr!("# de Score d'Évasion sur les pièces d'armure"), tr!("# de Bouclier d'énergie sur les pièces d'armure")][i].to_string()
+}
+
+/// Plages du jeu ramenées à leur milieu : « +(80-100) to maximum Life » -> « +90 to maximum Life ».
+fn mid_ranges(line: &str) -> String {
+    static RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\)").unwrap());
+    RANGE.replace_all(line, |c: &regex::Captures| {
+        let (a, b) = (c[1].parse::<f64>().unwrap_or(0.0), c[2].parse::<f64>().unwrap_or(0.0));
+        format!("{}", ((a + b) / 2.0).round())
+    }).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,6 +913,31 @@ mod tests {
     use std::path::Path;
 
     const BETTER_GLOVES: &str = "Item Class: Gloves\nRarity: Rare\nStorm Grip\nTorn Gloves\n--------\nEnergy Shield: 40 (augmented)\n--------\nItem Level: 20\n--------\n+45 to maximum Life\n+18% to Fire Resistance\n+12% to Lightning Resistance";
+
+    #[test]
+    fn totals_add_up_pieces_and_armour_by_total() {
+        let body = item::parse("Item Class: Body Armours\nRarity: Rare\nDoom Shell\nVile Robe\n--------\nEnergy Shield: 146 (augmented)\n--------\nItem Level: 80\n--------\n+40 to maximum Energy Shield\n+69 to maximum Life\n+20% to Cold Resistance").unwrap();
+        let ring = item::parse("Item Class: Rings\nRarity: Rare\nGrim Loop\nEmerald Ring\n--------\nItem Level: 80\n--------\n+30 to maximum Life\nAdds 3 to 7 Cold Damage to Attacks").unwrap();
+        let mut worn = Totals::default();
+        worn.add_worn(&body, Slot::Body);
+        worn.add_worn(&ring, Slot::RingLeft);
+        // Le bouclier local compte par le total de la pièce, pas en plus.
+        assert!(worn.get("# to maximum Energy Shield").is_none());
+        assert_eq!(worn.get(&defence_template(2)).map(|l| l.value()), Some(146.0));
+        let life = worn.get("# to maximum Life").unwrap();
+        assert_eq!((life.value(), life.text()), (99.0, "+99 to maximum Life".to_string()));
+        assert_eq!(worn.get("Adds # to # Cold Damage to Attacks").unwrap().text(), "Adds 3 to 7 Cold Damage to Attacks");
+
+        let mut want = Totals::default();
+        want.add_wanted(Slot::Body, Some([0.0, 0.0, 100.0]), &["+(40-60) to maximum Energy Shield".into(), "+(80-100) to maximum Life".into()]);
+        want.add_wanted(Slot::RingLeft, None, &["+20% to Cold Resistance".into(), "+(30-40) to maximum Life".into()]);
+        assert_eq!(want.get(&defence_template(2)).map(|l| l.value()), Some(150.0));
+        let wanted_life = want.get("# to maximum Life").unwrap();
+        assert_eq!(wanted_life.value(), 125.0);
+        assert_eq!(gap(worn.get("# to maximum Life"), wanted_life), Gap::Partial);
+        assert_eq!(gap(worn.get("#% to Cold Resistance"), want.get("#% to Cold Resistance").unwrap()), Gap::Reached);
+        assert_eq!(gap(worn.get(&defence_template(2)), want.get(&defence_template(2)).unwrap()), Gap::Partial);
+    }
 
     fn gear_with(items: &[&str]) -> Gear {
         let mut g = Gear::load(Path::new("/nonexistent/gear.json"));
